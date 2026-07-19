@@ -96,7 +96,11 @@ func Run(configPath string) error {
 	sessionSvc := service.NewChatSessionService(db)
 	sessionCtl := controller.NewChatSessionController(sessionSvc)
 
-	router := server.NewRouter(healthHandler, userCtl, sessionCtl)
+	// 创建聊天消息业务层和控制器
+	msgSvc := service.NewChatMessageService(db)
+	msgCtl := controller.NewChatMessageController(msgSvc)
+
+	router := server.NewRouter(healthHandler, userCtl, sessionCtl, msgCtl)
 	logger.Info("application initialized", zap.String("name", "easygo-agent"))
 	return server.Run(ctx, server.DefaultConfig(), router)
 }

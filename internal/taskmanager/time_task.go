@@ -5,6 +5,8 @@ import (
 	"sync"
 	"time"
 
+	"easygo-agent/internal/platform/logger"
+
 	"go.uber.org/zap"
 )
 
@@ -12,13 +14,12 @@ const taskName = "timeTask"
 
 type TimeTask struct {
 	mu           sync.Mutex
-	log          *zap.Logger
 	lastRunTime  time.Time     // 上次执行时间
 	muteDuration time.Duration // 静默时间
 }
 
-func NewTimeTask(log *zap.Logger, muteDuration time.Duration) *TimeTask {
-	return &TimeTask{log: log, muteDuration: muteDuration}
+func NewTimeTask(muteDuration time.Duration) *TimeTask {
+	return &TimeTask{muteDuration: muteDuration}
 }
 
 // ShouldRun 判断是否已过静默时间，可以执行
@@ -33,7 +34,7 @@ func (t *TimeTask) Run(ctx context.Context) {
 	t.lastRunTime = time.Now()
 	t.mu.Unlock()
 
-	t.log.Info("register time task", zap.String("taskName", taskName))
+	logger.Info("register time task", zap.String("taskName", taskName))
 	// 打印当前时间
-	t.log.Info("current time", zap.String("time", time.Now().Format("2006-01-02 15:04:05")))
+	logger.Info("current time", zap.String("time", time.Now().Format("2006-01-02 15:04:05")))
 }

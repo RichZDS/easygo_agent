@@ -3,17 +3,14 @@ package taskmanager
 import (
 	"context"
 	"time"
-
-	"go.uber.org/zap"
 )
 
 type TaskManager struct {
-	log   *zap.Logger
 	tasks []*TimeTask // 已注册的任务列表
 }
 
-func NewTaskManager(log *zap.Logger) *TaskManager {
-	return &TaskManager{log: log}
+func NewTaskManager() *TaskManager {
+	return &TaskManager{}
 }
 
 const Tick = 100 * time.Millisecond // 100毫秒执行一次
@@ -39,7 +36,7 @@ func (t *TaskManager) Register(task *TimeTask) {
 // RegisterBuiltinTasks 注册所有内置任务（后续新增任务在此统一管理）
 func (t *TaskManager) RegisterBuiltinTasks() {
 	// 时间任务：每 10 秒执行一次
-	t.Register(NewTimeTask(t.log, 10*time.Second))
+	t.Register(NewTimeTask(10 * time.Second))
 	// TODO: 在此注册更多任务
 }
 

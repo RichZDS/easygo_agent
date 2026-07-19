@@ -9,16 +9,15 @@ import (
 	"easygo-agent/internal/response"
 
 	"github.com/gin-gonic/gin"
-	"go.uber.org/zap"
 )
 
-func NewRouter(log *zap.Logger, health *handler.HealthHandler) *gin.Engine {
+func NewRouter(health *handler.HealthHandler) *gin.Engine {
 	router := gin.New()
 	router.HandleMethodNotAllowed = true
 	router.Use(
 		middleware.RequestID(),
-		middleware.AccessLogger(log),
-		middleware.Recovery(log),
+		middleware.AccessLogger(),
+		middleware.Recovery(),
 		middleware.CORS([]string{"http://localhost:3000", "http://localhost:5173"}),
 	)
 

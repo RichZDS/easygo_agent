@@ -3,11 +3,13 @@ package middleware
 import (
 	"time"
 
+	"easygo-agent/internal/platform/logger"
+
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
 
-func AccessLogger(log *zap.Logger) gin.HandlerFunc {
+func AccessLogger() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		started := time.Now()
 		path := c.Request.URL.Path
@@ -30,11 +32,11 @@ func AccessLogger(log *zap.Logger) gin.HandlerFunc {
 
 		switch status := c.Writer.Status(); {
 		case status >= 500:
-			log.Error("http request", fields...)
+			logger.Error("http request", fields...)
 		case status >= 400:
-			log.Warn("http request", fields...)
+			logger.Warn("http request", fields...)
 		default:
-			log.Info("http request", fields...)
+			logger.Info("http request", fields...)
 		}
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"easygo-agent/internal/config"
+	"easygo-agent/internal/platform/logger"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
 	"go.uber.org/zap"
@@ -15,7 +16,7 @@ import (
 	"gorm.io/gorm"
 )
 
-func Open(ctx context.Context, cfg config.MySQL, log *zap.Logger) (*gorm.DB, error) {
+func Open(ctx context.Context, cfg config.MySQL) (*gorm.DB, error) {
 	dsnConfig := mysqldriver.NewConfig()
 	dsnConfig.User = cfg.User
 	dsnConfig.Passwd = cfg.Password
@@ -31,7 +32,7 @@ func Open(ctx context.Context, cfg config.MySQL, log *zap.Logger) (*gorm.DB, err
 	dsn := dsnConfig.FormatDSN()
 
 	db, err := gorm.Open(gormmysql.Open(dsn), &gorm.Config{
-		Logger:         newGORMLogger(log),
+		Logger:         newGORMLogger(logger.L()),
 		TranslateError: true,
 	})
 	if err != nil {
@@ -53,7 +54,7 @@ func Open(ctx context.Context, cfg config.MySQL, log *zap.Logger) (*gorm.DB, err
 		return nil, fmt.Errorf("ping mysql: %w", err)
 	}
 
-	log.Info("mysql connected",
+	logger.Info("mysql connected",
 		zap.Int("max_open_connections", cfg.MaxOpenConns),
 		zap.Int("max_idle_connections", cfg.MaxIdleConns),
 	)

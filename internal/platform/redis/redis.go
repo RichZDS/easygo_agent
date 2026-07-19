@@ -8,12 +8,13 @@ import (
 	"time"
 
 	"easygo-agent/internal/config"
+	"easygo-agent/internal/platform/logger"
 
 	redisclient "github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 )
 
-func Open(ctx context.Context, cfg config.Redis, log *zap.Logger) (*redisclient.Client, error) {
+func Open(ctx context.Context, cfg config.Redis) (*redisclient.Client, error) {
 	client := redisclient.NewClient(&redisclient.Options{
 		Addr:         net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)),
 		Password:     cfg.Password,
@@ -26,6 +27,6 @@ func Open(ctx context.Context, cfg config.Redis, log *zap.Logger) (*redisclient.
 		_ = client.Close()
 		return nil, fmt.Errorf("ping redis: %w", err)
 	}
-	log.Info("redis connected", zap.String("host", cfg.Host), zap.Int("port", cfg.Port), zap.Int("database", cfg.DB))
+	logger.Info("redis connected", zap.String("host", cfg.Host), zap.Int("port", cfg.Port), zap.Int("database", cfg.DB))
 	return client, nil
 }

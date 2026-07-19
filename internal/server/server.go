@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"time"
 
+	"easygo-agent/internal/platform/logger"
+
 	"go.uber.org/zap"
 )
 
@@ -30,7 +32,7 @@ func DefaultConfig() Config {
 	}
 }
 
-func Run(ctx context.Context, cfg Config, log *zap.Logger, handler http.Handler) error {
+func Run(ctx context.Context, cfg Config, handler http.Handler) error {
 	httpServer := &http.Server{
 		Addr:              cfg.Address,
 		Handler:           handler,
@@ -42,7 +44,7 @@ func Run(ctx context.Context, cfg Config, log *zap.Logger, handler http.Handler)
 
 	serverErr := make(chan error, 1)
 	go func() {
-		log.Info("http server started", zap.String("address", cfg.Address))
+		logger.Info("http server started", zap.String("address", cfg.Address))
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serverErr <- err
 		}
@@ -56,7 +58,7 @@ func Run(ctx context.Context, cfg Config, log *zap.Logger, handler http.Handler)
 		}
 		return nil
 	case <-ctx.Done():
-		log.Info("shutdown signal received")
+		logger.Info("shutdown signal received")
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
@@ -65,6 +67,6 @@ func Run(ctx context.Context, cfg Config, log *zap.Logger, handler http.Handler)
 		_ = httpServer.Close()
 		return fmt.Errorf("shutdown http server: %w", err)
 	}
-	log.Info("http server stopped")
+	logger.Info("http server stopped")
 	return nil
 }

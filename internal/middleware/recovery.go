@@ -1,0 +1,30 @@
+package middleware
+
+import (
+	"fmt"
+	"runtime/debug"
+
+	"easygo-agent/internal/contextx"
+	"easygo-agent/internal/errorcode"
+	"easygo-agent/internal/response"
+
+	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
+)
+
+func Recovery(log *zap.Logger) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				log.Error("panic recovered",
+					zap.String("request_id", contextx.RequestID(c.Request.Context())),
+					zap.String("panic", fmt.Sprint(recovered)),
+					zap.ByteString("stack", debug.Stack()),
+				)
+				c.Abort()
+				response.Fail(c, errorcode.New(errorcode.Internal, "服务器内部错误"))
+			}
+		}()
+		c.Next()
+	}
+}

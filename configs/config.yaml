@@ -1,0 +1,39 @@
+app:
+  name: easygo-agent
+  environment: development
+
+http:
+  address: ":8080"
+  read_header_timeout: 5s
+  read_timeout: 10s
+  write_timeout: 15s
+  idle_timeout: 60s
+  shutdown_timeout: 10s
+
+mysql:
+  dsn: "root:root@tcp(127.0.0.1:3306)/easygo_agent?charset=utf8mb4&parseTime=True&loc=Local"
+  max_open_conns: 25
+  max_idle_conns: 10
+  conn_max_lifetime: 30m
+  auto_migrate: true
+
+redis:
+  address: "127.0.0.1:6379"
+  password: ""
+  db: 0
+  dial_timeout: 5s
+  read_timeout: 3s
+  write_timeout: 3s
+
+log:
+  level: debug
+  file: logs/app.log
+  max_size_mb: 100
+  max_backups: 10
+  max_age_days: 30
+  compress: true
+
+security:
+  allowed_origins:
+    - http://localhost:3000
+    - http://localhost:5173

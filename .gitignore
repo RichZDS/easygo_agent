@@ -1,0 +1,6 @@
+configs/config.local.yaml
+configs/config.production.yaml
+logs/
+*.log
+bin/
+coverage.out

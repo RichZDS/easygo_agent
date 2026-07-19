@@ -30,7 +30,7 @@ type UpdateTitleRequest struct {
 	Title string `json:"title" binding:"required"`
 }
 
-type UpdateStatusRequest struct {
+type UpdateSessionStatusRequest struct {
 	Status uint8 `json:"status" binding:"required,min=1,max=3"`
 }
 
@@ -86,9 +86,9 @@ func (ctl *ChatSessionController) GetBySessionID(c *gin.Context) {
 
 // ListByUserID 查询某用户的所有会话
 func (ctl *ChatSessionController) ListByUserID(c *gin.Context) {
-	userID, err := strconv.ParseUint(c.Query("user_id"), 10, 64)
+	userID, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
-		response.Fail(c, errorcode.New(errorcode.InvalidParameter, "user_id 参数无效"))
+		response.Fail(c, errorcode.New(errorcode.InvalidParameter, "用户 ID 无效"))
 		return
 	}
 
@@ -129,7 +129,7 @@ func (ctl *ChatSessionController) UpdateStatus(c *gin.Context) {
 		return
 	}
 
-	var req UpdateStatusRequest
+	var req UpdateSessionStatusRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.Fail(c, errorcode.New(errorcode.InvalidParameter, "参数错误: "+err.Error()))
 		return

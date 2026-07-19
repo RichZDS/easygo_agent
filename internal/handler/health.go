@@ -11,20 +11,24 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// CheckFunc 检查函数类型
 type CheckFunc func(context.Context) error
 
 type HealthHandler struct {
 	checks map[string]CheckFunc
 }
 
+// NewHealthHandler 创建健康检查处理器
 func NewHealthHandler(checks map[string]CheckFunc) *HealthHandler {
 	return &HealthHandler{checks: checks}
 }
 
+// Live 检查服务是否存活
 func (h *HealthHandler) Live(c *gin.Context) {
 	response.Success(c, gin.H{"status": "ok"})
 }
 
+// Ready 检查服务是否准备好
 func (h *HealthHandler) Ready(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
 	defer cancel()

@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 )
 
+// Config 配置 HTTP 服务器
 type Config struct {
 	Address           string
 	ReadHeaderTimeout time.Duration
@@ -21,6 +22,7 @@ type Config struct {
 	ShutdownTimeout   time.Duration
 }
 
+// DefaultConfig 返回默认配置
 func DefaultConfig() Config {
 	return Config{
 		Address:           ":8080",
@@ -32,6 +34,7 @@ func DefaultConfig() Config {
 	}
 }
 
+// Run 启动 HTTP 服务器
 func Run(ctx context.Context, cfg Config, handler http.Handler) error {
 	httpServer := &http.Server{
 		Addr:              cfg.Address,

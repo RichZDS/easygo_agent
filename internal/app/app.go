@@ -8,11 +8,13 @@ import (
 
 	"easygo-agent/internal/agent/callback"
 	"easygo-agent/internal/config"
+	"easygo-agent/internal/controller"
 	"easygo-agent/internal/handler"
 	"easygo-agent/internal/platform/logger"
 	mysqlplatform "easygo-agent/internal/platform/mysql"
 	redisplatform "easygo-agent/internal/platform/redis"
 	"easygo-agent/internal/server"
+	"easygo-agent/internal/service"
 	"easygo-agent/internal/taskmanager"
 
 	"go.uber.org/zap"
@@ -86,7 +88,15 @@ func Run(configPath string) error {
 		"redis": func(ctx context.Context) error { return redisClient.Ping(ctx).Err() },
 	})
 
-	router := server.NewRouter(healthHandler)
+	// 创建用户业务层和控制器
+	userSvc := service.NewUserService(db)
+	userCtl := controller.NewUserController(userSvc)
+
+	// 创建聊天会话业务层和控制器
+	sessionSvc := service.NewChatSessionService(db)
+	sessionCtl := controller.NewChatSessionController(sessionSvc)
+
+	router := server.NewRouter(healthHandler, userCtl, sessionCtl)
 	logger.Info("application initialized", zap.String("name", "easygo-agent"))
 	return server.Run(ctx, server.DefaultConfig(), router)
 }

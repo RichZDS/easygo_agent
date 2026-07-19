@@ -6,16 +6,16 @@ import (
 
 	"easygo-agent/internal/errorcode"
 	"easygo-agent/internal/response"
-	"easygo-agent/internal/service"
+	"easygo-agent/internal/service/chat"
 
 	"github.com/gin-gonic/gin"
 )
 
 type ChatSessionController struct {
-	svc *service.ChatSessionService
+	svc *chat.ChatSessionService
 }
 
-func NewChatSessionController(svc *service.ChatSessionService) *ChatSessionController {
+func NewChatSessionController(svc *chat.ChatSessionService) *ChatSessionController {
 	return &ChatSessionController{svc: svc}
 }
 

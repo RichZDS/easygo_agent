@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"runtime/debug"
 
-	"easygo-agent/internal/contextx"
 	"easygo-agent/internal/errorcode"
 	"easygo-agent/internal/response"
 
@@ -17,7 +16,7 @@ func Recovery(log *zap.Logger) gin.HandlerFunc {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				log.Error("panic recovered",
-					zap.String("request_id", contextx.RequestID(c.Request.Context())),
+					zap.String("request_id", c.GetString(requestIDKey)),
 					zap.String("panic", fmt.Sprint(recovered)),
 					zap.ByteString("stack", debug.Stack()),
 				)

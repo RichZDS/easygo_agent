@@ -3,8 +3,6 @@ package middleware
 import (
 	"time"
 
-	"easygo-agent/internal/contextx"
-
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
@@ -17,7 +15,7 @@ func AccessLogger(log *zap.Logger) gin.HandlerFunc {
 		c.Next()
 
 		fields := []zap.Field{
-			zap.String("request_id", contextx.RequestID(c.Request.Context())),
+			zap.String("request_id", c.GetString(requestIDKey)),
 			zap.String("method", c.Request.Method),
 			zap.String("path", path),
 			zap.Int("status", c.Writer.Status()),

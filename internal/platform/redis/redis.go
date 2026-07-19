@@ -3,6 +3,9 @@ package redis
 import (
 	"context"
 	"fmt"
+	"net"
+	"strconv"
+	"time"
 
 	"easygo-agent/internal/config"
 
@@ -12,17 +15,17 @@ import (
 
 func Open(ctx context.Context, cfg config.Redis, log *zap.Logger) (*redisclient.Client, error) {
 	client := redisclient.NewClient(&redisclient.Options{
-		Addr:         cfg.Address,
+		Addr:         net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)),
 		Password:     cfg.Password,
 		DB:           cfg.DB,
-		DialTimeout:  cfg.DialTimeout,
-		ReadTimeout:  cfg.ReadTimeout,
-		WriteTimeout: cfg.WriteTimeout,
+		DialTimeout:  5 * time.Second,
+		ReadTimeout:  3 * time.Second,
+		WriteTimeout: 3 * time.Second,
 	})
 	if err := client.Ping(ctx).Err(); err != nil {
 		_ = client.Close()
 		return nil, fmt.Errorf("ping redis: %w", err)
 	}
-	log.Info("redis connected", zap.String("address", cfg.Address), zap.Int("database", cfg.DB))
+	log.Info("redis connected", zap.String("host", cfg.Host), zap.Int("port", cfg.Port), zap.Int("database", cfg.DB))
 	return client, nil
 }

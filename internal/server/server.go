@@ -5,13 +5,32 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-
-	"easygo-agent/internal/config"
+	"time"
 
 	"go.uber.org/zap"
 )
 
-func Run(ctx context.Context, cfg config.HTTP, log *zap.Logger, handler http.Handler) error {
+type Config struct {
+	Address           string
+	ReadHeaderTimeout time.Duration
+	ReadTimeout       time.Duration
+	WriteTimeout      time.Duration
+	IdleTimeout       time.Duration
+	ShutdownTimeout   time.Duration
+}
+
+func DefaultConfig() Config {
+	return Config{
+		Address:           ":8080",
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		ShutdownTimeout:   10 * time.Second,
+	}
+}
+
+func Run(ctx context.Context, cfg Config, log *zap.Logger, handler http.Handler) error {
 	httpServer := &http.Server{
 		Addr:              cfg.Address,
 		Handler:           handler,

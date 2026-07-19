@@ -5,8 +5,6 @@ import (
 	"errors"
 	"time"
 
-	"easygo-agent/internal/contextx"
-
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
@@ -30,19 +28,19 @@ func (l *gormLogger) LogMode(level gormlogger.LogLevel) gormlogger.Interface {
 
 func (l *gormLogger) Info(ctx context.Context, message string, args ...any) {
 	if l.level >= gormlogger.Info {
-		l.log.Info("gorm: "+message, append(requestFields(ctx), zap.Any("args", args))...)
+		l.log.Info("gorm: "+message, zap.Any("args", args))
 	}
 }
 
 func (l *gormLogger) Warn(ctx context.Context, message string, args ...any) {
 	if l.level >= gormlogger.Warn {
-		l.log.Warn("gorm: "+message, append(requestFields(ctx), zap.Any("args", args))...)
+		l.log.Warn("gorm: "+message, zap.Any("args", args))
 	}
 }
 
 func (l *gormLogger) Error(ctx context.Context, message string, args ...any) {
 	if l.level >= gormlogger.Error {
-		l.log.Error("gorm: "+message, append(requestFields(ctx), zap.Any("args", args))...)
+		l.log.Error("gorm: "+message, zap.Any("args", args))
 	}
 }
 
@@ -52,11 +50,11 @@ func (l *gormLogger) Trace(ctx context.Context, begin time.Time, fn func() (stri
 	}
 	elapsed := time.Since(begin)
 	sql, rows := fn()
-	fields := append(requestFields(ctx),
+	fields := []zap.Field{
 		zap.Duration("elapsed", elapsed),
 		zap.Int64("rows", rows),
 		zap.String("sql", sql),
-	)
+	}
 
 	switch {
 	case err != nil && !errors.Is(err, gorm.ErrRecordNotFound) && l.level >= gormlogger.Error:
@@ -66,11 +64,4 @@ func (l *gormLogger) Trace(ctx context.Context, begin time.Time, fn func() (stri
 	case l.level >= gormlogger.Info:
 		l.log.Debug("gorm query", fields...)
 	}
-}
-
-func requestFields(ctx context.Context) []zap.Field {
-	if requestID := contextx.RequestID(ctx); requestID != "" {
-		return []zap.Field{zap.String("request_id", requestID)}
-	}
-	return nil
 }

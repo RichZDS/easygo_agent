@@ -3,11 +3,12 @@ package response
 import (
 	"net/http"
 
-	"easygo-agent/internal/contextx"
 	"easygo-agent/internal/errorcode"
 
 	"github.com/gin-gonic/gin"
 )
+
+const requestIDKey = "request_id"
 
 type Body struct {
 	Code      int    `json:"code"`
@@ -38,7 +39,7 @@ func JSON(c *gin.Context, status int, code errorcode.Code, data any, message str
 	if message == "" {
 		message = code.Message
 	}
-	requestID, _ := c.Get(contextx.GinRequestIDKey)
+	requestID, _ := c.Get(requestIDKey)
 	c.JSON(status, Body{
 		Code:      code.Value,
 		Message:   message,

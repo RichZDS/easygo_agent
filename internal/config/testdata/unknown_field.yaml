@@ -1,5 +1,0 @@
-mysql:
-  dsn: "user:pass@tcp(localhost:3306)/app"
-  max_connections: 99
-redis:
-  address: "localhost:6379"

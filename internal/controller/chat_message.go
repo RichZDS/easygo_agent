@@ -8,16 +8,16 @@ import (
 	"easygo-agent/internal/errorcode"
 	"easygo-agent/internal/model"
 	"easygo-agent/internal/response"
-	"easygo-agent/internal/service"
+	"easygo-agent/internal/service/chat"
 
 	"github.com/gin-gonic/gin"
 )
 
 type ChatMessageController struct {
-	svc *service.ChatMessageService
+	svc *chat.ChatMessageService
 }
 
-func NewChatMessageController(svc *service.ChatMessageService) *ChatMessageController {
+func NewChatMessageController(svc *chat.ChatMessageService) *ChatMessageController {
 	return &ChatMessageController{svc: svc}
 }
 
@@ -91,7 +91,7 @@ func (ctl *ChatMessageController) Create(c *gin.Context) {
 		metadata = &m
 	}
 
-	msg, err := ctl.svc.CreateMessage(c.Request.Context(), &service.CreateMessageParams{
+	msg, err := ctl.svc.CreateMessage(c.Request.Context(), &chat.CreateMessageParams{
 		ChatSessionID:   req.ChatSessionID,
 		TurnID:          req.TurnID,
 		ParentMessageID: req.ParentMessageID,

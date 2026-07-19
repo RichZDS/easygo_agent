@@ -3,17 +3,34 @@ package mysql
 import (
 	"context"
 	"fmt"
+	"net"
+	"strconv"
 	"time"
 
 	"easygo-agent/internal/config"
 
+	mysqldriver "github.com/go-sql-driver/mysql"
 	"go.uber.org/zap"
-	"gorm.io/driver/mysql"
+	gormmysql "gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
 
 func Open(ctx context.Context, cfg config.MySQL, log *zap.Logger) (*gorm.DB, error) {
-	db, err := gorm.Open(mysql.Open(cfg.DSN), &gorm.Config{
+	dsnConfig := mysqldriver.NewConfig()
+	dsnConfig.User = cfg.User
+	dsnConfig.Passwd = cfg.Password
+	dsnConfig.Net = "tcp"
+	dsnConfig.Addr = net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
+	dsnConfig.DBName = cfg.Database
+	dsnConfig.Params = map[string]string{"charset": cfg.Charset}
+	dsnConfig.ParseTime = true
+	dsnConfig.Loc = time.Local
+	dsnConfig.Timeout = 5 * time.Second
+	dsnConfig.ReadTimeout = 5 * time.Second
+	dsnConfig.WriteTimeout = 5 * time.Second
+	dsn := dsnConfig.FormatDSN()
+
+	db, err := gorm.Open(gormmysql.Open(dsn), &gorm.Config{
 		Logger:         newGORMLogger(log),
 		TranslateError: true,
 	})
@@ -27,7 +44,7 @@ func Open(ctx context.Context, cfg config.MySQL, log *zap.Logger) (*gorm.DB, err
 	}
 	sqlDB.SetMaxOpenConns(cfg.MaxOpenConns)
 	sqlDB.SetMaxIdleConns(cfg.MaxIdleConns)
-	sqlDB.SetConnMaxLifetime(cfg.ConnMaxLifetime)
+	sqlDB.SetConnMaxLifetime(time.Duration(cfg.ConnMaxLifetime) * time.Second)
 
 	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()

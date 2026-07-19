@@ -8,13 +8,10 @@ import (
 
 	"easygo-agent/internal/config"
 	"easygo-agent/internal/handler"
-	"easygo-agent/internal/model"
 	"easygo-agent/internal/platform/logger"
 	mysqlplatform "easygo-agent/internal/platform/mysql"
 	redisplatform "easygo-agent/internal/platform/redis"
-	"easygo-agent/internal/repository"
 	"easygo-agent/internal/server"
-	"easygo-agent/internal/service"
 
 	"go.uber.org/zap"
 )
@@ -26,13 +23,13 @@ func Run(configPath string) error {
 	}
 
 	log, err := logger.New(logger.Config{
-		Environment: cfg.App.Env,
-		Level:       cfg.Log.Level,
-		File:        cfg.Log.File,
-		MaxSizeMB:   cfg.Log.MaxSizeMB,
-		MaxBackups:  cfg.Log.MaxBackups,
-		MaxAgeDays:  cfg.Log.MaxAgeDays,
-		Compress:    cfg.Log.Compress,
+		Environment: "development",
+		Level:       "info",
+		File:        "logs/app.log",
+		MaxSizeMB:   100,
+		MaxBackups:  10,
+		MaxAgeDays:  30,
+		Compress:    true,
 	})
 	if err != nil {
 		return fmt.Errorf("create logger: %w", err)
@@ -66,22 +63,12 @@ func Run(configPath string) error {
 		}
 	}()
 
-	if cfg.MySQL.AutoMigrate {
-		if err := db.AutoMigrate(&model.User{}); err != nil {
-			return fmt.Errorf("auto migrate models: %w", err)
-		}
-		log.Info("database migration completed")
-	}
-
-	userRepository := repository.NewUserRepository(db)
-	userService := service.NewUserService(userRepository)
-	userHandler := handler.NewUserHandler(userService)
 	healthHandler := handler.NewHealthHandler(map[string]handler.CheckFunc{
 		"mysql": sqlDB.PingContext,
 		"redis": func(ctx context.Context) error { return redisClient.Ping(ctx).Err() },
 	})
 
-	router := server.NewRouter(cfg, log, userHandler, healthHandler)
-	log.Info("application initialized", zap.String("name", cfg.App.Name), zap.String("environment", cfg.App.Env))
-	return server.Run(ctx, cfg.HTTP, log, router)
+	router := server.NewRouter(log, healthHandler)
+	log.Info("application initialized", zap.String("name", "easygo-agent"))
+	return server.Run(ctx, server.DefaultConfig(), log, router)
 }

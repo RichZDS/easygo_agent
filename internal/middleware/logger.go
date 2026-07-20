@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"easygo-agent/internal/platform/logger"
+	"easygo-agent/internal/response"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -17,7 +18,7 @@ func AccessLogger() gin.HandlerFunc {
 		c.Next()
 
 		fields := []zap.Field{
-			zap.String("request_id", c.GetString(requestIDKey)),
+			zap.String("request_id", c.GetString(response.RequestIDKey)),
 			zap.String("method", c.Request.Method),
 			zap.String("path", path),
 			zap.Int("status", c.Writer.Status()),

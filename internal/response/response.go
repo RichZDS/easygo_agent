@@ -8,7 +8,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const requestIDKey = "request_id"
+// RequestIDKey 是存储在 gin.Context 中的 request_id 的键名。
+// 由 middleware.RequestID 中间件注入，供 response 和 controller 层使用。
+const RequestIDKey = "request_id"
 
 type Body struct {
 	Code      int    `json:"code"`
@@ -39,7 +41,7 @@ func JSON(c *gin.Context, status int, code errorcode.Code, data any, message str
 	if message == "" {
 		message = code.Message
 	}
-	requestID, _ := c.Get(requestIDKey)
+	requestID, _ := c.Get(RequestIDKey)
 	c.JSON(status, Body{
 		Code:      code.Value,
 		Message:   message,

@@ -9,8 +9,9 @@ import (
 )
 
 type Config struct {
-	MySQL MySQL `yaml:"mysql"`
-	Redis Redis `yaml:"redis"`
+	MySQL  MySQL  `yaml:"mysql"`
+	Redis  Redis  `yaml:"redis"`
+	Logger Logger `yaml:"logger"`
 }
 
 type MySQL struct {
@@ -30,6 +31,16 @@ type Redis struct {
 	Port     int    `yaml:"port"`
 	Password string `yaml:"password"`
 	DB       int    `yaml:"db"`
+}
+
+type Logger struct {
+	Environment string `yaml:"environment"`
+	Level       string `yaml:"level"`
+	File        string `yaml:"file"`
+	MaxSizeMB   int    `yaml:"max_size_mb"`
+	MaxBackups  int    `yaml:"max_backups"`
+	MaxAgeDays  int    `yaml:"max_age_days"`
+	Compress    bool   `yaml:"compress"`
 }
 
 func Load(path string) (Config, error) {

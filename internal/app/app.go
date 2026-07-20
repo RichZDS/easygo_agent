@@ -8,13 +8,13 @@ import (
 
 	"easygo-agent/internal/agent/callback"
 	"easygo-agent/internal/config"
-	"easygo-agent/internal/controller"
 	"easygo-agent/internal/handler"
 	"easygo-agent/internal/platform/logger"
 	mysqlplatform "easygo-agent/internal/platform/mysql"
 	redisplatform "easygo-agent/internal/platform/redis"
 	"easygo-agent/internal/server"
 	"easygo-agent/internal/taskmanager"
+	"easygo-agent/internal/wire"
 
 	"go.uber.org/zap"
 )
@@ -27,13 +27,13 @@ func Run(configPath string) error {
 
 	// 初始化全局日志（之后任意包通过 logger.L() 使用）
 	if err := logger.Init(logger.Config{
-		Environment: "development",
-		Level:       "info",
-		File:        "logs/app.log",
-		MaxSizeMB:   100,
-		MaxBackups:  10,
-		MaxAgeDays:  30,
-		Compress:    true,
+		Environment: cfg.Logger.Environment,
+		Level:       cfg.Logger.Level,
+		File:        cfg.Logger.File,
+		MaxSizeMB:   cfg.Logger.MaxSizeMB,
+		MaxBackups:  cfg.Logger.MaxBackups,
+		MaxAgeDays:  cfg.Logger.MaxAgeDays,
+		Compress:    cfg.Logger.Compress,
 	}); err != nil {
 		return fmt.Errorf("init logger: %w", err)
 	}
@@ -87,8 +87,8 @@ func Run(configPath string) error {
 		"redis": func(ctx context.Context) error { return redisClient.Ping(ctx).Err() },
 	})
 
-	// 初始化所有 Controller（内部自动创建 Service）
-	ctls := controller.InitAll(db)
+	// 使用 Wire 依赖注入创建所有 Controller
+	ctls := wire.InitControllers(db)
 
 	router := server.NewRouter(healthHandler, ctls.User, ctls.Session, ctls.Message)
 	logger.Info("application initialized", zap.String("name", "easygo-agent"))

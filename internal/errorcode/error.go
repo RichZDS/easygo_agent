@@ -40,6 +40,11 @@ func Wrap(code Code, cause error) *Error {
 	return &Error{Code: code, Cause: cause}
 }
 
+// 创建一个错误
+func NewError(code Code, message string) *Error {
+	return &Error{Code: code, Message: message}
+}
+
 func (e *Error) Error() string {
 	message := e.Message
 	if message == "" {

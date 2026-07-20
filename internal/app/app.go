@@ -60,14 +60,13 @@ func Run(configPath string) error {
 		}
 	}()
 
-	// 创建 Redis 连接
-	redisClient, err := redisplatform.Open(ctx, cfg.Redis)
-	if err != nil {
+	// 初始化全局 Redis 连接
+	if err := redisplatform.Init(ctx, cfg.Redis); err != nil {
 		return err
 	}
 	// 关闭 Redis 连接
 	defer func() {
-		if closeErr := redisClient.Close(); closeErr != nil {
+		if closeErr := redisplatform.Close(); closeErr != nil {
 			logger.Error("close redis", zap.Error(closeErr))
 		}
 	}()
@@ -84,7 +83,7 @@ func Run(configPath string) error {
 	// 创建健康检查处理器
 	healthHandler := handler.NewHealthHandler(map[string]handler.CheckFunc{
 		"mysql": sqlDB.PingContext,
-		"redis": func(ctx context.Context) error { return redisClient.Ping(ctx).Err() },
+		"redis": func(ctx context.Context) error { return redisplatform.L().Ping(ctx).Err() },
 	})
 
 	// 初始化所有 Controller（内部自动创建 Service）

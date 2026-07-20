@@ -13,16 +13,16 @@ import (
 
 // ChatSession maps to the MySQL `chat_session` table.
 type ChatSession struct {
-	ID            uint64         `gorm:"column:id;type:bigint unsigned;primaryKey;autoIncrement" json:"id"`
-	SessionID     string         `gorm:"column:session_id;type:varchar(64);not null;uniqueIndex:uk_session_id" json:"session_id"`
-	UserID        uint64         `gorm:"column:user_id;type:bigint unsigned;not null;index:idx_user_id;index:idx_user_last_message,priority:1;index:idx_user_deleted,priority:1" json:"user_id"`
-	Title         string         `gorm:"column:title;type:varchar(255);not null;default:新对话" json:"title"`
-	Status        uint8          `gorm:"column:status;type:tinyint unsigned;not null;default:1" json:"status"`
-	LastMessageAt *time.Time     `gorm:"column:last_message_at" json:"last_message_at"`
-	MessageCount  uint32         `gorm:"column:message_count;type:int unsigned;not null;default:0" json:"message_count"`
-	CreatedAt     time.Time      `gorm:"column:created_at;not null;autoCreateTime" json:"created_at"`
-	UpdatedAt     time.Time      `gorm:"column:updated_at;not null;autoUpdateTime" json:"updated_at"`
-	DeletedAt     gorm.DeletedAt `gorm:"column:deleted_at;index:idx_user_deleted,priority:2" json:"-"`
+	ID            uint64         `gorm:"column:id;type:bigint unsigned;primaryKey;autoIncrement" json:"id"`                                                                                      // 主键 ID
+	SessionID     string         `gorm:"column:session_id;type:varchar(64);not null;uniqueIndex:uk_session_id" json:"session_id"`                                                                // 会话对外 ID
+	UserID        uint64         `gorm:"column:user_id;type:bigint unsigned;not null;index:idx_user_id;index:idx_user_last_message,priority:1;index:idx_user_deleted,priority:1" json:"user_id"` // 用户 ID
+	Title         string         `gorm:"column:title;type:varchar(255);not null;default:新对话" json:"title"`                                                                                       // 会话标题
+	Status        uint8          `gorm:"column:status;type:tinyint unsigned;not null;default:1" json:"status"`                                                                                   // 会话状态
+	LastMessageAt *time.Time     `gorm:"column:last_message_at" json:"last_message_at"`                                                                                                          // 最后消息时间
+	MessageCount  uint32         `gorm:"column:message_count;type:int unsigned;not null;default:0" json:"message_count"`                                                                         // 消息数量
+	CreatedAt     time.Time      `gorm:"column:created_at;not null;autoCreateTime" json:"created_at"`                                                                                            // 创建时间
+	UpdatedAt     time.Time      `gorm:"column:updated_at;not null;autoUpdateTime" json:"updated_at"`                                                                                            // 更新时间
+	DeletedAt     gorm.DeletedAt `gorm:"column:deleted_at;index:idx_user_deleted,priority:2" json:"-"`                                                                                           // 删除时间
 }
 
 func (ChatSession) TableName() string { return "chat_session" }

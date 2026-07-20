@@ -16,57 +16,57 @@ import (
 // ========== 枚举常量 ==========
 
 const (
-	RoleSystem    uint8 = 1
-	RoleUser      uint8 = 2
-	RoleAssistant uint8 = 3
-	RoleTool      uint8 = 4
+	RoleSystem    uint8 = 1 // 系统消息
+	RoleUser      uint8 = 2 // 用户消息
+	RoleAssistant uint8 = 3 // 助手消息
+	RoleTool      uint8 = 4 // 工具消息
 )
 
 const (
-	MessageTypeText        uint8 = 1
-	MessageTypeImage       uint8 = 2
-	MessageTypeFile        uint8 = 3
-	MessageTypeToolCall    uint8 = 4
-	MessageTypeToolResult  uint8 = 5
-	MessageTypeMultimodal  uint8 = 6
+	MessageTypeText       uint8 = 1 // 文本消息
+	MessageTypeImage      uint8 = 2 // 图片消息
+	MessageTypeFile       uint8 = 3 // 文件消息
+	MessageTypeToolCall   uint8 = 4 // 工具调用消息
+	MessageTypeToolResult uint8 = 5 // 工具结果消息
+	MessageTypeMultimodal uint8 = 6 // 多模态消息
 )
 
 const (
-	MessageStatusGenerating uint8 = 1
-	MessageStatusCompleted  uint8 = 2
-	MessageStatusFailed     uint8 = 3
-	MessageStatusCancelled  uint8 = 4
+	MessageStatusGenerating uint8 = 1 // 生成中
+	MessageStatusCompleted  uint8 = 2 // 完成
+	MessageStatusFailed     uint8 = 3 // 失败
+	MessageStatusCancelled  uint8 = 4 // 取消
 )
 
 // ========== 结构体 ==========
 
 // ChatMessage maps to the MySQL `chat_message` table.
 type ChatMessage struct {
-	ID              uint64         `gorm:"column:id;type:bigint unsigned;primaryKey;autoIncrement" json:"id"`
-	MessageID       string         `gorm:"column:message_id;type:varchar(64);not null;uniqueIndex:uk_message_id" json:"message_id"`
-	ChatSessionID   uint64         `gorm:"column:chat_session_id;type:bigint unsigned;not null;index:idx_session_created,priority:1;index:idx_session_turn,priority:1;uniqueIndex:uk_session_sequence,priority:1" json:"chat_session_id"`
-	TurnID          *string        `gorm:"column:turn_id;type:varchar(64);index:idx_session_turn,priority:2" json:"turn_id"`
-	ParentMessageID *string        `gorm:"column:parent_message_id;type:varchar(64);index:idx_parent_message" json:"parent_message_id"`
-	SequenceNo      uint32         `gorm:"column:sequence_no;type:int unsigned;not null;uniqueIndex:uk_session_sequence,priority:2" json:"sequence_no"`
-	Role            uint8          `gorm:"column:role;type:tinyint unsigned;not null" json:"role"`
-	MessageType     uint8          `gorm:"column:message_type;type:tinyint unsigned;not null;default:1" json:"message_type"`
-	Content         *string        `gorm:"column:content;type:mediumtext" json:"content"`
-	ModelName       *string        `gorm:"column:model_name;type:varchar(128)" json:"model_name"`
-	ProviderName    *string        `gorm:"column:provider_name;type:varchar(64)" json:"provider_name"`
-	ToolCallID      *string        `gorm:"column:tool_call_id;type:varchar(128)" json:"tool_call_id"`
-	ToolName        *string        `gorm:"column:tool_name;type:varchar(128)" json:"tool_name"`
-	Status          uint8          `gorm:"column:status;type:tinyint unsigned;not null;default:2" json:"status"`
-	FinishReason    *string        `gorm:"column:finish_reason;type:varchar(32)" json:"finish_reason"`
-	PromptTokens    uint32         `gorm:"column:prompt_tokens;type:int unsigned;not null;default:0" json:"prompt_tokens"`
-	CompletionTokens uint32        `gorm:"column:completion_tokens;type:int unsigned;not null;default:0" json:"completion_tokens"`
-	TotalTokens     uint32         `gorm:"column:total_tokens;type:int unsigned;not null;default:0" json:"total_tokens"`
-	RequestID       *string        `gorm:"column:request_id;type:varchar(64);index:idx_request_id" json:"request_id"`
-	ErrorCode       *string        `gorm:"column:error_code;type:varchar(64)" json:"error_code"`
-	ErrorMessage    *string        `gorm:"column:error_message;type:varchar(1000)" json:"error_message"`
-	Metadata        *JSONMap       `gorm:"column:metadata;type:json" json:"metadata"`
-	CreatedAt       time.Time      `gorm:"column:created_at;type:datetime(3);not null;autoCreateTime:milli;index:idx_session_created,priority:2" json:"created_at"`
-	UpdatedAt       time.Time      `gorm:"column:updated_at;type:datetime(3);not null;autoUpdateTime:milli" json:"updated_at"`
-	DeletedAt       gorm.DeletedAt `gorm:"column:deleted_at;type:datetime(3);index:idx_deleted_at" json:"-"`
+	ID               uint64         `gorm:"column:id;type:bigint unsigned;primaryKey;autoIncrement" json:"id"`                                                                                                                             // 主键 ID
+	MessageID        string         `gorm:"column:message_id;type:varchar(64);not null;uniqueIndex:uk_message_id" json:"message_id"`                                                                                                       // 消息对外 ID
+	ChatSessionID    uint64         `gorm:"column:chat_session_id;type:bigint unsigned;not null;index:idx_session_created,priority:1;index:idx_session_turn,priority:1;uniqueIndex:uk_session_sequence,priority:1" json:"chat_session_id"` // 会话 ID
+	TurnID           *string        `gorm:"column:turn_id;type:varchar(64);index:idx_session_turn,priority:2" json:"turn_id"`                                                                                                              // 轮次 ID
+	ParentMessageID  *string        `gorm:"column:parent_message_id;type:varchar(64);index:idx_parent_message" json:"parent_message_id"`                                                                                                   // 父消息 ID
+	SequenceNo       uint32         `gorm:"column:sequence_no;type:int unsigned;not null;uniqueIndex:uk_session_sequence,priority:2" json:"sequence_no"`                                                                                   // 消息序号
+	Role             uint8          `gorm:"column:role;type:tinyint unsigned;not null" json:"role"`                                                                                                                                        // 消息角色
+	MessageType      uint8          `gorm:"column:message_type;type:tinyint unsigned;not null;default:1" json:"message_type"`                                                                                                              // 消息类型
+	Content          *string        `gorm:"column:content;type:mediumtext" json:"content"`                                                                                                                                                 // 消息内容
+	ModelName        *string        `gorm:"column:model_name;type:varchar(128)" json:"model_name"`                                                                                                                                         // 模型名称
+	ProviderName     *string        `gorm:"column:provider_name;type:varchar(64)" json:"provider_name"`                                                                                                                                    // 提供者名称
+	ToolCallID       *string        `gorm:"column:tool_call_id;type:varchar(128)" json:"tool_call_id"`                                                                                                                                     // 工具调用 ID
+	ToolName         *string        `gorm:"column:tool_name;type:varchar(128)" json:"tool_name"`                                                                                                                                           // 工具名称
+	Status           uint8          `gorm:"column:status;type:tinyint unsigned;not null;default:2" json:"status"`                                                                                                                          // 消息状态
+	FinishReason     *string        `gorm:"column:finish_reason;type:varchar(32)" json:"finish_reason"`                                                                                                                                    // 结束原因
+	PromptTokens     uint32         `gorm:"column:prompt_tokens;type:int unsigned;not null;default:0" json:"prompt_tokens"`                                                                                                                // 提示 Token 数量
+	CompletionTokens uint32         `gorm:"column:completion_tokens;type:int unsigned;not null;default:0" json:"completion_tokens"`                                                                                                        // 完成 Token 数量
+	TotalTokens      uint32         `gorm:"column:total_tokens;type:int unsigned;not null;default:0" json:"total_tokens"`                                                                                                                  // 总 Token 数量
+	RequestID        *string        `gorm:"column:request_id;type:varchar(64);index:idx_request_id" json:"request_id"`                                                                                                                     // 请求 ID
+	ErrorCode        *string        `gorm:"column:error_code;type:varchar(64)" json:"error_code"`                                                                                                                                          // 错误代码
+	ErrorMessage     *string        `gorm:"column:error_message;type:varchar(1000)" json:"error_message"`                                                                                                                                  // 错误消息
+	Metadata         *JSONMap       `gorm:"column:metadata;type:json" json:"metadata"`                                                                                                                                                     // 元数据
+	CreatedAt        time.Time      `gorm:"column:created_at;type:datetime(3);not null;autoCreateTime:milli;index:idx_session_created,priority:2" json:"created_at"`                                                                       // 创建时间
+	UpdatedAt        time.Time      `gorm:"column:updated_at;type:datetime(3);not null;autoUpdateTime:milli" json:"updated_at"`                                                                                                            // 更新时间
+	DeletedAt        gorm.DeletedAt `gorm:"column:deleted_at;type:datetime(3);index:idx_deleted_at" json:"-"`                                                                                                                              // 删除时间
 }
 
 func (ChatMessage) TableName() string { return "chat_message" }

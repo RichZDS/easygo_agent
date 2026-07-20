@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"easygo-agent/internal/errorcode"
@@ -230,3 +231,30 @@ func (m JSONMap) Value() (driver.Value, error) {
 	}
 	return json.Marshal(m)
 }
+
+// ========== Token 估算 ==========
+
+// EstimateTokens 估算本消息的 token 消耗（基于 content 字段）。
+// 仅用于 Redis 容量截断判断，与 LLM 返回的实际 total_tokens 不同。
+func (m *ChatMessage) EstimateTokens() int {
+	if m.Content == nil {
+		return 0
+	}
+	return EstimateTokens(*m.Content)
+}
+
+// EstimateTokens 估算文本的 token 消耗。
+// 英文/ASCII 字符（r <= 127）≈ 0.3 token，中文/多字节字符 ≈ 0.6 token。
+// 使用 math.Ceil 向上取整避免零值累积导致计数偏小。
+func EstimateTokens(text string) int {
+	var tokens float64
+	for _, r := range text {
+		if r <= 127 {
+			tokens += 0.3
+		} else {
+			tokens += 0.6
+		}
+	}
+	return int(math.Ceil(tokens))
+}
+

@@ -5,8 +5,11 @@ import (
 	"time"
 
 	"easygo-agent/internal/model"
+	"easygo-agent/internal/platform/logger"
 	"easygo-agent/internal/platform/uuidgen"
+	chatcache "easygo-agent/internal/repository/chatcache"
 
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
@@ -27,16 +30,18 @@ type ChatMessageService interface {
 }
 
 type chatMessageServiceImpl struct {
-	db *gorm.DB
+	db        *gorm.DB
+	cacheRepo *chatcache.ChatCacheRepo
 }
 
-func NewChatMessageService(db *gorm.DB) ChatMessageService {
-	return &chatMessageServiceImpl{db: db}
+func NewChatMessageService(db *gorm.DB, cacheRepo *chatcache.ChatCacheRepo) ChatMessageService {
+	return &chatMessageServiceImpl{db: db, cacheRepo: cacheRepo}
 }
 
 // ========== CreateMessage 参数 ==========
 
 type CreateMessageParams struct {
+	SessionID       string  // 对外 session_id，用于 Redis key
 	ChatSessionID   uint64
 	TurnID          *string
 	ParentMessageID *string
@@ -154,7 +159,8 @@ func (s *chatMessageServiceImpl) CreateToolResult(ctx context.Context,
 	})
 }
 
-// RecordMessageAndUpdate 创建消息并同步更新会话最后消息信息
+// RecordMessageAndUpdate 创建消息并同步更新会话最后消息信息 + Redis 双写。
+// maxTokens=0 表示不裁剪（裁剪由 AgentChatService.PushMessageToCache 负责）。
 func (s *chatMessageServiceImpl) RecordMessageAndUpdate(ctx context.Context, p *CreateMessageParams) (*model.ChatMessage, error) {
 	msg, err := s.CreateMessage(ctx, p)
 	if err != nil {
@@ -162,5 +168,14 @@ func (s *chatMessageServiceImpl) RecordMessageAndUpdate(ctx context.Context, p *
 	}
 	// 更新会话最后消息时间
 	_ = model.UpdateChatSessionLastMessage(ctx, s.db, p.ChatSessionID, time.Now())
+
+	// 双写 Redis 缓存（best-effort，失败不影响主流程）
+	if s.cacheRepo != nil && p.SessionID != "" {
+		if err := s.cacheRepo.PushMessage(ctx, p.SessionID, msg, 0); err != nil {
+			// 仅日志记录，不阻塞主流程
+			logger.Warn("redis dual write failed", zap.Error(err))
+		}
+	}
+
 	return msg, nil
 }

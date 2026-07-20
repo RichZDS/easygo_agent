@@ -27,10 +27,12 @@ type MySQL struct {
 }
 
 type Redis struct {
-	Host     string `yaml:"host"`
-	Port     int    `yaml:"port"`
-	Password string `yaml:"password"`
-	DB       int    `yaml:"db"`
+	Host               string `yaml:"host"`
+	Port               int    `yaml:"port"`
+	Password           string `yaml:"password"`
+	DB                 int    `yaml:"db"`
+	CacheTTLSeconds    int    `yaml:"cache_ttl_seconds"`    // 缓存滑动过期时间（秒），默认 600
+	ContextMaxMessages int    `yaml:"context_max_messages"`  // 单次获取上下文最大消息条数，默认 50
 }
 
 type Logger struct {

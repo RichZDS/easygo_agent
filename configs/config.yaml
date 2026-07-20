@@ -14,6 +14,8 @@ redis:
   port: 1201
   password: "***REMOVED***"
   db: 0
+  cache_ttl_seconds: 600        # 缓存滑动过期时间（10 分钟）
+  context_max_messages: 50      # 每次获取上下文最大消息条数
 
 logger:
   environment: development

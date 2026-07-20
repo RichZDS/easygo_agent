@@ -154,3 +154,27 @@ func LRange(ctx context.Context, key string, start, stop int64) ([]string, error
 func LLen(ctx context.Context, key string) (int64, error) {
 	return L().LLen(ctx, key).Result()
 }
+
+// ======================== 计数/弹出 操作 ========================
+
+// IncrBy 将 key 对应的值增加 delta，返回增加后的值。
+func IncrBy(ctx context.Context, key string, delta int64) (int64, error) {
+	return L().IncrBy(ctx, key, delta).Result()
+}
+
+// DecrBy 将 key 对应的值减少 delta，返回减少后的值。
+func DecrBy(ctx context.Context, key string, delta int64) (int64, error) {
+	return L().DecrBy(ctx, key, delta).Result()
+}
+
+// LPop 从列表左侧弹出一个元素并返回。
+// 列表为空时返回 redis.Nil，调用方需用 errors.Is 判断。
+func LPop(ctx context.Context, key string) (string, error) {
+	return L().LPop(ctx, key).Result()
+}
+
+// Eval 执行 Lua 脚本。script 为脚本内容，keys 为 KEYS 数组，args 为 ARGV 数组。
+// 返回脚本的返回值（类型取决于脚本）。
+func Eval(ctx context.Context, script string, keys []string, args ...any) (any, error) {
+	return L().Eval(ctx, script, keys, args...).Result()
+}

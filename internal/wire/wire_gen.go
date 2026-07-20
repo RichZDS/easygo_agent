@@ -8,6 +8,7 @@ package wire
 
 import (
 	"easygo-agent/internal/controller"
+	"easygo-agent/internal/repository/chatcache"
 	"easygo-agent/internal/service/chat"
 	"easygo-agent/internal/service/user"
 	"gorm.io/gorm"
@@ -15,17 +16,20 @@ import (
 
 // Injectors from wire.go:
 
-func InitControllers(db *gorm.DB) *controller.AllControllers {
+func InitControllers(db *gorm.DB, cacheCfg chatcache.Config) *controller.AllControllers {
 	userService := user.NewUserService(db)
 	userController := controller.NewUserController(userService)
 	chatSessionService := chat.NewChatSessionService(db)
 	chatSessionController := controller.NewChatSessionController(chatSessionService)
-	chatMessageService := chat.NewChatMessageService(db)
+	chatCacheRepo := chatcache.NewChatCacheRepo(cacheCfg)
+	chatMessageService := chat.NewChatMessageService(db, chatCacheRepo)
 	chatMessageController := controller.NewChatMessageController(chatMessageService)
+	agentChatService := chat.NewAgentChatService(db, chatCacheRepo, chatMessageService)
 	allControllers := &controller.AllControllers{
-		User:    userController,
-		Session: chatSessionController,
-		Message: chatMessageController,
+		User:      userController,
+		Session:   chatSessionController,
+		Message:   chatMessageController,
+		AgentChat: agentChatService,
 	}
 	return allControllers
 }

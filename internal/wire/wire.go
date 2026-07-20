@@ -8,16 +8,21 @@ import (
 	"gorm.io/gorm"
 
 	"easygo-agent/internal/controller"
+	chatcache "easygo-agent/internal/repository/chatcache"
 	"easygo-agent/internal/service/chat"
 	"easygo-agent/internal/service/user"
 )
 
-func InitControllers(db *gorm.DB) *controller.AllControllers {
+func InitControllers(db *gorm.DB, cacheCfg chatcache.Config) *controller.AllControllers {
 	wire.Build(
+		// Repositories
+		chatcache.NewChatCacheRepo,
+
 		// Services
 		user.NewUserService,
 		chat.NewChatSessionService,
 		chat.NewChatMessageService,
+		chat.NewAgentChatService,
 
 		// Controllers
 		controller.NewUserController,

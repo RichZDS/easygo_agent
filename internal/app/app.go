@@ -12,6 +12,7 @@ import (
 	"easygo-agent/internal/platform/logger"
 	mysqlplatform "easygo-agent/internal/platform/mysql"
 	redisplatform "easygo-agent/internal/platform/redis"
+	chatcache "easygo-agent/internal/repository/chatcache"
 	"easygo-agent/internal/server"
 	"easygo-agent/internal/taskmanager"
 	"easygo-agent/internal/wire"
@@ -87,7 +88,10 @@ func Run(configPath string) error {
 	})
 
 	// 使用 Wire 依赖注入创建所有 Controller
-	ctls := wire.InitControllers(db)
+	ctls := wire.InitControllers(db, chatcache.Config{
+		TTLSeconds:  cfg.Redis.CacheTTLSeconds,
+		MaxMessages: cfg.Redis.ContextMaxMessages,
+	})
 
 	router := server.NewRouter(healthHandler, ctls.User, ctls.Session, ctls.Message)
 	logger.Info("application initialized", zap.String("name", "easygo-agent"))

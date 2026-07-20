@@ -17,7 +17,7 @@ func Recovery() gin.HandlerFunc {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				logger.Error("panic recovered",
-					zap.String("request_id", c.GetString(requestIDKey)),
+					zap.String("request_id", c.GetString(response.RequestIDKey)),
 					zap.String("panic", fmt.Sprint(recovered)),
 					zap.ByteString("stack", debug.Stack()),
 				)

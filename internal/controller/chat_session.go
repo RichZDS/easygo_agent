@@ -12,10 +12,10 @@ import (
 )
 
 type ChatSessionController struct {
-	svc *chat.ChatSessionService
+	svc chat.ChatSessionService
 }
 
-func NewChatSessionController(svc *chat.ChatSessionService) *ChatSessionController {
+func NewChatSessionController(svc chat.ChatSessionService) *ChatSessionController {
 	return &ChatSessionController{svc: svc}
 }
 

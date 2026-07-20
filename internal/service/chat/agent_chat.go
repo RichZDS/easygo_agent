@@ -2,8 +2,6 @@ package chat
 
 import (
 	"context"
-	"easygo-agent/internal/agent"
-	deepagent "easygo-agent/internal/agent/deep_agent"
 	"easygo-agent/internal/errorcode"
 	"easygo-agent/internal/model"
 
@@ -36,9 +34,9 @@ func (s *AgentChatService) Chat(ctx context.Context, userID uint64, sessionID st
 
 	// todo: 从reids中获取会话的上下文50条消息
 
-	//获取到信息了以后 创建llm
-	deepAgent, err := deepagent.NewDeepAgentDeepSeek(ctx, agent.Config{
-		Model: "deepseek-r1"})
+	// //获取到信息了以后 创建llm
+	// deepAgent, err := deepagent.NewDeepAgentDeepSeek(ctx, agent.Config{
+	// 	Model: "deepseek-r1"})
 
 	return "", nil
 }

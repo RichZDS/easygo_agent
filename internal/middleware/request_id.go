@@ -4,11 +4,12 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 
+	"easygo-agent/internal/response"
+
 	"github.com/gin-gonic/gin"
 )
 
 const RequestIDHeader = "X-Request-ID"
-const requestIDKey = "request_id"
 
 func RequestID() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -17,7 +18,7 @@ func RequestID() gin.HandlerFunc {
 			requestID = newRequestID()
 		}
 
-		c.Set(requestIDKey, requestID)
+		c.Set(response.RequestIDKey, requestID)
 		c.Header(RequestIDHeader, requestID)
 		c.Next()
 	}

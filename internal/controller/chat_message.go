@@ -14,10 +14,10 @@ import (
 )
 
 type ChatMessageController struct {
-	svc *chat.ChatMessageService
+	svc chat.ChatMessageService
 }
 
-func NewChatMessageController(svc *chat.ChatMessageService) *ChatMessageController {
+func NewChatMessageController(svc chat.ChatMessageService) *ChatMessageController {
 	return &ChatMessageController{svc: svc}
 }
 
@@ -74,7 +74,7 @@ func (ctl *ChatMessageController) Create(c *gin.Context) {
 	}
 
 	// 从 Gin 上下文获取 request_id（由 RequestID 中间件注入）
-	requestID, _ := c.Get("request_id")
+	requestID, _ := c.Get(response.RequestIDKey)
 	var reqIDPtr *string
 	if rid, ok := requestID.(string); ok && rid != "" {
 		reqIDPtr = &rid

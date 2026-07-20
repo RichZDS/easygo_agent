@@ -6,16 +6,16 @@ import (
 
 	"easygo-agent/internal/errorcode"
 	"easygo-agent/internal/response"
-	"easygo-agent/internal/service"
+	"easygo-agent/internal/service/user"
 
 	"github.com/gin-gonic/gin"
 )
 
 type UserController struct {
-	svc *service.UserService
+	svc user.UserService
 }
 
-func NewUserController(svc *service.UserService) *UserController {
+func NewUserController(svc user.UserService) *UserController {
 	return &UserController{svc: svc}
 }
 

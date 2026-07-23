@@ -178,3 +178,25 @@ func LPop(ctx context.Context, key string) (string, error) {
 func Eval(ctx context.Context, script string, keys []string, args ...any) (any, error) {
 	return L().Eval(ctx, script, keys, args...).Result()
 }
+
+// Stream helpers deliberately expose the go-redis stream types because task
+// workers need consumer-group metadata (including pending entry IDs).
+func XAdd(ctx context.Context, args *redisclient.XAddArgs) (string, error) {
+	return L().XAdd(ctx, args).Result()
+}
+func XGroupCreateMkStream(ctx context.Context, stream, group, start string) error {
+	return L().XGroupCreateMkStream(ctx, stream, group, start).Err()
+}
+func XReadGroup(ctx context.Context, args *redisclient.XReadGroupArgs) ([]redisclient.XStream, error) {
+	return L().XReadGroup(ctx, args).Result()
+}
+func XAutoClaim(ctx context.Context, args *redisclient.XAutoClaimArgs) ([]redisclient.XMessage, string, error) {
+	messages, next, err := L().XAutoClaim(ctx, args).Result()
+	return messages, next, err
+}
+func XAck(ctx context.Context, stream, group string, ids ...string) (int64, error) {
+	return L().XAck(ctx, stream, group, ids...).Result()
+}
+func XRead(ctx context.Context, args *redisclient.XReadArgs) ([]redisclient.XStream, error) {
+	return L().XRead(ctx, args).Result()
+}

@@ -106,6 +106,23 @@ func FindChatMessagesBySessionID(ctx context.Context, db *gorm.DB, sessionID uin
 	return msgs, nil
 }
 
+// FindRecentChatMessagesBySessionID returns chronological recent history. It
+// intentionally queries DESC first so a long session never reloads its oldest
+// messages merely because Redis has expired.
+func FindRecentChatMessagesBySessionID(ctx context.Context, db *gorm.DB, sessionID uint64, limit int) ([]ChatMessage, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	var descending []ChatMessage
+	if err := db.WithContext(ctx).Where("chat_session_id = ?", sessionID).Order("sequence_no DESC").Limit(limit).Find(&descending).Error; err != nil {
+		return nil, errorcode.Wrap(errorcode.Database, fmt.Errorf("find recent messages by session: %w", err))
+	}
+	for left, right := 0, len(descending)-1; left < right; left, right = left+1, right-1 {
+		descending[left], descending[right] = descending[right], descending[left]
+	}
+	return descending, nil
+}
+
 // FindChatMessagesByTurnID 查询某轮次的所有消息
 func FindChatMessagesByTurnID(ctx context.Context, db *gorm.DB, sessionID uint64, turnID string) ([]ChatMessage, error) {
 	var msgs []ChatMessage
@@ -257,4 +274,3 @@ func EstimateTokens(text string) int {
 	}
 	return int(math.Ceil(tokens))
 }
-

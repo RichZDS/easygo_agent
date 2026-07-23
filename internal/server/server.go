@@ -28,7 +28,7 @@ func DefaultConfig() Config {
 		Address:           ":8080",
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      15 * time.Second,
+		WriteTimeout:      0, // SSE turn events are long lived.
 		IdleTimeout:       60 * time.Second,
 		ShutdownTimeout:   10 * time.Second,
 	}

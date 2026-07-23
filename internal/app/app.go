@@ -3,17 +3,21 @@ package app
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/signal"
 	"syscall"
 
 	"easygo-agent/internal/agent/callback"
+	"easygo-agent/internal/auth"
 	"easygo-agent/internal/config"
+	"easygo-agent/internal/credential"
 	"easygo-agent/internal/handler"
 	"easygo-agent/internal/platform/logger"
 	mysqlplatform "easygo-agent/internal/platform/mysql"
 	redisplatform "easygo-agent/internal/platform/redis"
 	chatcache "easygo-agent/internal/repository/chatcache"
 	"easygo-agent/internal/server"
+	"easygo-agent/internal/service/chat"
 	"easygo-agent/internal/taskmanager"
 	"easygo-agent/internal/wire"
 
@@ -24,6 +28,14 @@ func Run(configPath string) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
+	}
+	issuer, err := auth.NewIssuer(os.Getenv("EASYGO_JWT_HS256_SECRET"), auth.DefaultTTL)
+	if err != nil {
+		return fmt.Errorf("configure JWT: %w", err)
+	}
+	cipher, err := credential.NewFromBase64(os.Getenv("EASYGO_CREDENTIAL_KEK_V1"), "v1")
+	if err != nil {
+		return fmt.Errorf("configure credential encryption: %w", err)
 	}
 
 	// 初始化全局日志（之后任意包通过 logger.L() 使用）
@@ -72,12 +84,18 @@ func Run(configPath string) error {
 		}
 	}()
 
-	// 创建 taskmanager 并启动任务循环
+	// The legacy scheduler remains available for periodic maintenance. The
+	// Stream worker owns durable outbox publication; processing is attached with
+	// the provider executor in the next batch.
 	go func() {
 		taskManager := taskmanager.NewTaskManager()
 		taskManager.RegisterBuiltinTasks()
 		taskManager.Run(ctx)
 	}()
+	go taskmanager.NewStreamWorker(
+		chat.NewTurnService(db),
+		chat.NewExecutionService(db, cipher, chatcache.NewChatCacheRepo(chatcache.Config{TTLSeconds: cfg.Redis.CacheTTLSeconds, MaxMessages: cfg.Redis.ContextMaxMessages})),
+	).Run(ctx)
 
 	// 初始化回调处理器
 	callback.Init()
@@ -91,9 +109,9 @@ func Run(configPath string) error {
 	ctls := wire.InitControllers(db, chatcache.Config{
 		TTLSeconds:  cfg.Redis.CacheTTLSeconds,
 		MaxMessages: cfg.Redis.ContextMaxMessages,
-	})
+	}, cipher, issuer)
 
-	router := server.NewRouter(healthHandler, ctls.User, ctls.Session, ctls.Message)
+	router := server.NewRouter(healthHandler, ctls.User, ctls.Session, ctls.Message, ctls.Auth, ctls.ModelConfig, ctls.Turn, issuer)
 	logger.Info("application initialized", zap.String("name", "easygo-agent"))
 	return server.Run(ctx, server.DefaultConfig(), router)
 }

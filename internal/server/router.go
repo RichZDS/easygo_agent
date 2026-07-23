@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 
+	"easygo-agent/internal/auth"
 	"easygo-agent/internal/controller"
 	"easygo-agent/internal/errorcode"
 	"easygo-agent/internal/handler"
@@ -18,6 +19,10 @@ func NewRouter(
 	userCtl *controller.UserController,
 	sessionCtl *controller.ChatSessionController,
 	msgCtl *controller.ChatMessageController,
+	authCtl *controller.AuthController,
+	modelConfigCtl *controller.ModelConfigController,
+	turnCtl *controller.ChatTurnController,
+	issuer *auth.Issuer,
 ) *gin.Engine {
 	router := gin.New()
 	router.HandleMethodNotAllowed = true
@@ -34,8 +39,20 @@ func NewRouter(
 
 	v1 := router.Group("/api/v1")
 	{
+		v1.POST("/auth/login", authCtl.Login)
 		// 用户 API
 		v1.POST("/users", userCtl.Create)
+		authorized := v1.Group("", middleware.RequireAuth(issuer))
+		{
+			authorized.PUT("/credentials", modelConfigCtl.PutCredential)
+			authorized.POST("/model-configs", modelConfigCtl.Create)
+			authorized.GET("/model-configs", modelConfigCtl.List)
+			authorized.POST("/sessions/:session_id/turns", turnCtl.Create)
+			authorized.POST("/chat-sessions", turnCtl.CreateSession)
+			authorized.PATCH("/sessions/:session_id/model", turnCtl.SwitchModel)
+			authorized.GET("/turns/:turn_id", turnCtl.Get)
+			authorized.GET("/turns/:turn_id/events", turnCtl.Events)
+		}
 		v1.GET("/users/:id", userCtl.GetByID)
 		v1.GET("/users", userCtl.GetByName)
 		v1.PATCH("/users/:id/contact", userCtl.UpdateContact)

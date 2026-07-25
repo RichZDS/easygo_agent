@@ -27,7 +27,7 @@ func (ctl *ChatTurnController) Create(c *gin.Context) {
 		response.Fail(c, errorcode.New(errorcode.InvalidParameter, "invalid turn request"))
 		return
 	}
-	turn, err := ctl.service.Create(c.Request.Context(), middleware.UserID(c), c.Param("session_id"), req.RequestID, req.Input)
+	turn, err := ctl.service.Create(c.Request.Context(), middleware.UserID(c), c.Param("id"), req.RequestID, req.Input)
 	if err != nil {
 		response.Fail(c, err)
 		return
@@ -41,6 +41,30 @@ func (ctl *ChatTurnController) Get(c *gin.Context) {
 		return
 	}
 	response.Success(c, turn)
+}
+func (ctl *ChatTurnController) Cancel(c *gin.Context) {
+	turn, err := ctl.service.Cancel(c.Request.Context(), middleware.UserID(c), c.Param("turn_id"))
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.Success(c, turn)
+}
+func (ctl *ChatTurnController) ListSessions(c *gin.Context) {
+	sessions, err := ctl.service.ListSessions(c.Request.Context(), middleware.UserID(c))
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.Success(c, sessions)
+}
+func (ctl *ChatTurnController) ListMessages(c *gin.Context) {
+	messages, err := ctl.service.ListMessages(c.Request.Context(), middleware.UserID(c), c.Param("session_id"), 200)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.Success(c, messages)
 }
 func (ctl *ChatTurnController) Events(c *gin.Context) {
 	if _, err := ctl.service.Get(c.Request.Context(), middleware.UserID(c), c.Param("turn_id")); err != nil {
@@ -73,6 +97,9 @@ func (ctl *ChatTurnController) Events(c *gin.Context) {
 				_, _ = fmt.Fprintf(c.Writer, "id: %s\nevent: %s\ndata: %s\n\n", message.ID, event, data)
 				c.Writer.Flush()
 				lastID = message.ID
+				if event == "completed" || event == "cancelled" || event == "failed" {
+					return
+				}
 			}
 		}
 	}
@@ -101,7 +128,7 @@ func (ctl *ChatTurnController) SwitchModel(c *gin.Context) {
 		response.Fail(c, errorcode.New(errorcode.InvalidParameter, "invalid model selection"))
 		return
 	}
-	if err := ctl.service.SwitchModel(c.Request.Context(), middleware.UserID(c), c.Param("session_id"), req.ModelConfigID); err != nil {
+	if err := ctl.service.SwitchModel(c.Request.Context(), middleware.UserID(c), c.Param("id"), req.ModelConfigID); err != nil {
 		response.Fail(c, err)
 		return
 	}

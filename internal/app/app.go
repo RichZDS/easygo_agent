@@ -92,10 +92,22 @@ func Run(configPath string) error {
 		taskManager.RegisterBuiltinTasks()
 		taskManager.Run(ctx)
 	}()
-	go taskmanager.NewStreamWorker(
-		chat.NewTurnService(db),
-		chat.NewExecutionService(db, cipher, chatcache.NewChatCacheRepo(chatcache.Config{TTLSeconds: cfg.Redis.CacheTTLSeconds, MaxMessages: cfg.Redis.ContextMaxMessages})),
-	).Run(ctx)
+	cacheConfig := chatcache.Config{
+		TTLSeconds:  cfg.Redis.CacheTTLSeconds,
+		MaxMessages: cfg.Redis.ContextMaxMessages,
+	}
+	turnEvents := chat.NewRedisTurnEventSink()
+	cancellations := chat.NewCancellationCoordinator()
+	turnService := chat.NewTurnService(db, turnEvents, cancellations)
+	executionService := chat.NewExecutionService(
+		db,
+		cipher,
+		chatcache.NewChatCacheRepo(cacheConfig),
+		chat.NewHTTPProviderStreamer(nil),
+		turnEvents,
+		cancellations,
+	)
+	go taskmanager.NewStreamWorker(turnService, executionService).Run(ctx)
 
 	// 初始化回调处理器
 	callback.Init()
@@ -106,10 +118,7 @@ func Run(configPath string) error {
 	})
 
 	// 使用 Wire 依赖注入创建所有 Controller
-	ctls := wire.InitControllers(db, chatcache.Config{
-		TTLSeconds:  cfg.Redis.CacheTTLSeconds,
-		MaxMessages: cfg.Redis.ContextMaxMessages,
-	}, cipher, issuer)
+	ctls := wire.InitControllers(db, cacheConfig, cipher, issuer, turnEvents, cancellations)
 
 	router := server.NewRouter(healthHandler, ctls.User, ctls.Session, ctls.Message, ctls.Auth, ctls.ModelConfig, ctls.Turn, issuer)
 	logger.Info("application initialized", zap.String("name", "easygo-agent"))

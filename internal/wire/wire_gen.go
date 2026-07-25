@@ -20,7 +20,7 @@ import (
 
 // Injectors from wire.go:
 
-func InitControllers(db *gorm.DB, cacheCfg chatcache.Config, cipher *credential.Cipher, issuer *auth.Issuer) *controller.AllControllers {
+func InitControllers(db *gorm.DB, cacheCfg chatcache.Config, cipher *credential.Cipher, issuer *auth.Issuer, events chat.TurnEventSink, cancellations *chat.CancellationCoordinator) *controller.AllControllers {
 	userService := user.NewUserService(db)
 	userController := controller.NewUserController(userService)
 	accountService := account.New(userService, issuer)
@@ -32,7 +32,7 @@ func InitControllers(db *gorm.DB, cacheCfg chatcache.Config, cipher *credential.
 	chatMessageController := controller.NewChatMessageController(chatMessageService)
 	modelConfigService := modelconfig.New(db, cipher)
 	modelConfigController := controller.NewModelConfigController(modelConfigService)
-	turnService := chat.NewTurnService(db)
+	turnService := chat.NewTurnService(db, events, cancellations)
 	turnController := controller.NewChatTurnController(turnService)
 	agentChatService := chat.NewAgentChatService(db, chatCacheRepo, chatMessageService)
 	allControllers := &controller.AllControllers{

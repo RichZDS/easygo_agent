@@ -1,18 +1,17 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"os"
 
 	"easygo-agent/internal/app"
+
+	"github.com/joho/godotenv"
 )
 
 func main() {
-	configPath := flag.String("config", "configs/config.yaml", "path to YAML configuration file")
-	flag.Parse()
-
-	if err := app.Run(*configPath); err != nil {
+	_ = godotenv.Load(".env")
+	if err := app.Run("configs/config.yaml"); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "application stopped: %v\n", err)
 		os.Exit(1)
 	}

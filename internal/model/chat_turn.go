@@ -44,6 +44,6 @@ func FindTurnInternal(ctx context.Context, db *gorm.DB, turnID string) (*ChatTur
 }
 func FindOpenTurnForSession(ctx context.Context, db *gorm.DB, sessionID uint64) (*ChatTurn, error) {
 	var v ChatTurn
-	err := db.WithContext(ctx).Where("chat_session_id = ? AND status IN ?", sessionID, []uint8{TurnPending, TurnRunning}).First(&v).Error
+	err := db.WithContext(ctx).Where("chat_session_id = ? AND status IN ?", sessionID, []int{int(TurnPending), int(TurnRunning)}).First(&v).Error
 	return &v, err
 }

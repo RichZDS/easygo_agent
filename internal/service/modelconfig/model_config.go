@@ -32,7 +32,7 @@ func (s *Service) UpsertCredential(ctx context.Context, userID uint64, provider,
 	return &v, err
 }
 func (s *Service) Create(ctx context.Context, userID, credentialID uint64, provider, modelName string, baseURL *string, contextTokens, outputTokens uint32, settings *model.JSONMap) (*model.UserModelConfig, error) {
-	if provider != "deepseek" && provider != "openai" {
+	if provider != "deepseek" && provider != "openai" && provider != "minimax" {
 		return nil, fmt.Errorf("unsupported provider")
 	}
 	if modelName == "" || contextTokens == 0 || outputTokens == 0 || outputTokens >= contextTokens {

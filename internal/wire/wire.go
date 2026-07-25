@@ -17,7 +17,14 @@ import (
 	"easygo-agent/internal/service/user"
 )
 
-func InitControllers(db *gorm.DB, cacheCfg chatcache.Config, cipher *credential.Cipher, issuer *auth.Issuer) *controller.AllControllers {
+func InitControllers(
+	db *gorm.DB,
+	cacheCfg chatcache.Config,
+	cipher *credential.Cipher,
+	issuer *auth.Issuer,
+	events chat.TurnEventSink,
+	cancellations *chat.CancellationCoordinator,
+) *controller.AllControllers {
 	wire.Build(
 		// Repositories
 		chatcache.NewChatCacheRepo,

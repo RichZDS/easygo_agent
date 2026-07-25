@@ -1,5 +1,6 @@
 configs/config.local.yaml
 configs/config.production.yaml
+.env
 logs/
 *.log
 bin/

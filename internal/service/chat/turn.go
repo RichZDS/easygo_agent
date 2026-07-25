@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -10,11 +11,18 @@ import (
 	"easygo-agent/internal/model"
 	"easygo-agent/internal/platform/uuidgen"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
-type TurnService struct{ db *gorm.DB }
+type TurnService struct {
+	db            *gorm.DB
+	events        TurnEventSink
+	cancellations *CancellationCoordinator
+}
 
-func NewTurnService(db *gorm.DB) *TurnService { return &TurnService{db: db} }
+func NewTurnService(db *gorm.DB, events TurnEventSink, cancellations *CancellationCoordinator) *TurnService {
+	return &TurnService{db: db, events: events, cancellations: cancellations}
+}
 func (s *TurnService) Create(ctx context.Context, userID uint64, sessionExternalID, requestID, input string) (*model.ChatTurn, error) {
 	if input == "" || requestID == "" {
 		return nil, errorcode.New(errorcode.InvalidParameter, "input and request_id are required")
@@ -52,6 +60,138 @@ func (s *TurnService) Create(ctx context.Context, userID uint64, sessionExternal
 }
 func (s *TurnService) Get(ctx context.Context, userID uint64, turnID string) (*model.ChatTurn, error) {
 	return model.FindTurn(ctx, s.db, userID, turnID)
+}
+
+func (s *TurnService) Cancel(ctx context.Context, userID uint64, turnID string) (*model.ChatTurn, error) {
+	var result model.ChatTurn
+	previousStatus := uint8(0)
+	transitioned := false
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("turn_id = ? AND user_id = ?", turnID, userID).
+			First(&result).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errorcode.New(errorcode.NotFound, "turn not found")
+			}
+			return err
+		}
+		previousStatus = result.Status
+		if result.Status != model.TurnPending && result.Status != model.TurnRunning {
+			return nil
+		}
+		now := time.Now()
+		if err := tx.Model(&model.ChatTurn{}).
+			Where("id = ? AND status = ?", result.ID, result.Status).
+			Updates(map[string]any{"status": model.TurnCancelled, "completed_at": now}).Error; err != nil {
+			return err
+		}
+		result.Status = model.TurnCancelled
+		result.CompletedAt = &now
+		transitioned = true
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !transitioned {
+		return &result, nil
+	}
+	if previousStatus == model.TurnRunning {
+		s.cancellations.Cancel(turnID)
+		return &result, nil
+	}
+
+	// A pending turn has no executor that could publish its terminal events.
+	config, _ := model.FindModelConfig(ctx, s.db, userID, result.ModelConfigID)
+	modelName := ""
+	if config != nil {
+		modelName = config.ModelName
+	}
+	if err := s.events.Emit(ctx, turnID, "chunk", newCompletionChunk(turnID, modelName, "", "cancelled", nil)); err != nil {
+		return nil, err
+	}
+	if err := s.events.Emit(ctx, turnID, "cancelled", map[string]any{"status": "cancelled"}); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+type SessionSummary struct {
+	SessionID            string     `json:"session_id"`
+	Title                string     `json:"title"`
+	Status               uint8      `json:"status"`
+	LastMessageAt        *time.Time `json:"last_message_at"`
+	MessageCount         uint32     `json:"message_count"`
+	CurrentModelConfigID *uint64    `json:"current_model_config_id"`
+	CreatedAt            time.Time  `json:"created_at"`
+}
+
+func (s *TurnService) ListSessions(ctx context.Context, userID uint64) ([]SessionSummary, error) {
+	var sessions []model.ChatSession
+	if err := s.db.WithContext(ctx).
+		Where("user_id = ?", userID).
+		Order("COALESCE(last_message_at, created_at) DESC").
+		Find(&sessions).Error; err != nil {
+		return nil, err
+	}
+	out := make([]SessionSummary, 0, len(sessions))
+	for _, session := range sessions {
+		out = append(out, SessionSummary{
+			SessionID:            session.SessionID,
+			Title:                session.Title,
+			Status:               session.Status,
+			LastMessageAt:        session.LastMessageAt,
+			MessageCount:         session.MessageCount,
+			CurrentModelConfigID: session.CurrentModelConfigID,
+			CreatedAt:            session.CreatedAt,
+		})
+	}
+	return out, nil
+}
+
+type MessageView struct {
+	MessageID    string    `json:"message_id"`
+	TurnID       *string   `json:"turn_id"`
+	SequenceNo   uint32    `json:"sequence_no"`
+	Role         uint8     `json:"role"`
+	Content      *string   `json:"content"`
+	ModelName    *string   `json:"model_name"`
+	Status       uint8     `json:"status"`
+	FinishReason *string   `json:"finish_reason"`
+	ErrorCode    *string   `json:"error_code"`
+	ErrorMessage *string   `json:"error_message"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+func (s *TurnService) ListMessages(ctx context.Context, userID uint64, sessionExternalID string, limit int) ([]MessageView, error) {
+	session, err := model.FindChatSessionOwnedByUser(ctx, s.db, sessionExternalID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 200
+	}
+	messages, err := model.FindRecentChatMessagesBySessionID(ctx, s.db, session.ID, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]MessageView, 0, len(messages))
+	for _, message := range messages {
+		out = append(out, MessageView{
+			MessageID:    message.MessageID,
+			TurnID:       message.TurnID,
+			SequenceNo:   message.SequenceNo,
+			Role:         message.Role,
+			Content:      message.Content,
+			ModelName:    message.ModelName,
+			Status:       message.Status,
+			FinishReason: message.FinishReason,
+			ErrorCode:    message.ErrorCode,
+			ErrorMessage: message.ErrorMessage,
+			CreatedAt:    message.CreatedAt,
+		})
+	}
+	return out, nil
 }
 func (s *TurnService) CreateSession(ctx context.Context, userID uint64, title string, modelConfigID uint64) (*model.ChatSession, error) {
 	config, err := model.FindModelConfig(ctx, s.db, userID, modelConfigID)

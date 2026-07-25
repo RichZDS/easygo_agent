@@ -4,17 +4,31 @@
 
 ## 启动
 
-默认读取 `configs/config.yaml`：
+默认读取 `configs/config.yaml`，并从 `backend/.env` 加载密钥环境变量：
 
 ```powershell
 cd backend
-go run ./cmd/server
+copy .env.example .env   # 首次启动：复制并填写密钥
+go run main.go
 ```
 
-也可以指定其他 YAML 文件：
+`.env` 必填项：
+
+| 变量 | 说明 |
+|------|------|
+| `EASYGO_JWT_HS256_SECRET` | JWT 签名密钥，至少 32 字符 |
+| `EASYGO_CREDENTIAL_KEK_V1` | 凭证加密密钥，Base64 编码的 32 字节随机值 |
+
+生成凭证密钥（PowerShell）：
 
 ```powershell
-go run ./cmd/server -config configs/config.local.yaml
+[Convert]::ToBase64String((1..32 | ForEach-Object { [byte](Get-Random -Maximum 256) }))
+```
+
+首次部署或升级数据库时执行迁移：
+
+```powershell
+go run ./cmd/migrate
 ```
 
 服务地址为 `http://localhost:8080`：
@@ -59,7 +73,7 @@ redis:
 
 ```text
 backend/
-├── cmd/server/                 # 程序入口
+├── main.go                     # 程序入口
 ├── configs/                    # MySQL、Redis YAML 配置
 ├── internal/
 │   ├── app/                    # 依赖装配与生命周期

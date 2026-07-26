@@ -8,9 +8,9 @@ package wire
 
 import (
 	"easygo-agent/internal/agent"
-	"easygo-agent/internal/auth"
 	"easygo-agent/internal/controller"
 	"easygo-agent/internal/credential"
+	"easygo-agent/internal/platform/auth"
 	"easygo-agent/internal/service/account"
 	"easygo-agent/internal/service/chat"
 	"easygo-agent/internal/service/providerconfig"

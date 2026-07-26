@@ -10,7 +10,7 @@ import (
 	"easygo-agent/internal/credential"
 	"easygo-agent/internal/service/account"
 	"easygo-agent/internal/service/chat"
-	"easygo-agent/internal/service/modelconfig"
+	"easygo-agent/internal/service/providerconfig"
 	"easygo-agent/internal/service/user"
 
 	"github.com/google/wire"
@@ -26,13 +26,13 @@ func InitControllers(
 	wire.Build(
 		user.NewUserService,
 		account.New,
-		modelconfig.New,
-		chat.NewTurnService,
+		providerconfig.New,
+		chat.NewRunService,
 		chat.NewExecutionService,
 		controller.NewUserController,
 		controller.NewAuthController,
-		controller.NewModelConfigController,
-		controller.NewChatTurnController,
+		controller.NewProviderController,
+		controller.NewChatController,
 		wire.Struct(new(controller.AllControllers), "*"),
 	)
 	return nil

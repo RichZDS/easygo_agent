@@ -4,7 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 
-	"easygo-agent/internal/response"
+	"easygo-agent/internal/platform/response"
 
 	"github.com/gin-gonic/gin"
 )

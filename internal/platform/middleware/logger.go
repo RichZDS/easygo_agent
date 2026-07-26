@@ -4,7 +4,7 @@ import (
 	"time"
 
 	"easygo-agent/internal/platform/logger"
-	"easygo-agent/internal/response"
+	"easygo-agent/internal/platform/response"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"

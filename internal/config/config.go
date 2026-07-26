@@ -10,7 +10,6 @@ import (
 
 type Config struct {
 	MySQL  MySQL  `yaml:"mysql"`
-	Agent  Agent  `yaml:"agent"`
 	Logger Logger `yaml:"logger"`
 }
 
@@ -24,12 +23,6 @@ type MySQL struct {
 	MaxIdleConns    int    `yaml:"max_idle_conns"`
 	MaxOpenConns    int    `yaml:"max_open_conns"`
 	ConnMaxLifetime int    `yaml:"conn_max_lifetime"`
-}
-
-type Agent struct {
-	Instruction        string `yaml:"instruction"`
-	Revision           string `yaml:"revision"`
-	TurnTimeoutSeconds int    `yaml:"turn_timeout_seconds"`
 }
 
 type Logger struct {
@@ -75,12 +68,6 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.MySQL.ConnMaxLifetime <= 0 {
 		return fmt.Errorf("mysql conn_max_lifetime must be greater than zero")
-	}
-	if cfg.Agent.Instruction == "" || cfg.Agent.Revision == "" {
-		return fmt.Errorf("agent instruction and revision cannot be empty")
-	}
-	if cfg.Agent.TurnTimeoutSeconds <= 0 {
-		return fmt.Errorf("agent turn_timeout_seconds must be greater than zero")
 	}
 	return nil
 }

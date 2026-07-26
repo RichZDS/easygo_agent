@@ -5,41 +5,44 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 
-	"easygo-agent/internal/middleware"
 	"easygo-agent/internal/platform/errorcode"
-	"easygo-agent/internal/response"
+	"easygo-agent/internal/platform/middleware"
+	"easygo-agent/internal/platform/response"
 	"easygo-agent/internal/service/chat"
 
 	"github.com/gin-gonic/gin"
 )
 
-type ChatTurnController struct {
-	turns     *chat.TurnService
+type ChatController struct {
+	runs      *chat.RunService
 	execution *chat.ExecutionService
 }
 
-func NewChatTurnController(
-	turns *chat.TurnService,
-	execution *chat.ExecutionService,
-) *ChatTurnController {
-	return &ChatTurnController{turns: turns, execution: execution}
+func NewChatController(runs *chat.RunService, execution *chat.ExecutionService) *ChatController {
+	return &ChatController{runs: runs, execution: execution}
 }
 
-func (ctl *ChatTurnController) Stream(c *gin.Context) {
+func (ctl *ChatController) Stream(c *gin.Context) {
+	sessionID, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil || sessionID == 0 {
+		response.Fail(c, errorcode.New(errorcode.InvalidParameter, "invalid session id"))
+		return
+	}
 	var request struct {
 		Input     string `json:"input" binding:"required"`
 		RequestID string `json:"request_id" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&request); err != nil {
-		response.Fail(c, errorcode.New(errorcode.InvalidParameter, "invalid turn request"))
+		response.Fail(c, errorcode.New(errorcode.InvalidParameter, "invalid run request"))
 		return
 	}
 
-	prepared, err := ctl.turns.Prepare(
+	prepared, err := ctl.runs.Prepare(
 		c.Request.Context(),
 		middleware.UserID(c),
-		c.Param("id"),
+		sessionID,
 		request.RequestID,
 		request.Input,
 	)
@@ -47,8 +50,8 @@ func (ctl *ChatTurnController) Stream(c *gin.Context) {
 		var duplicate *chat.DuplicateRequestError
 		if errors.As(err, &duplicate) {
 			response.JSON(c, http.StatusConflict, errorcode.Conflict, gin.H{
-				"turn_id": duplicate.Turn.TurnID,
-				"status":  duplicate.Turn.Status,
+				"run_id": duplicate.Run.ID,
+				"status": duplicate.Run.Status,
 			}, "duplicate_request")
 			return
 		}
@@ -64,9 +67,9 @@ func (ctl *ChatTurnController) Stream(c *gin.Context) {
 
 	emitter := func(event chat.StreamEvent) error {
 		var payload any = event.Payload
-		if event.Type != "turn" {
+		if event.Type != "run" {
 			payload = gin.H{
-				"turn_id": prepared.Turn.TurnID,
+				"run_id":  prepared.Run.ID,
 				"payload": event.Payload,
 			}
 		}
@@ -86,21 +89,22 @@ func (ctl *ChatTurnController) Stream(c *gin.Context) {
 	}
 }
 
-func (ctl *ChatTurnController) Get(c *gin.Context) {
-	turn, err := ctl.turns.Get(
-		c.Request.Context(),
-		middleware.UserID(c),
-		c.Param("turn_id"),
-	)
+func (ctl *ChatController) GetRun(c *gin.Context) {
+	runID, err := strconv.ParseUint(c.Param("run_id"), 10, 64)
+	if err != nil || runID == 0 {
+		response.Fail(c, errorcode.New(errorcode.InvalidParameter, "invalid run id"))
+		return
+	}
+	run, err := ctl.runs.GetRun(c.Request.Context(), middleware.UserID(c), runID)
 	if err != nil {
 		response.Fail(c, err)
 		return
 	}
-	response.Success(c, turn)
+	response.Success(c, run)
 }
 
-func (ctl *ChatTurnController) ListSessions(c *gin.Context) {
-	sessions, err := ctl.turns.ListSessions(c.Request.Context(), middleware.UserID(c))
+func (ctl *ChatController) ListSessions(c *gin.Context) {
+	sessions, err := ctl.runs.ListSessions(c.Request.Context(), middleware.UserID(c))
 	if err != nil {
 		response.Fail(c, err)
 		return
@@ -108,13 +112,13 @@ func (ctl *ChatTurnController) ListSessions(c *gin.Context) {
 	response.Success(c, sessions)
 }
 
-func (ctl *ChatTurnController) ListMessages(c *gin.Context) {
-	messages, err := ctl.turns.ListMessages(
-		c.Request.Context(),
-		middleware.UserID(c),
-		c.Param("session_id"),
-		200,
-	)
+func (ctl *ChatController) ListMessages(c *gin.Context) {
+	sessionID, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil || sessionID == 0 {
+		response.Fail(c, errorcode.New(errorcode.InvalidParameter, "invalid session id"))
+		return
+	}
+	messages, err := ctl.runs.ListMessages(c.Request.Context(), middleware.UserID(c), sessionID, 200)
 	if err != nil {
 		response.Fail(c, err)
 		return
@@ -122,20 +126,20 @@ func (ctl *ChatTurnController) ListMessages(c *gin.Context) {
 	response.Success(c, messages)
 }
 
-func (ctl *ChatTurnController) CreateSession(c *gin.Context) {
+func (ctl *ChatController) CreateSession(c *gin.Context) {
 	var request struct {
-		Title         string `json:"title" binding:"required"`
-		ModelConfigID uint64 `json:"model_config_id" binding:"required"`
+		Title     string `json:"title" binding:"required"`
+		AIModelID uint64 `json:"ai_model_id" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&request); err != nil {
 		response.Fail(c, errorcode.New(errorcode.InvalidParameter, "invalid session request"))
 		return
 	}
-	session, err := ctl.turns.CreateSession(
+	session, err := ctl.runs.CreateSession(
 		c.Request.Context(),
 		middleware.UserID(c),
 		request.Title,
-		request.ModelConfigID,
+		request.AIModelID,
 	)
 	if err != nil {
 		response.Fail(c, err)
@@ -144,19 +148,24 @@ func (ctl *ChatTurnController) CreateSession(c *gin.Context) {
 	response.Created(c, session)
 }
 
-func (ctl *ChatTurnController) SwitchModel(c *gin.Context) {
+func (ctl *ChatController) SwitchModel(c *gin.Context) {
+	sessionID, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil || sessionID == 0 {
+		response.Fail(c, errorcode.New(errorcode.InvalidParameter, "invalid session id"))
+		return
+	}
 	var request struct {
-		ModelConfigID uint64 `json:"model_config_id" binding:"required"`
+		AIModelID uint64 `json:"ai_model_id" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&request); err != nil {
 		response.Fail(c, errorcode.New(errorcode.InvalidParameter, "invalid model selection"))
 		return
 	}
-	if err := ctl.turns.SwitchModel(
+	if err := ctl.runs.SwitchModel(
 		c.Request.Context(),
 		middleware.UserID(c),
-		c.Param("id"),
-		request.ModelConfigID,
+		sessionID,
+		request.AIModelID,
 	); err != nil {
 		response.Fail(c, err)
 		return

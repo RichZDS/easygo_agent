@@ -1,13 +1,24 @@
--- EasyGo Agent database initialization for MySQL 8.x.
--- Consolidated from user.sql, 002_user_model_async_chat.sql, and
--- 003_eino_native_turns.sql for fresh installs. Migration-only UPDATE/ALTER
--- statements from 003 are folded into the final CREATE TABLE definitions below.
+-- EasyGo Agent database initialization for MySQL 8.x (big-bang schema).
 
 -- =============================================================================
--- user.sql
+-- Drop legacy chat / model tables (keep `user`)
 -- =============================================================================
 
--- Password values below mean an already-derived password hash, never plaintext.
+DROP TABLE IF EXISTS `chat_outbox`;
+DROP TABLE IF EXISTS `chat_summary`;
+DROP TABLE IF EXISTS `chat_message`;
+DROP TABLE IF EXISTS `chat_turn`;
+DROP TABLE IF EXISTS `chat_session`;
+DROP TABLE IF EXISTS `user_model_config`;
+DROP TABLE IF EXISTS `user_provider_credential`;
+DROP TABLE IF EXISTS `agent_run`;
+DROP TABLE IF EXISTS `ai_model`;
+DROP TABLE IF EXISTS `provider`;
+DROP TABLE IF EXISTS `session`;
+
+-- =============================================================================
+-- user
+-- =============================================================================
 
 CREATE TABLE IF NOT EXISTS `user` (
     `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '用户唯一ID',
@@ -31,210 +42,99 @@ CREATE TABLE IF NOT EXISTS `user` (
   COMMENT='用户表';
 
 -- =============================================================================
--- 002_user_model_async_chat.sql (+ chat_session / chat_message base tables)
+-- provider / ai_model
 -- =============================================================================
 
-CREATE TABLE IF NOT EXISTS `user_provider_credential` (
+CREATE TABLE IF NOT EXISTS `provider` (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   `user_id` BIGINT UNSIGNED NOT NULL,
-  `provider_name` VARCHAR(64) NOT NULL,
-  `ciphertext` TEXT NOT NULL,
-  `nonce` VARCHAR(32) NOT NULL,
-  `algorithm` VARCHAR(32) NOT NULL,
-  `key_version` VARCHAR(32) NOT NULL,
+  `name` VARCHAR(128) NOT NULL,
+  `type` VARCHAR(64) NOT NULL COMMENT '适配器类型：deepseek/openai/minimax',
+  `api_key` TEXT NOT NULL COMMENT '加密后的 API Key JSON',
+  `base_url` VARCHAR(512) DEFAULT NULL,
+  `test_model` VARCHAR(128) NOT NULL DEFAULT '' COMMENT '连通性检测模型名',
   `status` TINYINT UNSIGNED NOT NULL DEFAULT 1,
   `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   `updated_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
-  `deleted_at` DATETIME(3) DEFAULT NULL,
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_user_provider` (`user_id`, `provider_name`),
-  KEY `idx_credential_user_status` (`user_id`, `status`, `deleted_at`)
+  UNIQUE KEY `uk_user_type` (`user_id`, `type`),
+  KEY `idx_provider_user_status` (`user_id`, `status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-CREATE TABLE IF NOT EXISTS `user_model_config` (
+CREATE TABLE IF NOT EXISTS `ai_model` (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   `user_id` BIGINT UNSIGNED NOT NULL,
-  `credential_id` BIGINT UNSIGNED NOT NULL,
-  `provider_name` VARCHAR(64) NOT NULL,
-  `model_name` VARCHAR(128) NOT NULL,
-  `base_url` VARCHAR(512) DEFAULT NULL,
-  `max_context_tokens` INT UNSIGNED NOT NULL,
-  `max_output_tokens` INT UNSIGNED NOT NULL,
-  `settings` JSON DEFAULT NULL,
-  `revision` INT UNSIGNED NOT NULL DEFAULT 1,
-  `enabled` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `provider_id` BIGINT UNSIGNED NOT NULL,
+  `name` VARCHAR(128) NOT NULL,
+  `model_id` VARCHAR(128) NOT NULL COMMENT '实际调用的模型标识',
+  `params` JSON DEFAULT NULL COMMENT 'Eino model 相关配置',
+  `status` TINYINT UNSIGNED NOT NULL DEFAULT 1,
   `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   `updated_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
-  `deleted_at` DATETIME(3) DEFAULT NULL,
   PRIMARY KEY (`id`),
-  KEY `idx_model_user_enabled` (`user_id`, `enabled`, `deleted_at`),
-  CONSTRAINT `fk_model_credential` FOREIGN KEY (`credential_id`) REFERENCES `user_provider_credential` (`id`)
+  UNIQUE KEY `uk_provider_model` (`provider_id`, `model_id`),
+  KEY `idx_ai_model_user_status` (`user_id`, `status`),
+  CONSTRAINT `fk_ai_model_provider` FOREIGN KEY (`provider_id`) REFERENCES `provider` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-CREATE TABLE IF NOT EXISTS `chat_session` (
+-- =============================================================================
+-- session / chat_message / agent_run
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS `session` (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  `session_id` VARCHAR(64) NOT NULL,
   `user_id` BIGINT UNSIGNED NOT NULL,
   `title` VARCHAR(255) NOT NULL DEFAULT '新对话',
-  `status` TINYINT UNSIGNED NOT NULL DEFAULT 1,
-  `last_message_at` DATETIME(3) DEFAULT NULL,
+  `status` TINYINT NOT NULL DEFAULT 1 COMMENT '1 正常、2 归档、3 禁用',
+  `current_ai_model_id` BIGINT UNSIGNED DEFAULT NULL,
+  `active_run_id` BIGINT UNSIGNED DEFAULT NULL,
+  `next_message_seq` BIGINT UNSIGNED NOT NULL DEFAULT 1,
   `message_count` INT UNSIGNED NOT NULL DEFAULT 0,
-  `current_model_config_id` BIGINT UNSIGNED DEFAULT NULL,
-  `current_model_revision` INT UNSIGNED DEFAULT NULL,
+  `last_message_at` DATETIME(3) DEFAULT NULL,
   `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   `updated_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
   `deleted_at` DATETIME(3) DEFAULT NULL,
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_session_id` (`session_id`),
-  KEY `idx_user_id` (`user_id`),
-  KEY `idx_user_last_message` (`user_id`, `last_message_at`),
-  KEY `idx_user_deleted` (`user_id`, `deleted_at`),
-  KEY `idx_session_model_config` (`current_model_config_id`)
+  KEY `idx_session_user_last` (`user_id`, `last_message_at`),
+  KEY `idx_session_user_deleted` (`user_id`, `deleted_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Final chat_message schema after 003_eino_native_turns.sql.
+CREATE TABLE IF NOT EXISTS `agent_run` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `session_id` BIGINT UNSIGNED NOT NULL,
+  `user_id` BIGINT UNSIGNED NOT NULL,
+  `request_id` VARCHAR(64) NOT NULL,
+  `ai_model_id` BIGINT UNSIGNED NOT NULL,
+  `status` TINYINT UNSIGNED NOT NULL COMMENT '1 running 2 succeeded 3 failed 4 cancelled',
+  `prompt_tokens` INT UNSIGNED DEFAULT NULL,
+  `completion_tokens` INT UNSIGNED DEFAULT NULL,
+  `total_tokens` INT UNSIGNED DEFAULT NULL,
+  `latency_ms` INT UNSIGNED DEFAULT NULL,
+  `error_code` VARCHAR(64) DEFAULT NULL,
+  `error_message` VARCHAR(1000) DEFAULT NULL,
+  `config_snapshot` JSON DEFAULT NULL,
+  `started_at` DATETIME(3) DEFAULT NULL,
+  `finished_at` DATETIME(3) DEFAULT NULL,
+  `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_user_request` (`user_id`, `request_id`),
+  KEY `idx_run_session_created` (`session_id`, `created_at`),
+  KEY `idx_run_user_created` (`user_id`, `created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS `chat_message` (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  `message_id` VARCHAR(64) NOT NULL,
-  `chat_session_id` BIGINT UNSIGNED NOT NULL,
-  `turn_id` VARCHAR(64) DEFAULT NULL,
-  `parent_message_id` VARCHAR(64) DEFAULT NULL,
-  `sequence_no` INT UNSIGNED NOT NULL,
+  `session_id` BIGINT UNSIGNED NOT NULL,
+  `agent_run_id` BIGINT UNSIGNED DEFAULT NULL,
+  `seq` BIGINT UNSIGNED NOT NULL,
   `role` VARCHAR(16) NOT NULL,
-  `content` MEDIUMTEXT NOT NULL,
-  `user_input_multi_content` JSON DEFAULT NULL,
-  `assistant_output_multi_content` JSON DEFAULT NULL,
-  `name` VARCHAR(128) DEFAULT NULL,
-  `tool_calls` JSON DEFAULT NULL,
-  `tool_call_id` VARCHAR(128) DEFAULT NULL,
-  `tool_name` VARCHAR(128) DEFAULT NULL,
-  `response_meta` JSON DEFAULT NULL,
-  `reasoning_content` MEDIUMTEXT DEFAULT NULL,
-  `extra` JSON DEFAULT NULL,
-  `message_type` TINYINT UNSIGNED NOT NULL DEFAULT 1,
-  `model_name` VARCHAR(128) DEFAULT NULL,
-  `provider_name` VARCHAR(64) DEFAULT NULL,
-  `status` TINYINT UNSIGNED NOT NULL DEFAULT 2,
-  `request_id` VARCHAR(64) DEFAULT NULL,
-  `error_code` VARCHAR(64) DEFAULT NULL,
-  `error_message` VARCHAR(1000) DEFAULT NULL,
-  `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-  `updated_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
-  `deleted_at` DATETIME(3) DEFAULT NULL,
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_message_id` (`message_id`),
-  UNIQUE KEY `uk_session_sequence` (`chat_session_id`, `sequence_no`),
-  KEY `idx_session_created` (`chat_session_id`, `created_at`),
-  KEY `idx_session_turn` (`chat_session_id`, `turn_id`),
-  KEY `idx_parent_message` (`parent_message_id`),
-  KEY `idx_request_id` (`request_id`),
-  KEY `idx_deleted_at` (`deleted_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Final chat_turn schema after 003_eino_native_turns.sql.
-CREATE TABLE IF NOT EXISTS `chat_turn` (
-  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  `turn_id` VARCHAR(64) NOT NULL,
-  `user_id` BIGINT UNSIGNED NOT NULL,
-  `chat_session_id` BIGINT UNSIGNED NOT NULL,
-  `model_config_id` BIGINT UNSIGNED NOT NULL,
-  `model_revision` INT UNSIGNED NOT NULL,
-  `agent_revision` VARCHAR(64) NOT NULL DEFAULT 'chat-v1',
-  `request_id` VARCHAR(64) NOT NULL,
-  `input` MEDIUMTEXT NULL,
-  `status` TINYINT UNSIGNED NOT NULL,
-  `active_slot` TINYINT UNSIGNED NULL,
-  `stream_id` VARCHAR(64) DEFAULT NULL,
-  `error_code` VARCHAR(64) DEFAULT NULL,
-  `error_message` VARCHAR(1000) DEFAULT NULL,
-  `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-  `started_at` DATETIME(3) DEFAULT NULL,
-  `expires_at` DATETIME(3) DEFAULT NULL,
-  `completed_at` DATETIME(3) DEFAULT NULL,
-  `updated_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_turn_id` (`turn_id`),
-  UNIQUE KEY `uk_turn_request` (`chat_session_id`, `request_id`),
-  UNIQUE KEY `uk_turn_active` (`chat_session_id`, `active_slot`),
-  KEY `idx_turn_session_status` (`chat_session_id`, `status`, `created_at`),
-  KEY `idx_turn_user_created` (`user_id`, `created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Legacy tables retained for rollback safety; new code does not read or write them.
-CREATE TABLE IF NOT EXISTS `chat_summary` (
-  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  `chat_session_id` BIGINT UNSIGNED NOT NULL,
-  `from_sequence_no` INT UNSIGNED NOT NULL,
-  `to_sequence_no` INT UNSIGNED NOT NULL,
-  `content` MEDIUMTEXT NOT NULL,
-  `token_count` INT UNSIGNED NOT NULL,
-  `model_config_id` BIGINT UNSIGNED NOT NULL,
-  `model_revision` INT UNSIGNED NOT NULL,
+  `text` MEDIUMTEXT NOT NULL,
+  `metadata` JSON DEFAULT NULL,
+  `raw` JSON NOT NULL,
+  `schema_version` INT UNSIGNED NOT NULL DEFAULT 1,
   `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_summary_range` (`chat_session_id`, `from_sequence_no`, `to_sequence_no`),
-  KEY `idx_summary_session_end` (`chat_session_id`, `to_sequence_no`)
+  UNIQUE KEY `uk_session_seq` (`session_id`, `seq`),
+  KEY `idx_message_run` (`agent_run_id`),
+  KEY `idx_message_session_created` (`session_id`, `created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE TABLE IF NOT EXISTS `chat_outbox` (
-  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  `turn_id` VARCHAR(64) NOT NULL,
-  `user_id` BIGINT UNSIGNED NOT NULL,
-  `status` TINYINT UNSIGNED NOT NULL DEFAULT 1,
-  `stream_id` VARCHAR(64) DEFAULT NULL,
-  `attempts` INT UNSIGNED NOT NULL DEFAULT 0,
-  `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-  `published_at` DATETIME(3) DEFAULT NULL,
-  `updated_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_outbox_turn` (`turn_id`),
-  KEY `idx_outbox_status_created` (`status`, `created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- =============================================================================
--- user.sql — common query templates
--- =============================================================================
-
--- 创建用户。参数顺序：name, password_hash, salt, email, phone。
-INSERT INTO `user` (`name`, `password`, `salt`, `email`, `phone`)
-VALUES (?, ?, ?, ?, ?);
-
--- 按 ID 查询未删除用户。
-SELECT `id`, `name`, `email`, `phone`, `created_at`, `updated_at`
-FROM `user`
-WHERE `id` = ? AND `deleted_at` IS NULL
-LIMIT 1;
-
--- 登录查询需要读取密码哈希和盐；参数为 name/email/phone 三次。
-SELECT `id`, `name`, `password`, `salt`, `email`, `phone`
-FROM `user`
-WHERE `deleted_at` IS NULL
-  AND (`name` = ? OR `email` = ? OR `phone` = ?)
-LIMIT 1;
-
--- 使用 ID 游标分页，参数顺序：cursor_id, page_size。
-SELECT `id`, `name`, `email`, `phone`, `created_at`, `updated_at`
-FROM `user`
-WHERE `deleted_at` IS NULL AND `id` < ?
-ORDER BY `id` DESC
-LIMIT ?;
-
--- 修改邮箱和手机号。参数顺序：email, phone, id。
-UPDATE `user`
-SET `email` = ?, `phone` = ?
-WHERE `id` = ? AND `deleted_at` IS NULL;
-
--- 修改密码。参数顺序：new_password_hash, new_salt, id。
-UPDATE `user`
-SET `password` = ?, `salt` = ?
-WHERE `id` = ? AND `deleted_at` IS NULL;
-
--- 软删除与恢复，参数均为 id。
-UPDATE `user` SET `deleted_at` = CURRENT_TIMESTAMP
-WHERE `id` = ? AND `deleted_at` IS NULL;
-
-UPDATE `user` SET `deleted_at` = NULL
-WHERE `id` = ? AND `deleted_at` IS NOT NULL;
-
--- 仅在明确需要物理清理时使用硬删除。
-DELETE FROM `user` WHERE `id` = ?;

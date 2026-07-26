@@ -6,20 +6,19 @@ import (
 	"easygo-agent/internal/auth"
 	"easygo-agent/internal/controller"
 	"easygo-agent/internal/handler"
-	"easygo-agent/internal/middleware"
 	"easygo-agent/internal/platform/errorcode"
-	"easygo-agent/internal/response"
+	"easygo-agent/internal/platform/middleware"
+	"easygo-agent/internal/platform/response"
 
 	"github.com/gin-gonic/gin"
 )
 
-// NewRouter 创建 HTTP 路由
 func NewRouter(
 	health *handler.HealthHandler,
 	userCtl *controller.UserController,
 	authCtl *controller.AuthController,
-	modelConfigCtl *controller.ModelConfigController,
-	turnCtl *controller.ChatTurnController,
+	providerCtl *controller.ProviderController,
+	chatCtl *controller.ChatController,
 	issuer *auth.Issuer,
 ) *gin.Engine {
 	router := gin.New()
@@ -31,33 +30,32 @@ func NewRouter(
 		middleware.CORS([]string{"http://localhost:3000", "http://localhost:5173"}),
 	)
 
-	// 健康检查
 	router.GET("/healthz", health.Live)
 	router.GET("/readyz", health.Ready)
 
 	v1 := router.Group("/api/v1")
 	{
 		v1.POST("/auth/login", authCtl.Login)
-		// 用户 API
 		v1.POST("/users", userCtl.Create)
 		authorized := v1.Group("", middleware.RequireAuth(issuer))
 		{
-			authorized.PUT("/credentials", modelConfigCtl.PutCredential)
-			authorized.POST("/model-configs", modelConfigCtl.Create)
-			authorized.GET("/model-configs", modelConfigCtl.List)
-			authorized.POST("/sessions/:id/turns:stream", turnCtl.Stream)
-			authorized.POST("/sessions", turnCtl.CreateSession)
-			authorized.GET("/sessions", turnCtl.ListSessions)
-			authorized.GET("/sessions/:session_id/messages", turnCtl.ListMessages)
-			authorized.PATCH("/sessions/:id/model", turnCtl.SwitchModel)
-			authorized.GET("/turns/:turn_id", turnCtl.Get)
+			authorized.PUT("/providers", providerCtl.UpsertProvider)
+			authorized.GET("/providers", providerCtl.ListProviders)
+			authorized.POST("/ai-models", providerCtl.CreateAIModel)
+			authorized.GET("/ai-models", providerCtl.ListAIModels)
+
+			authorized.POST("/sessions", chatCtl.CreateSession)
+			authorized.GET("/sessions", chatCtl.ListSessions)
+			authorized.GET("/sessions/:id/messages", chatCtl.ListMessages)
+			authorized.PATCH("/sessions/:id/model", chatCtl.SwitchModel)
+			authorized.POST("/sessions/:id/runs:stream", chatCtl.Stream)
+			authorized.GET("/runs/:run_id", chatCtl.GetRun)
 		}
 		v1.GET("/users/:id", userCtl.GetByID)
 		v1.GET("/users", userCtl.GetByName)
 		v1.PATCH("/users/:id/contact", userCtl.UpdateContact)
 		v1.PATCH("/users/:id/password", userCtl.UpdatePassword)
 		v1.DELETE("/users/:id", userCtl.Delete)
-
 	}
 
 	router.NoRoute(func(c *gin.Context) {

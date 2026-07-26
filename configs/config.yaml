@@ -9,11 +9,6 @@ mysql:
   max_open_conns: 100
   conn_max_lifetime: 3600
 
-agent:
-  instruction: "You are EasyGo, a helpful assistant. Provide clear, accurate, and concise responses."
-  revision: "chat-v1"
-  turn_timeout_seconds: 300
-
 logger:
   environment: development
   level: info

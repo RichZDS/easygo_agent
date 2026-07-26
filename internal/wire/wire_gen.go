@@ -7,37 +7,33 @@
 package wire
 
 import (
-	agentframework "easygo-agent/internal/agent"
+	"easygo-agent/internal/agent"
 	"easygo-agent/internal/auth"
 	"easygo-agent/internal/controller"
 	"easygo-agent/internal/credential"
 	"easygo-agent/internal/service/account"
 	"easygo-agent/internal/service/chat"
-	"easygo-agent/internal/service/modelconfig"
+	"easygo-agent/internal/service/providerconfig"
 	"easygo-agent/internal/service/user"
 
 	"gorm.io/gorm"
 )
 
-func InitControllers(
-	db *gorm.DB,
-	cipher *credential.Cipher,
-	issuer *auth.Issuer,
-	runtime *agentframework.RuntimeFactory,
-) *controller.AllControllers {
+func InitControllers(db *gorm.DB, cipher *credential.Cipher, issuer *auth.Issuer, runtime *agent.RuntimeFactory) *controller.AllControllers {
 	userService := user.NewUserService(db)
 	userController := controller.NewUserController(userService)
-	accountService := account.New(userService, issuer)
-	authController := controller.NewAuthController(accountService)
-	modelConfigService := modelconfig.New(db, cipher, runtime)
-	modelConfigController := controller.NewModelConfigController(modelConfigService)
-	turnService := chat.NewTurnService(db, cipher, runtime)
-	executionService := chat.NewExecutionService(turnService)
-	turnController := controller.NewChatTurnController(turnService, executionService)
-	return &controller.AllControllers{
-		User:        userController,
-		Auth:        authController,
-		ModelConfig: modelConfigController,
-		Turn:        turnController,
+	service := account.New(userService, issuer)
+	authController := controller.NewAuthController(service)
+	providerconfigService := providerconfig.New(db, cipher, runtime)
+	providerController := controller.NewProviderController(providerconfigService)
+	runService := chat.NewRunService(db, runtime, providerconfigService)
+	executionService := chat.NewExecutionService(runService)
+	chatController := controller.NewChatController(runService, executionService)
+	allControllers := &controller.AllControllers{
+		User:     userController,
+		Auth:     authController,
+		Provider: providerController,
+		Chat:     chatController,
 	}
+	return allControllers
 }

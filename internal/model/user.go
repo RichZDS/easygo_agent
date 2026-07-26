@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"easygo-agent/internal/errorcode"
+	"easygo-agent/internal/platform/errorcode"
 
 	"gorm.io/gorm"
 )

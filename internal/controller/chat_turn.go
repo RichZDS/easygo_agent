@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"net/http"
 
-	"easygo-agent/internal/errorcode"
 	"easygo-agent/internal/middleware"
+	"easygo-agent/internal/platform/errorcode"
 	"easygo-agent/internal/response"
 	"easygo-agent/internal/service/chat"
 

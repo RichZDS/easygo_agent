@@ -1,11 +1,12 @@
 package controller
 
 import (
-	"easygo-agent/internal/errorcode"
 	"easygo-agent/internal/middleware"
 	"easygo-agent/internal/model"
+	"easygo-agent/internal/platform/errorcode"
 	"easygo-agent/internal/response"
 	"easygo-agent/internal/service/modelconfig"
+
 	"github.com/gin-gonic/gin"
 )
 

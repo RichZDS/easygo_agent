@@ -5,9 +5,9 @@ import (
 
 	"easygo-agent/internal/auth"
 	"easygo-agent/internal/controller"
-	"easygo-agent/internal/errorcode"
 	"easygo-agent/internal/handler"
 	"easygo-agent/internal/middleware"
+	"easygo-agent/internal/platform/errorcode"
 	"easygo-agent/internal/response"
 
 	"github.com/gin-gonic/gin"

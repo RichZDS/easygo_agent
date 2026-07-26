@@ -6,106 +6,81 @@ import (
 	"time"
 
 	"github.com/cloudwego/eino/adk"
-	"github.com/cloudwego/eino/adk/middlewares/summarization"
 	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/schema"
 )
 
-// RuntimeConfig 定义 Agent 运行时的全局行为参数。
-type RuntimeConfig struct {
-	Instruction string        // 注入 ChatModelAgent 的系统指令
-	Revision    string        // 配置版本标识，便于追踪变更
-	TurnTimeout time.Duration // 单轮对话超时时间
-}
+const (
+	DefaultInstruction     = "You are EasyGo, a helpful assistant. Provide clear, accurate, and concise responses."
+	DefaultRunTimeout      = 5 * time.Minute
+	DefaultContextMessageN = 40
+	AgentName              = "easygo-chat"
+)
 
-// RuntimeFactory 基于 Registry 组装 Eino ADK Runner，负责模型实例化与中间件装配。
+// RuntimeFactory builds TypedRunner[*schema.AgenticMessage].
 type RuntimeFactory struct {
 	registry *Registry
-	config   RuntimeConfig
 }
 
-// NewRuntimeFactory 创建运行时工厂，依赖已配置好的模型注册表。
-func NewRuntimeFactory(registry *Registry, config RuntimeConfig) *RuntimeFactory {
-	return &RuntimeFactory{registry: registry, config: config}
+func NewRuntimeFactory(registry *Registry) *RuntimeFactory {
+	return &RuntimeFactory{registry: registry}
 }
 
-// Config 返回当前运行时配置副本。
-func (f *RuntimeFactory) Config() RuntimeConfig {
-	return f.config
-}
-
-// Supports 委托 Registry 判断供应商是否可用。
 func (f *RuntimeFactory) Supports(provider string) bool {
 	return f.registry.Supports(provider)
 }
 
-// Build 根据 ModelSpec 构造可流式运行的 Eino ADK Runner。
-// maxContextTokens 为模型上下文窗口上限，用于计算摘要触发阈值。
+func (f *RuntimeFactory) RunTimeout() time.Duration {
+	return DefaultRunTimeout
+}
+
+func (f *RuntimeFactory) ContextMessageLimit() int {
+	return DefaultContextMessageN
+}
+
+// Build constructs a streaming TypedRunner. CheckPointStore is reserved (nil TODO).
+// Tools registration point is reserved (empty list TODO).
 func (f *RuntimeFactory) Build(
 	ctx context.Context,
 	spec ModelSpec,
-	maxContextTokens uint32,
-) (*adk.Runner, error) {
-	chatModel, err := f.registry.Build(ctx, spec)
+) (*adk.TypedRunner[*schema.AgenticMessage], error) {
+	agenticModel, err := f.registry.Build(ctx, spec)
 	if err != nil {
 		return nil, err
 	}
-	return f.buildRunner(ctx, chatModel, maxContextTokens, spec.MaxOutputTokens)
+	return f.buildRunner(ctx, agenticModel)
 }
 
-// buildRunner 装配 ChatModelAgent 与摘要中间件，并包装为 ADK Runner。
 func (f *RuntimeFactory) buildRunner(
 	ctx context.Context,
-	chatModel model.BaseChatModel,
-	maxContextTokens uint32,
-	maxOutputTokens uint32,
-) (*adk.Runner, error) {
-	if maxContextTokens <= maxOutputTokens {
-		return nil, fmt.Errorf("max context tokens must exceed max output tokens")
-	}
-	// 预留输出 token 后，剩余部分作为可用输入上下文。
-	availableInput := int(maxContextTokens - maxOutputTokens)
-	// 当上下文 token 达到可用输入的 80% 时触发自动摘要，防止窗口溢出。
-	summaryThreshold := availableInput * 80 / 100
-	if summaryThreshold < 1 {
-		return nil, fmt.Errorf("model context budget is too small")
-	}
+	agenticModel model.AgenticModel,
+) (*adk.TypedRunner[*schema.AgenticMessage], error) {
+	_ = []adk.TypedChatModelAgentMiddleware[*schema.AgenticMessage](nil) // Tools/handlers TODO
 
-	summaryRetries := 2
-	summarizer, err := summarization.New(ctx, &summarization.Config{
-		Model: chatModel,
-		Trigger: &summarization.TriggerCondition{
-			ContextTokens: summaryThreshold,
-		},
-		Retry: &summarization.RetryConfig{
-			MaxRetries: &summaryRetries,
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("create Eino summarization middleware: %w", err)
-	}
-
-	chatAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
-		Name:        "easygo-chat",
+	chatAgent, err := adk.NewTypedChatModelAgent(ctx, &adk.TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        AgentName,
 		Description: "EasyGo conversational assistant",
-		Instruction: f.config.Instruction,
-		Model:       chatModel,
-		Handlers:    []adk.ChatModelAgentMiddleware{summarizer},
-		ModelRetryConfig: &adk.ModelRetryConfig{
+		Instruction: DefaultInstruction,
+		Model:       agenticModel,
+		ToolsConfig: adk.ToolsConfig{}, // TODO: register tools
+		ModelRetryConfig: &adk.TypedModelRetryConfig[*schema.AgenticMessage]{
 			MaxRetries: 2,
-			// 仅在模型调用出错且未产生任何输出消息时重试，避免重复回复。
-			ShouldRetry: func(_ context.Context, retry *adk.RetryContext) *adk.RetryDecision {
-				return &adk.RetryDecision{
-					Retry: retry != nil && retry.Err != nil && retry.OutputMessage == nil,
+			ShouldRetry: func(_ context.Context, retry *adk.TypedRetryContext[*schema.AgenticMessage]) *adk.TypedRetryDecision[*schema.AgenticMessage] {
+				return &adk.TypedRetryDecision[*schema.AgenticMessage]{
+					Retry: retry != nil && retry.Err != nil && any(retry.OutputMessage) == nil,
 				}
 			},
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("create Eino ChatModelAgent: %w", err)
+		return nil, fmt.Errorf("create TypedChatModelAgent: %w", err)
 	}
 
-	return adk.NewRunner(ctx, adk.RunnerConfig{
+	// CheckPointStore: reserved, nil for now (TODO).
+	var checkPointStore adk.CheckPointStore
+	return adk.NewTypedRunner(adk.TypedRunnerConfig[*schema.AgenticMessage]{
 		Agent:           chatAgent,
 		EnableStreaming: true,
+		CheckPointStore: checkPointStore,
 	}), nil
 }

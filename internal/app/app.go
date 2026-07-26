@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	agentframework "easygo-agent/internal/agent"
 	"easygo-agent/internal/agent/callback"
@@ -66,14 +65,7 @@ func Run(configPath string) error {
 	}()
 
 	callback.Init()
-	runtime := agentframework.NewRuntimeFactory(
-		agentframework.NewRegistry(),
-		agentframework.RuntimeConfig{
-			Instruction: cfg.Agent.Instruction,
-			Revision:    cfg.Agent.Revision,
-			TurnTimeout: time.Duration(cfg.Agent.TurnTimeoutSeconds) * time.Second,
-		},
-	)
+	runtime := agentframework.NewRuntimeFactory(agentframework.NewRegistry())
 	healthHandler := handler.NewHealthHandler(map[string]handler.CheckFunc{
 		"mysql": sqlDB.PingContext,
 	})
@@ -82,8 +74,8 @@ func Run(configPath string) error {
 		healthHandler,
 		controllers.User,
 		controllers.Auth,
-		controllers.ModelConfig,
-		controllers.Turn,
+		controllers.Provider,
+		controllers.Chat,
 		issuer,
 	)
 	logger.Info("application initialized", zap.String("name", "easygo-agent"))

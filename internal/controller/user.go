@@ -5,7 +5,7 @@ import (
 	"strconv"
 
 	"easygo-agent/internal/platform/errorcode"
-	"easygo-agent/internal/response"
+	"easygo-agent/internal/platform/response"
 	"easygo-agent/internal/service/user"
 
 	"github.com/gin-gonic/gin"

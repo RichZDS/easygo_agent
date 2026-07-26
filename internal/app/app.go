@@ -11,6 +11,8 @@ import (
 	"easygo-agent/internal/agent/callback"
 	"easygo-agent/internal/config"
 	"easygo-agent/internal/credential"
+	"easygo-agent/internal/cronjob"
+	"easygo-agent/internal/framejob"
 	"easygo-agent/internal/platform/auth"
 	"easygo-agent/internal/platform/handler"
 	"easygo-agent/internal/platform/logger"
@@ -65,6 +67,19 @@ func Run(configPath string) error {
 	}()
 
 	callback.Init()
+
+	cronMgr := cronjob.NewManager(db)
+	cronjob.RegisterBuiltinCronJobs(cronMgr)
+	if err := cronMgr.Start(ctx); err != nil {
+		return fmt.Errorf("start cronjob manager: %w", err)
+	}
+	defer cronMgr.Stop()
+
+	frameMgr := framejob.NewManager()
+	framejob.RegisterBuiltinFrameJobs(frameMgr)
+	frameMgr.Start(ctx)
+	defer frameMgr.Stop()
+
 	runtime := agentframework.NewRuntimeFactory(agentframework.NewRegistry())
 	healthHandler := handler.NewHealthHandler(map[string]handler.CheckFunc{
 		"mysql": sqlDB.PingContext,

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"time"
 
+	"easygo-agent/internal/platform/requestid"
+
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
@@ -26,21 +28,31 @@ func (l *gormLogger) LogMode(level gormlogger.LogLevel) gormlogger.Interface {
 	return &clone
 }
 
+func (l *gormLogger) withTraceID(ctx context.Context) *zap.Logger {
+	if id := requestid.From(ctx); id != "" {
+		return l.log.With(zap.String("trace_id", id))
+	}
+	if id := requestid.Current(); id != "" {
+		return l.log.With(zap.String("trace_id", id))
+	}
+	return l.log
+}
+
 func (l *gormLogger) Info(ctx context.Context, message string, args ...any) {
 	if l.level >= gormlogger.Info {
-		l.log.Info("gorm: "+message, zap.Any("args", args))
+		l.withTraceID(ctx).Info("gorm: "+message, zap.Any("args", args))
 	}
 }
 
 func (l *gormLogger) Warn(ctx context.Context, message string, args ...any) {
 	if l.level >= gormlogger.Warn {
-		l.log.Warn("gorm: "+message, zap.Any("args", args))
+		l.withTraceID(ctx).Warn("gorm: "+message, zap.Any("args", args))
 	}
 }
 
 func (l *gormLogger) Error(ctx context.Context, message string, args ...any) {
 	if l.level >= gormlogger.Error {
-		l.log.Error("gorm: "+message, zap.Any("args", args))
+		l.withTraceID(ctx).Error("gorm: "+message, zap.Any("args", args))
 	}
 }
 
@@ -55,13 +67,14 @@ func (l *gormLogger) Trace(ctx context.Context, begin time.Time, fn func() (stri
 		zap.Int64("rows", rows),
 		zap.String("sql", sql),
 	}
+	log := l.withTraceID(ctx)
 
 	switch {
 	case err != nil && !errors.Is(err, gorm.ErrRecordNotFound) && l.level >= gormlogger.Error:
-		l.log.Error("gorm query failed", append(fields, zap.Error(err))...)
+		log.Error("gorm query failed", append(fields, zap.Error(err))...)
 	case elapsed > l.slowThreshold && l.level >= gormlogger.Warn:
-		l.log.Warn("gorm slow query", fields...)
+		log.Warn("gorm slow query", fields...)
 	case l.level >= gormlogger.Info:
-		l.log.Debug("gorm query", fields...)
+		log.Debug("gorm query", fields...)
 	}
 }

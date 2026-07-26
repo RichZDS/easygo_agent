@@ -138,3 +138,31 @@ CREATE TABLE IF NOT EXISTS `chat_message` (
   KEY `idx_message_run` (`agent_run_id`),
   KEY `idx_message_session_created` (`session_id`, `created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- =============================================================================
+-- cron_job_run / cron_job_log
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS `cron_job_run` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `job_name` VARCHAR(128) NOT NULL,
+  `status` TINYINT NOT NULL COMMENT '1 running 2 success 3 failed 4 skipped',
+  `started_at` DATETIME(3) NOT NULL,
+  `finished_at` DATETIME(3) DEFAULT NULL,
+  `error_message` VARCHAR(1024) DEFAULT NULL,
+  `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  `updated_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (`id`),
+  KEY `idx_cron_job_run_name_started` (`job_name`, `started_at`),
+  KEY `idx_cron_job_run_status_started` (`status`, `started_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `cron_job_log` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `run_id` BIGINT UNSIGNED NOT NULL,
+  `level` VARCHAR(16) NOT NULL,
+  `message` TEXT NOT NULL,
+  `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (`id`),
+  KEY `idx_cron_job_log_run_id` (`run_id`, `id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

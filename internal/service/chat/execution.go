@@ -9,6 +9,7 @@ import (
 
 	"easygo-agent/internal/model"
 	"easygo-agent/internal/platform/logger"
+	"easygo-agent/internal/platform/requestid"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
@@ -63,6 +64,7 @@ func (s *ExecutionService) Run(
 	if emit == nil {
 		return model.AgentRunFailed, fmt.Errorf("stream emitter is required")
 	}
+	defer requestid.Attach(requestCtx)()
 
 	// 推送 running 事件
 	if err := emitExecutionEvent(emit, StreamEvent{
@@ -93,6 +95,7 @@ func (s *ExecutionService) Run(
 		// 获取下一个 Eino 事件
 		event, ok := iterator.Next()
 		if !ok {
+			logger.Info("no more events")
 			break
 		}
 		// 事件为空
@@ -280,6 +283,7 @@ func consumeMessageOutput(
 	return []*schema.AgenticMessage{merged}, tokensFromMessage(merged), nil
 }
 
+// 推送动作事件
 func emitAction(event *adk.TypedAgentEvent[*schema.AgenticMessage], emit EmitFunc) error {
 	actionType := "action"
 	if event.Action.Interrupted != nil {
@@ -295,6 +299,7 @@ func emitAction(event *adk.TypedAgentEvent[*schema.AgenticMessage], emit EmitFun
 	})
 }
 
+// 推送错误事件
 func einoErrorEvent(event *adk.TypedAgentEvent[*schema.AgenticMessage]) EinoSSEEvent {
 	msg := ""
 	if event.Err != nil {
@@ -315,6 +320,7 @@ func emitExecutionEvent(emit EmitFunc, event StreamEvent) error {
 	return nil
 }
 
+// 从消息中提取 token 使用情况
 func tokensFromMessage(msg *schema.AgenticMessage) tokenUsage {
 	if msg == nil || msg.ResponseMeta == nil || msg.ResponseMeta.TokenUsage == nil {
 		return tokenUsage{}

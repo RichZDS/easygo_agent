@@ -8,8 +8,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// RequestIDKey 是存储在 gin.Context 中的 request_id 的键名。
-// 由 middleware.RequestID 中间件注入，供 response 和 controller 层使用。
+// RequestIDKey 是存储在 gin.Context 中的 request_id 的键名（HTTP 响应体字段）。
+// 同一值会作为 trace_id 写入 request context，并 Bind 到当前 goroutine 供日志串联。
 const RequestIDKey = "request_id"
 
 type Body struct {

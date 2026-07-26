@@ -169,6 +169,9 @@ func (s *RunService) Prepare(
 		// Step 6.7: 加载最近 N 条会话历史（含刚写入的用户消息），转为 Eino AgenticMessage。
 		// N 由 runtime.ContextMessageLimit() 决定，控制 LLM 上下文窗口大小。
 		history, err := model.ListRecentMessages(ctx, tx, sessionID, s.runtime.ContextMessageLimit())
+
+		//todo 历史压缩  根据modle的max_context_length压缩
+		history, err = CompactHistory(history, s.runtime.ContextMessageLimit())
 		if err != nil {
 			return err
 		}

@@ -10,7 +10,7 @@ import (
 
 type Config struct {
 	MySQL  MySQL  `yaml:"mysql"`
-	Redis  Redis  `yaml:"redis"`
+	Agent  Agent  `yaml:"agent"`
 	Logger Logger `yaml:"logger"`
 }
 
@@ -23,16 +23,13 @@ type MySQL struct {
 	Charset         string `yaml:"charset"`
 	MaxIdleConns    int    `yaml:"max_idle_conns"`
 	MaxOpenConns    int    `yaml:"max_open_conns"`
-	ConnMaxLifetime int    `yaml:"conn_max_lifetime"` // seconds
+	ConnMaxLifetime int    `yaml:"conn_max_lifetime"`
 }
 
-type Redis struct {
-	Host               string `yaml:"host"`
-	Port               int    `yaml:"port"`
-	Password           string `yaml:"password"`
-	DB                 int    `yaml:"db"`
-	CacheTTLSeconds    int    `yaml:"cache_ttl_seconds"`    // 缓存滑动过期时间（秒），默认 600
-	ContextMaxMessages int    `yaml:"context_max_messages"`  // 单次获取上下文最大消息条数，默认 50
+type Agent struct {
+	Instruction        string `yaml:"instruction"`
+	Revision           string `yaml:"revision"`
+	TurnTimeoutSeconds int    `yaml:"turn_timeout_seconds"`
 }
 
 type Logger struct {
@@ -79,11 +76,11 @@ func (cfg Config) Validate() error {
 	if cfg.MySQL.ConnMaxLifetime <= 0 {
 		return fmt.Errorf("mysql conn_max_lifetime must be greater than zero")
 	}
-	if cfg.Redis.Host == "" || cfg.Redis.Port <= 0 || cfg.Redis.Port > 65535 {
-		return fmt.Errorf("redis host or port is invalid")
+	if cfg.Agent.Instruction == "" || cfg.Agent.Revision == "" {
+		return fmt.Errorf("agent instruction and revision cannot be empty")
 	}
-	if cfg.Redis.DB < 0 {
-		return fmt.Errorf("redis db cannot be negative")
+	if cfg.Agent.TurnTimeoutSeconds <= 0 {
+		return fmt.Errorf("agent turn_timeout_seconds must be greater than zero")
 	}
 	return nil
 }

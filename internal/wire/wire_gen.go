@@ -7,42 +7,37 @@
 package wire
 
 import (
+	agentframework "easygo-agent/internal/agent"
 	"easygo-agent/internal/auth"
 	"easygo-agent/internal/controller"
 	"easygo-agent/internal/credential"
-	"easygo-agent/internal/repository/chatcache"
 	"easygo-agent/internal/service/account"
 	"easygo-agent/internal/service/chat"
 	"easygo-agent/internal/service/modelconfig"
 	"easygo-agent/internal/service/user"
+
 	"gorm.io/gorm"
 )
 
-// Injectors from wire.go:
-
-func InitControllers(db *gorm.DB, cacheCfg chatcache.Config, cipher *credential.Cipher, issuer *auth.Issuer, events chat.TurnEventSink, cancellations *chat.CancellationCoordinator) *controller.AllControllers {
+func InitControllers(
+	db *gorm.DB,
+	cipher *credential.Cipher,
+	issuer *auth.Issuer,
+	runtime *agentframework.RuntimeFactory,
+) *controller.AllControllers {
 	userService := user.NewUserService(db)
 	userController := controller.NewUserController(userService)
 	accountService := account.New(userService, issuer)
 	authController := controller.NewAuthController(accountService)
-	chatSessionService := chat.NewChatSessionService(db)
-	chatSessionController := controller.NewChatSessionController(chatSessionService)
-	chatCacheRepo := chatcache.NewChatCacheRepo(cacheCfg)
-	chatMessageService := chat.NewChatMessageService(db, chatCacheRepo)
-	chatMessageController := controller.NewChatMessageController(chatMessageService)
-	modelConfigService := modelconfig.New(db, cipher)
+	modelConfigService := modelconfig.New(db, cipher, runtime)
 	modelConfigController := controller.NewModelConfigController(modelConfigService)
-	turnService := chat.NewTurnService(db, events, cancellations)
-	turnController := controller.NewChatTurnController(turnService)
-	agentChatService := chat.NewAgentChatService(db, chatCacheRepo, chatMessageService)
-	allControllers := &controller.AllControllers{
+	turnService := chat.NewTurnService(db, cipher, runtime)
+	executionService := chat.NewExecutionService(turnService)
+	turnController := controller.NewChatTurnController(turnService, executionService)
+	return &controller.AllControllers{
 		User:        userController,
-		Session:     chatSessionController,
-		Message:     chatMessageController,
 		Auth:        authController,
 		ModelConfig: modelConfigController,
 		Turn:        turnController,
-		AgentChat:   agentChatService,
 	}
-	return allControllers
 }

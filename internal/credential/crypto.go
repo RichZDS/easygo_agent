@@ -1,6 +1,6 @@
 // Package credential encrypts user-supplied provider credentials at rest.
 // The key is deliberately supplied by the deployment environment, never by
-// MySQL, Redis, or application YAML.
+// MySQL or application YAML.
 package credential
 
 import (
@@ -33,6 +33,10 @@ type Ciphertext struct {
 type Cipher struct {
 	aead       cipher.AEAD
 	keyVersion string
+}
+
+func AssociatedData(userID uint64, provider string) []byte {
+	return []byte(fmt.Sprintf("user:%d:provider:%s", userID, provider))
 }
 
 func NewFromBase64(encodedKey, keyVersion string) (*Cipher, error) {

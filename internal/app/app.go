@@ -6,7 +6,9 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	agentframework "easygo-agent/internal/agent"
 	"easygo-agent/internal/agent/callback"
 	"easygo-agent/internal/auth"
 	"easygo-agent/internal/config"
@@ -14,11 +16,7 @@ import (
 	"easygo-agent/internal/handler"
 	"easygo-agent/internal/platform/logger"
 	mysqlplatform "easygo-agent/internal/platform/mysql"
-	redisplatform "easygo-agent/internal/platform/redis"
-	chatcache "easygo-agent/internal/repository/chatcache"
 	"easygo-agent/internal/server"
-	"easygo-agent/internal/service/chat"
-	"easygo-agent/internal/taskmanager"
 	"easygo-agent/internal/wire"
 
 	"go.uber.org/zap"
@@ -37,8 +35,6 @@ func Run(configPath string) error {
 	if err != nil {
 		return fmt.Errorf("configure credential encryption: %w", err)
 	}
-
-	// 初始化全局日志（之后任意包通过 logger.L() 使用）
 	if err := logger.Init(logger.Config{
 		Environment: cfg.Logger.Environment,
 		Level:       cfg.Logger.Level,
@@ -52,75 +48,44 @@ func Run(configPath string) error {
 	}
 	defer func() { _ = logger.Sync() }()
 
-	// 创建上下文
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// 创建 MySQL 连接
 	db, err := mysqlplatform.Open(ctx, cfg.MySQL)
 	if err != nil {
 		return err
 	}
-	// 获取 MySQL 连接池
 	sqlDB, err := db.DB()
 	if err != nil {
 		return fmt.Errorf("get mysql pool: %w", err)
 	}
-	// 关闭 MySQL 连接池
 	defer func() {
 		if closeErr := sqlDB.Close(); closeErr != nil {
 			logger.Error("close mysql", zap.Error(closeErr))
 		}
 	}()
 
-	// 初始化全局 Redis 连接
-	if err := redisplatform.Init(ctx, cfg.Redis); err != nil {
-		return err
-	}
-	// 关闭 Redis 连接
-	defer func() {
-		if closeErr := redisplatform.Close(); closeErr != nil {
-			logger.Error("close redis", zap.Error(closeErr))
-		}
-	}()
-
-	// The legacy scheduler remains available for periodic maintenance. The
-	// Stream worker owns durable outbox publication; processing is attached with
-	// the provider executor in the next batch.
-	go func() {
-		taskManager := taskmanager.NewTaskManager()
-		taskManager.RegisterBuiltinTasks()
-		taskManager.Run(ctx)
-	}()
-	cacheConfig := chatcache.Config{
-		TTLSeconds:  cfg.Redis.CacheTTLSeconds,
-		MaxMessages: cfg.Redis.ContextMaxMessages,
-	}
-	turnEvents := chat.NewRedisTurnEventSink()
-	cancellations := chat.NewCancellationCoordinator()
-	turnService := chat.NewTurnService(db, turnEvents, cancellations)
-	executionService := chat.NewExecutionService(
-		db,
-		cipher,
-		chatcache.NewChatCacheRepo(cacheConfig),
-		chat.NewHTTPProviderStreamer(nil),
-		turnEvents,
-		cancellations,
-	)
-	go taskmanager.NewStreamWorker(turnService, executionService).Run(ctx)
-
-	// 初始化回调处理器
 	callback.Init()
-	// 创建健康检查处理器
+	runtime := agentframework.NewRuntimeFactory(
+		agentframework.NewRegistry(),
+		agentframework.RuntimeConfig{
+			Instruction: cfg.Agent.Instruction,
+			Revision:    cfg.Agent.Revision,
+			TurnTimeout: time.Duration(cfg.Agent.TurnTimeoutSeconds) * time.Second,
+		},
+	)
 	healthHandler := handler.NewHealthHandler(map[string]handler.CheckFunc{
 		"mysql": sqlDB.PingContext,
-		"redis": func(ctx context.Context) error { return redisplatform.L().Ping(ctx).Err() },
 	})
-
-	// 使用 Wire 依赖注入创建所有 Controller
-	ctls := wire.InitControllers(db, cacheConfig, cipher, issuer, turnEvents, cancellations)
-
-	router := server.NewRouter(healthHandler, ctls.User, ctls.Session, ctls.Message, ctls.Auth, ctls.ModelConfig, ctls.Turn, issuer)
+	controllers := wire.InitControllers(db, cipher, issuer, runtime)
+	router := server.NewRouter(
+		healthHandler,
+		controllers.User,
+		controllers.Auth,
+		controllers.ModelConfig,
+		controllers.Turn,
+		issuer,
+	)
 	logger.Info("application initialized", zap.String("name", "easygo-agent"))
 	return server.Run(ctx, server.DefaultConfig(), router)
 }

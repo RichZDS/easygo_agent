@@ -17,8 +17,6 @@ import (
 func NewRouter(
 	health *handler.HealthHandler,
 	userCtl *controller.UserController,
-	sessionCtl *controller.ChatSessionController,
-	msgCtl *controller.ChatMessageController,
 	authCtl *controller.AuthController,
 	modelConfigCtl *controller.ModelConfigController,
 	turnCtl *controller.ChatTurnController,
@@ -47,14 +45,12 @@ func NewRouter(
 			authorized.PUT("/credentials", modelConfigCtl.PutCredential)
 			authorized.POST("/model-configs", modelConfigCtl.Create)
 			authorized.GET("/model-configs", modelConfigCtl.List)
-			authorized.POST("/sessions/:id/turns", turnCtl.Create)
-			authorized.POST("/chat-sessions", turnCtl.CreateSession)
-			authorized.GET("/chat-sessions", turnCtl.ListSessions)
-			authorized.GET("/chat-sessions/:session_id/messages", turnCtl.ListMessages)
+			authorized.POST("/sessions/:id/turns:stream", turnCtl.Stream)
+			authorized.POST("/sessions", turnCtl.CreateSession)
+			authorized.GET("/sessions", turnCtl.ListSessions)
+			authorized.GET("/sessions/:session_id/messages", turnCtl.ListMessages)
 			authorized.PATCH("/sessions/:id/model", turnCtl.SwitchModel)
 			authorized.GET("/turns/:turn_id", turnCtl.Get)
-			authorized.GET("/turns/:turn_id/events", turnCtl.Events)
-			authorized.POST("/turns/:turn_id/cancel", turnCtl.Cancel)
 		}
 		v1.GET("/users/:id", userCtl.GetByID)
 		v1.GET("/users", userCtl.GetByName)
@@ -62,26 +58,6 @@ func NewRouter(
 		v1.PATCH("/users/:id/password", userCtl.UpdatePassword)
 		v1.DELETE("/users/:id", userCtl.Delete)
 
-		// 聊天会话 API
-		v1.POST("/sessions", sessionCtl.Create)
-		v1.GET("/sessions", sessionCtl.GetBySessionID)
-		v1.GET("/sessions/:id", sessionCtl.GetByID)
-		v1.GET("/users/:id/sessions", sessionCtl.ListByUserID)
-		v1.PATCH("/sessions/:id/title", sessionCtl.UpdateTitle)
-		v1.PATCH("/sessions/:id/status", sessionCtl.UpdateStatus)
-		v1.POST("/sessions/:id/messages", sessionCtl.RecordMessage)
-		v1.DELETE("/sessions/:id", sessionCtl.Delete)
-
-		// 聊天消息 API
-		v1.POST("/messages", msgCtl.Create)
-		v1.GET("/messages", msgCtl.GetByMessageID)
-		v1.GET("/messages/:id", msgCtl.GetByID)
-		v1.GET("/sessions/:id/messages", msgCtl.ListBySessionID)
-		v1.PATCH("/messages/:id/status", msgCtl.UpdateStatus)
-		v1.PATCH("/messages/:id/content", msgCtl.UpdateContent)
-		v1.PATCH("/messages/:id/tokens", msgCtl.UpdateTokens)
-		v1.PATCH("/messages/:id/error", msgCtl.SetError)
-		v1.DELETE("/messages/:id", msgCtl.Delete)
 	}
 
 	router.NoRoute(func(c *gin.Context) {

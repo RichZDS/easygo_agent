@@ -4,49 +4,35 @@
 package wire
 
 import (
+	agentframework "easygo-agent/internal/agent"
 	"easygo-agent/internal/auth"
-	"easygo-agent/internal/credential"
-	"github.com/google/wire"
-	"gorm.io/gorm"
-
 	"easygo-agent/internal/controller"
-	chatcache "easygo-agent/internal/repository/chatcache"
+	"easygo-agent/internal/credential"
 	"easygo-agent/internal/service/account"
 	"easygo-agent/internal/service/chat"
 	"easygo-agent/internal/service/modelconfig"
 	"easygo-agent/internal/service/user"
+
+	"github.com/google/wire"
+	"gorm.io/gorm"
 )
 
 func InitControllers(
 	db *gorm.DB,
-	cacheCfg chatcache.Config,
 	cipher *credential.Cipher,
 	issuer *auth.Issuer,
-	events chat.TurnEventSink,
-	cancellations *chat.CancellationCoordinator,
+	runtime *agentframework.RuntimeFactory,
 ) *controller.AllControllers {
 	wire.Build(
-		// Repositories
-		chatcache.NewChatCacheRepo,
-
-		// Services
 		user.NewUserService,
 		account.New,
 		modelconfig.New,
-		chat.NewChatSessionService,
-		chat.NewChatMessageService,
-		chat.NewAgentChatService,
 		chat.NewTurnService,
-
-		// Controllers
+		chat.NewExecutionService,
 		controller.NewUserController,
-		controller.NewChatSessionController,
-		controller.NewChatMessageController,
 		controller.NewAuthController,
 		controller.NewModelConfigController,
 		controller.NewChatTurnController,
-
-		// Struct aggregation
 		wire.Struct(new(controller.AllControllers), "*"),
 	)
 	return nil

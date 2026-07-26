@@ -9,8 +9,8 @@ import (
 
 	agentframework "easygo-agent/internal/agent"
 	"easygo-agent/internal/credential"
-	"easygo-agent/internal/errorcode"
 	"easygo-agent/internal/model"
+	"easygo-agent/internal/platform/errorcode"
 	"easygo-agent/internal/platform/uuidgen"
 
 	"github.com/cloudwego/eino/adk"
@@ -19,12 +19,14 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+// TurnService 管理聊天轮次（Turn）的生命周期：准备、执行收尾、会话与消息查询。
 type TurnService struct {
 	db      *gorm.DB
 	cipher  *credential.Cipher
 	runtime *agentframework.RuntimeFactory
 }
 
+// NewTurnService 创建轮次服务，依赖数据库、凭证解密与 Agent 运行时工厂。
 func NewTurnService(
 	db *gorm.DB,
 	cipher *credential.Cipher,
@@ -33,20 +35,24 @@ func NewTurnService(
 	return &TurnService{db: db, cipher: cipher, runtime: runtime}
 }
 
+// PreparedTurn 是 Prepare 阶段的输出，包含执行一轮对话所需的全部上下文。
 type PreparedTurn struct {
-	Turn     *model.ChatTurn
-	Session  *model.ChatSession
+	Turn     *model.ChatTurn    // 已创建并处于 running 状态的轮次记录
+	Session  *model.ChatSession // 所属会话（事务内加锁后的快照）
 	Config   *model.UserModelConfig
-	Runner   *adk.Runner
-	Messages []*schema.Message
+	Runner   *adk.Runner        // 已装配好的 Eino ADK Runner
+	Messages []*schema.Message  // 历史上下文 + 本轮用户输入
 }
 
+// DuplicateRequestError 表示相同 request_id 的幂等重试，携带已存在的轮次记录。
 type DuplicateRequestError struct {
 	Turn *model.ChatTurn
 }
 
 func (e *DuplicateRequestError) Error() string { return "duplicate request" }
 
+// Prepare 校验输入、加载模型配置、构建 Runner，并在事务内创建 Turn 与用户消息。
+// 通过 request_id 保证幂等；同一时刻每个会话仅允许一个 active turn。
 func (s *TurnService) Prepare(
 	ctx context.Context,
 	userID uint64,
@@ -118,6 +124,7 @@ func (s *TurnService) Prepare(
 	prepared := &PreparedTurn{Session: session, Config: config, Runner: runner}
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var lockedSession model.ChatSession
+		// 行级锁防止并发 Prepare 在同一 session 上创建多个 active turn。
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Where("id = ? AND user_id = ?", session.ID, userID).
 			First(&lockedSession).Error; err != nil {
@@ -229,6 +236,7 @@ func (s *TurnService) Prepare(
 	return prepared, nil
 }
 
+// expireStaleTurn 将已超时的 active turn 标记为 failed，释放 active_slot 供新轮次占用。
 func expireStaleTurn(tx *gorm.DB, sessionID uint64, now time.Time) error {
 	code := "execution_timeout"
 	message := "Turn exceeded its execution deadline"
@@ -243,6 +251,7 @@ func expireStaleTurn(tx *gorm.DB, sessionID uint64, now time.Time) error {
 		}).Error
 }
 
+// Finalize 在轮次结束时持久化助手输出并更新 Turn 终态；若 Turn 已非 running 则幂等跳过。
 func (s *TurnService) Finalize(
 	ctx context.Context,
 	prepared *PreparedTurn,
@@ -335,10 +344,12 @@ func (s *TurnService) Finalize(
 	})
 }
 
+// Get 按 turn_id 查询属于指定用户的轮次记录。
 func (s *TurnService) Get(ctx context.Context, userID uint64, turnID string) (*model.ChatTurn, error) {
 	return model.FindTurn(ctx, s.db, userID, turnID)
 }
 
+// SessionSummary 是会话列表 API 的响应视图。
 type SessionSummary struct {
 	SessionID            string     `json:"session_id"`
 	Title                string     `json:"title"`
@@ -349,6 +360,7 @@ type SessionSummary struct {
 	CreatedAt            time.Time  `json:"created_at"`
 }
 
+// ListSessions 返回用户的全部会话，按最近消息时间倒序。
 func (s *TurnService) ListSessions(ctx context.Context, userID uint64) ([]SessionSummary, error) {
 	var sessions []model.ChatSession
 	if err := s.db.WithContext(ctx).
@@ -372,6 +384,7 @@ func (s *TurnService) ListSessions(ctx context.Context, userID uint64) ([]Sessio
 	return result, nil
 }
 
+// MessageView 是消息列表 API 的响应视图。
 type MessageView struct {
 	MessageID        string          `json:"message_id"`
 	TurnID           *string         `json:"turn_id"`
@@ -387,6 +400,7 @@ type MessageView struct {
 	CreatedAt        time.Time       `json:"created_at"`
 }
 
+// ListMessages 返回会话内最近消息，limit 默认上限 200。
 func (s *TurnService) ListMessages(
 	ctx context.Context,
 	userID uint64,
@@ -429,6 +443,7 @@ func (s *TurnService) ListMessages(
 	return result, nil
 }
 
+// CreateSession 创建新会话并绑定指定的用户模型配置。
 func (s *TurnService) CreateSession(
 	ctx context.Context,
 	userID uint64,
@@ -453,6 +468,7 @@ func (s *TurnService) CreateSession(
 	return session, model.CreateChatSession(ctx, s.db, session)
 }
 
+// SwitchModel 切换会话绑定的模型配置；存在 active turn 时不允许切换。
 func (s *TurnService) SwitchModel(
 	ctx context.Context,
 	userID uint64,
@@ -491,6 +507,7 @@ func (s *TurnService) SwitchModel(
 	})
 }
 
+// messageStatusForTurn 将 Turn 终态映射为对应消息的持久化状态。
 func messageStatusForTurn(status uint8) uint8 {
 	switch status {
 	case model.TurnCompleted:
@@ -502,6 +519,7 @@ func messageStatusForTurn(status uint8) uint8 {
 	}
 }
 
+// messageTypeFor 根据 Eino 消息内容推断持久化消息类型。
 func messageTypeFor(message *schema.Message) uint8 {
 	if len(message.UserInputMultiContent) > 0 || len(message.AssistantGenMultiContent) > 0 {
 		return model.MessageTypeMultimodal
@@ -515,6 +533,7 @@ func messageTypeFor(message *schema.Message) uint8 {
 	return model.MessageTypeText
 }
 
+// stringPointer 将非空字符串转为指针，空串返回 nil。
 func stringPointer(value string) *string {
 	if value == "" {
 		return nil
@@ -522,6 +541,7 @@ func stringPointer(value string) *string {
 	return &value
 }
 
+// truncate 按 rune 截断字符串，避免截断多字节字符。
 func truncate(value string, max int) string {
 	runes := []rune(value)
 	if len(runes) <= max {

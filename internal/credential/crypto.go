@@ -1,6 +1,5 @@
-// Package credential encrypts user-supplied provider credentials at rest.
-// The key is deliberately supplied by the deployment environment, never by
-// MySQL or application YAML.
+// Package credential 负责用户供应商凭证的静态加密存储。
+// 加密密钥由部署环境注入，不来自 MySQL 或应用 YAML 配置。
 package credential
 
 import (
@@ -13,32 +12,34 @@ import (
 )
 
 const (
-	AlgorithmAES256GCM = "AES-256-GCM"
-	NonceSize          = 12
-	KeySize            = 32
+	AlgorithmAES256GCM = "AES-256-GCM" // 当前唯一支持的加密算法
+	NonceSize          = 12            // GCM 标准 nonce 长度（字节）
+	KeySize            = 32            // AES-256 密钥长度（字节）
 )
 
-// Ciphertext is the database-safe representation of an encrypted credential.
-// Ciphertext and Nonce are base64 so they can be transported without leaking
-// the plaintext into logs or JSON responses.
+// Ciphertext 是凭证在数据库中的安全存储形态。
+// Ciphertext 与 Nonce 使用 base64 编码，避免明文或二进制泄漏到日志与 JSON 响应。
 type Ciphertext struct {
-	Ciphertext string
-	Nonce      string
-	Algorithm  string
-	KeyVersion string
+	Ciphertext string // base64 编码的密文
+	Nonce      string // base64 编码的随机 nonce
+	Algorithm  string // 加密算法标识，用于密钥轮换时的解密路由
+	KeyVersion string // 密钥版本，与部署环境注入的 KEK 版本对应
 }
 
-// Cipher owns one versioned 32-byte KEK. A Cipher is intentionally created at
-// process startup and is never serialized.
+// Cipher 持有一个版本化的 32 字节 KEK（Key Encryption Key）。
+// 进程启动时创建，不参与序列化或持久化。
 type Cipher struct {
 	aead       cipher.AEAD
 	keyVersion string
 }
 
+// AssociatedData 构造 GCM 关联数据，将密文绑定到 user + provider 上下文。
+// 防止数据库行被复制到其他用户或供应商凭证下解密。
 func AssociatedData(userID uint64, provider string) []byte {
 	return []byte(fmt.Sprintf("user:%d:provider:%s", userID, provider))
 }
 
+// NewFromBase64 从 base64 编码的 32 字节密钥创建 Cipher。
 func NewFromBase64(encodedKey, keyVersion string) (*Cipher, error) {
 	if keyVersion == "" {
 		return nil, fmt.Errorf("credential key version is required")
@@ -64,8 +65,7 @@ func NewFromBase64(encodedKey, keyVersion string) (*Cipher, error) {
 	return &Cipher{aead: aead, keyVersion: keyVersion}, nil
 }
 
-// Encrypt binds ciphertext to its user, credential and provider. This prevents
-// a copied database row from being decrypted in another credential's context.
+// Encrypt 使用 AES-256-GCM 加密明文，associatedData 参与认证标签计算。
 func (c *Cipher) Encrypt(plaintext string, associatedData []byte) (Ciphertext, error) {
 	if plaintext == "" {
 		return Ciphertext{}, fmt.Errorf("credential must not be empty")
@@ -83,6 +83,7 @@ func (c *Cipher) Encrypt(plaintext string, associatedData []byte) (Ciphertext, e
 	}, nil
 }
 
+// Decrypt 解密 Ciphertext 并校验 associatedData；算法或 nonce 不匹配时返回错误。
 func (c *Cipher) Decrypt(value Ciphertext, associatedData []byte) (string, error) {
 	if value.Algorithm != AlgorithmAES256GCM {
 		return "", fmt.Errorf("unsupported credential algorithm %q", value.Algorithm)

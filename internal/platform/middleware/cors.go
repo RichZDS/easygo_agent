@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strings"
 
-	"easygo-agent/internal/errorcode"
+	"easygo-agent/internal/platform/errorcode"
 	"easygo-agent/internal/response"
 
 	"github.com/gin-gonic/gin"

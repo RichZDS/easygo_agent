@@ -3,7 +3,7 @@ package response
 import (
 	"net/http"
 
-	"easygo-agent/internal/errorcode"
+	"easygo-agent/internal/platform/errorcode"
 
 	"github.com/gin-gonic/gin"
 )

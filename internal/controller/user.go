@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"easygo-agent/internal/errorcode"
+	"easygo-agent/internal/platform/errorcode"
 	"easygo-agent/internal/response"
 	"easygo-agent/internal/service/user"
 

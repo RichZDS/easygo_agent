@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"runtime/debug"
 
-	"easygo-agent/internal/errorcode"
+	"easygo-agent/internal/platform/errorcode"
 	"easygo-agent/internal/platform/logger"
 	"easygo-agent/internal/response"
 

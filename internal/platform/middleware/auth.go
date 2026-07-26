@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"easygo-agent/internal/auth"
-	"easygo-agent/internal/errorcode"
+	"easygo-agent/internal/platform/errorcode"
 	"easygo-agent/internal/response"
 
 	"github.com/gin-gonic/gin"

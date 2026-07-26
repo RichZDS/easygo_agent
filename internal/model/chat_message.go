@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"easygo-agent/internal/errorcode"
+	"easygo-agent/internal/platform/errorcode"
 
 	"github.com/cloudwego/eino/schema"
 	"gorm.io/gorm"

@@ -3,7 +3,7 @@ package account
 import (
 	"context"
 	"easygo-agent/internal/auth"
-	"easygo-agent/internal/errorcode"
+	"easygo-agent/internal/platform/errorcode"
 	"easygo-agent/internal/service/user"
 	"fmt"
 )

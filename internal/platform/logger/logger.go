@@ -1,16 +1,21 @@
 package logger
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 
+	"easygo-agent/internal/platform/requestid"
+
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
+
+const traceIDField = "trace_id"
 
 type Config struct {
 	Environment string
@@ -59,50 +64,93 @@ func Sync() error {
 }
 
 func Debug(msg string, fields ...zap.Field) {
-	mu.RLock()
-	log := skip1
-	mu.RUnlock()
-	log.Debug(msg, fields...)
+	base().Debug(msg, withTraceID(nil, fields)...)
 }
 
 func Info(msg string, fields ...zap.Field) {
-	mu.RLock()
-	log := skip1
-	mu.RUnlock()
-	log.Info(msg, fields...)
+	base().Info(msg, withTraceID(nil, fields)...)
 }
 
 func Warn(msg string, fields ...zap.Field) {
-	mu.RLock()
-	log := skip1
-	mu.RUnlock()
-	log.Warn(msg, fields...)
+	base().Warn(msg, withTraceID(nil, fields)...)
 }
 
 func Error(msg string, fields ...zap.Field) {
-	mu.RLock()
-	log := skip1
-	mu.RUnlock()
-	log.Error(msg, fields...)
+	base().Error(msg, withTraceID(nil, fields)...)
 }
 
 func Fatal(msg string, fields ...zap.Field) {
-	mu.RLock()
-	log := skip1
-	mu.RUnlock()
-	log.Fatal(msg, fields...)
+	base().Fatal(msg, withTraceID(nil, fields)...)
 }
 
 func Panic(msg string, fields ...zap.Field) {
-	mu.RLock()
-	log := skip1
-	mu.RUnlock()
-	log.Panic(msg, fields...)
+	base().Panic(msg, withTraceID(nil, fields)...)
 }
 
 // With 基于全局 logger 派生带固定字段的子 logger。
 func With(fields ...zap.Field) *zap.Logger {
 	return L().With(fields...)
+}
+
+// FromContext 返回带 trace_id 字段的 logger；无 id 时退回全局 logger。
+func FromContext(ctx context.Context) *zap.Logger {
+	log := L()
+	if id := resolveTraceID(ctx); id != "" {
+		return log.With(zap.String(traceIDField, id))
+	}
+	return log
+}
+
+func DebugContext(ctx context.Context, msg string, fields ...zap.Field) {
+	base().Debug(msg, withTraceID(ctx, fields)...)
+}
+
+func InfoContext(ctx context.Context, msg string, fields ...zap.Field) {
+	base().Info(msg, withTraceID(ctx, fields)...)
+}
+
+func WarnContext(ctx context.Context, msg string, fields ...zap.Field) {
+	base().Warn(msg, withTraceID(ctx, fields)...)
+}
+
+func ErrorContext(ctx context.Context, msg string, fields ...zap.Field) {
+	base().Error(msg, withTraceID(ctx, fields)...)
+}
+
+func base() *zap.Logger {
+	mu.RLock()
+	log := skip1
+	mu.RUnlock()
+	return log
+}
+
+func resolveTraceID(ctx context.Context) string {
+	if id := requestid.From(ctx); id != "" {
+		return id
+	}
+	return requestid.Current()
+}
+
+func withTraceID(ctx context.Context, fields []zap.Field) []zap.Field {
+	if hasField(fields, traceIDField) {
+		return fields
+	}
+	id := resolveTraceID(ctx)
+	if id == "" {
+		return fields
+	}
+	out := make([]zap.Field, 0, len(fields)+1)
+	out = append(out, zap.String(traceIDField, id))
+	return append(out, fields...)
+}
+
+func hasField(fields []zap.Field, key string) bool {
+	for _, f := range fields {
+		if f.Key == key {
+			return true
+		}
+	}
+	return false
 }
 
 func New(cfg Config) (*zap.Logger, error) {
@@ -111,19 +159,14 @@ func New(cfg Config) (*zap.Logger, error) {
 		return nil, fmt.Errorf("parse log level: %w", err)
 	}
 
-	baseEncoder := zap.NewProductionEncoderConfig()
-	baseEncoder.TimeKey = "timestamp"
-	baseEncoder.EncodeTime = zapcore.ISO8601TimeEncoder
-	baseEncoder.EncodeDuration = zapcore.StringDurationEncoder
+	fileEncoderCfg := zap.NewProductionEncoderConfig()
+	fileEncoderCfg.TimeKey = "timestamp"
+	fileEncoderCfg.EncodeTime = zapcore.ISO8601TimeEncoder
+	fileEncoderCfg.EncodeDuration = zapcore.StringDurationEncoder
 
-	consoleEncoder := baseEncoder
-	consoleEncoder.EncodeLevel = zapcore.CapitalColorLevelEncoder
-	if cfg.Environment != "development" {
-		consoleEncoder.EncodeLevel = zapcore.LowercaseLevelEncoder
-	}
-
+	color := cfg.Environment == "development"
 	cores := []zapcore.Core{
-		zapcore.NewCore(zapcore.NewConsoleEncoder(consoleEncoder), zapcore.Lock(os.Stdout), level),
+		zapcore.NewCore(newPrettyConsoleEncoder(color), zapcore.Lock(os.Stdout), level),
 	}
 
 	if cfg.File != "" {
@@ -137,7 +180,7 @@ func New(cfg Config) (*zap.Logger, error) {
 			MaxAge:     cfg.MaxAgeDays,
 			Compress:   cfg.Compress,
 		})
-		cores = append(cores, zapcore.NewCore(zapcore.NewJSONEncoder(baseEncoder), fileWriter, level))
+		cores = append(cores, zapcore.NewCore(zapcore.NewJSONEncoder(fileEncoderCfg), fileWriter, level))
 	}
 
 	return zap.New(zapcore.NewTee(cores...), zap.AddCaller(), zap.AddStacktrace(zapcore.ErrorLevel)), nil

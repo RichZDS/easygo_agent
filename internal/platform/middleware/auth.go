@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strings"
 
-	"easygo-agent/internal/auth"
+	"easygo-agent/internal/platform/auth"
 	"easygo-agent/internal/platform/errorcode"
 	"easygo-agent/internal/platform/response"
 

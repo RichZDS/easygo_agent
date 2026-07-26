@@ -9,10 +9,10 @@ import (
 
 	agentframework "easygo-agent/internal/agent"
 	"easygo-agent/internal/agent/callback"
-	"easygo-agent/internal/auth"
 	"easygo-agent/internal/config"
 	"easygo-agent/internal/credential"
-	"easygo-agent/internal/handler"
+	"easygo-agent/internal/platform/auth"
+	"easygo-agent/internal/platform/handler"
 	"easygo-agent/internal/platform/logger"
 	mysqlplatform "easygo-agent/internal/platform/mysql"
 	"easygo-agent/internal/server"

@@ -17,7 +17,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// RunService prepares and finalizes agent runs.
+// RunService 负责 Agent 运行的准备（落库、占锁、组装上下文）与收尾（持久化输出、释放会话锁）。
 type RunService struct {
 	db        *gorm.DB
 	runtime   *agentframework.RuntimeFactory
@@ -28,6 +28,7 @@ func NewRunService(db *gorm.DB, runtime *agentframework.RuntimeFactory, provider
 	return &RunService{db: db, runtime: runtime, providers: providers}
 }
 
+// PreparedRun 是 Prepare 成功后交给 ExecutionService 的一次运行快照。
 type PreparedRun struct {
 	Run      *model.AgentRun
 	Session  *model.Session
@@ -36,29 +37,42 @@ type PreparedRun struct {
 	Started  time.Time
 }
 
+// DuplicateRequestError 表示同一 user_id + request_id 的幂等重试；调用方可据此返回已有 run。
 type DuplicateRequestError struct {
 	Run *model.AgentRun
 }
 
 func (e *DuplicateRequestError) Error() string { return "duplicate request" }
 
+// Prepare 为一次 Agent 运行做前置准备，返回 PreparedRun 供 ExecutionService.Run 消费。
+//
+// 整体分三阶段：
+//  1. 事务外快速校验（参数、幂等、会话、模型、Runner）
+//  2. 事务内原子落库（占锁 → 创建 run → 写用户消息 → 加载历史）
+//  3. 组装 PreparedRun 快照交给 execution 层
 func (s *RunService) Prepare(
 	ctx context.Context,
 	userID, sessionID uint64,
 	requestID, input string,
 ) (*PreparedRun, error) {
+	// ── Step 1: 参数校验 ──────────────────────────────────────────────
 	input = strings.TrimSpace(input)
 	requestID = strings.TrimSpace(requestID)
 	if input == "" || requestID == "" {
 		return nil, errorcode.New(errorcode.InvalidParameter, "input and request_id are required")
 	}
 
+	// ── Step 2: 幂等检查（事务外，快速路径） ───────────────────────────
+	// 同一 user_id + request_id 重复提交时直接返回 DuplicateRequestError，
+	// 调用方（controller）可据此返回已有 run，避免重复执行。
 	if existing, err := model.FindAgentRunByUserRequest(ctx, s.db, userID, requestID); err == nil {
 		return nil, &DuplicateRequestError{Run: existing}
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, errorcode.Wrap(errorcode.Database, err)
 	}
 
+	// ── Step 3: 会话校验 ──────────────────────────────────────────────
+	// 确认 session 归属当前用户，且已绑定模型、当前无进行中的 run。
 	session, err := model.FindSessionOwnedByUser(ctx, s.db, sessionID, userID)
 	if err != nil {
 		return nil, err
@@ -70,33 +84,46 @@ func (s *RunService) Prepare(
 		return nil, errorcode.New(errorcode.Conflict, "session already has an active run")
 	}
 
+	// ── Step 4: 解析模型配置 ────────────────────────────────────────────
+	// 从 DB 读取 provider / API Key / model_id 等，解密后组装 ModelSpec。
 	spec, aiModel, _, err := s.providers.ResolveModelSpec(ctx, userID, *session.CurrentAIModelID)
 	if err != nil {
 		return nil, err
 	}
+
+	// ── Step 5: 构建 Eino Runner（事务外，避免长事务） ─────────────────
+	// Registry.Build → AgenticModel → TypedChatModelAgent → TypedRunner。
+	// Runner 在事务外创建：HTTP 客户端初始化不涉及 DB，且避免持锁期间做网络 IO。
 	runner, err := s.runtime.Build(ctx, spec)
 	if err != nil {
 		return nil, errorcode.Wrap(errorcode.InvalidParameter, fmt.Errorf("build TypedRunner: %w", err))
 	}
 
+	// ── Step 6: 事务内原子落库 ─────────────────────────────────────────
 	var prepared *PreparedRun
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Step 6.1: SELECT ... FOR UPDATE 行锁 session，串行化同 session 的并发请求。
 		locked, err := model.LockSession(ctx, tx, sessionID, userID)
 		if err != nil {
 			return err
 		}
+
+		// Step 6.2: 持锁后二次校验——Step 3 到此处之间可能有人切换了模型或发起了另一 run。
 		if locked.CurrentAIModelID == nil || *locked.CurrentAIModelID != aiModel.ID {
 			return errorcode.New(errorcode.Conflict, "session model changed; retry the request")
 		}
 		if locked.ActiveRunID != nil {
 			return errorcode.New(errorcode.Conflict, "session already has an active run")
 		}
+
+		// Step 6.3: 持锁后再查 request_id，消除 Step 2 与 Step 6 之间的 TOCTOU 窗口。
 		if existing, findErr := model.FindAgentRunByUserRequest(ctx, tx, userID, requestID); findErr == nil {
 			return &DuplicateRequestError{Run: existing}
 		} else if !errors.Is(findErr, gorm.ErrRecordNotFound) {
 			return findErr
 		}
 
+		// Step 6.4: 创建 agent_run 记录，快照本次运行的 provider / model / instruction 配置。
 		now := time.Now()
 		run := &model.AgentRun{
 			SessionID: sessionID,
@@ -115,10 +142,13 @@ func (s *RunService) Prepare(
 		if err := model.CreateAgentRun(ctx, tx, run); err != nil {
 			return err
 		}
+
+		// Step 6.5: 将会话 active_run_id 指向新 run，阻止同 session 并发执行。
 		if err := model.ClaimSessionRun(ctx, tx, sessionID, run.ID); err != nil {
 			return err
 		}
 
+		// Step 6.6: 持久化用户消息，分配单调递增的 message_seq。
 		userMsg := schema.UserAgenticMessage(input)
 		seq, err := model.AllocateMessageSeq(ctx, tx, sessionID)
 		if err != nil {
@@ -136,6 +166,8 @@ func (s *RunService) Prepare(
 			return err
 		}
 
+		// Step 6.7: 加载最近 N 条会话历史（含刚写入的用户消息），转为 Eino AgenticMessage。
+		// N 由 runtime.ContextMessageLimit() 决定，控制 LLM 上下文窗口大小。
 		history, err := model.ListRecentMessages(ctx, tx, sessionID, s.runtime.ContextMessageLimit())
 		if err != nil {
 			return err
@@ -149,6 +181,7 @@ func (s *RunService) Prepare(
 			messages = append(messages, msg)
 		}
 
+		// Step 6.8: 组装 PreparedRun 快照，事务提交后交给 ExecutionService.Run。
 		prepared = &PreparedRun{
 			Run:      run,
 			Session:  locked,
@@ -174,6 +207,7 @@ type FinalizeInput struct {
 	TotalTokens      *uint32
 }
 
+// Finalize 在事务内写入 assistant 输出、更新 run 终态与 token 统计，并释放 session 的 active run 占用。
 func (s *RunService) Finalize(ctx context.Context, prepared *PreparedRun, in FinalizeInput) error {
 	if prepared == nil || prepared.Run == nil {
 		return fmt.Errorf("prepared run is required")
@@ -199,6 +233,7 @@ func (s *RunService) Finalize(ctx context.Context, prepared *PreparedRun, in Fin
 				}
 				rows = append(rows, row)
 			}
+			// 批量插入 assistant 消息，避免循环内逐条写库。
 			if err := model.CreateChatMessages(ctx, tx, rows); err != nil {
 				return err
 			}
@@ -236,6 +271,7 @@ func (s *RunService) GetRun(ctx context.Context, userID, runID uint64) (*model.A
 	return model.FindAgentRunOwnedByUser(ctx, s.db, userID, runID)
 }
 
+// CreateSession 创建会话并绑定默认 AI 模型（模型需已通过 ResolveModelSpec 校验）。
 func (s *RunService) CreateSession(ctx context.Context, userID uint64, title string, aiModelID uint64) (*model.Session, error) {
 	title = strings.TrimSpace(title)
 	if title == "" {
@@ -278,6 +314,7 @@ func (s *RunService) SwitchModel(ctx context.Context, userID, sessionID, aiModel
 	return model.UpdateSessionModel(ctx, s.db, sessionID, aiModelID)
 }
 
+// truncate 截断 error_message 等可变长文本，避免超出 DB 列宽。
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s

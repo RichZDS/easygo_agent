@@ -3,10 +3,10 @@ package server
 import (
 	"net/http"
 
-	"easygo-agent/internal/auth"
 	"easygo-agent/internal/controller"
-	"easygo-agent/internal/handler"
+	"easygo-agent/internal/platform/auth"
 	"easygo-agent/internal/platform/errorcode"
+	"easygo-agent/internal/platform/handler"
 	"easygo-agent/internal/platform/middleware"
 	"easygo-agent/internal/platform/response"
 

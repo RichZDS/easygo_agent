@@ -50,6 +50,7 @@ func CreateAgentRun(ctx context.Context, db *gorm.DB, row *AgentRun) error {
 	return nil
 }
 
+// FindAgentRunByUserRequest 根据 user_id 和 request_id 查找 AgentRun。
 func FindAgentRunByUserRequest(ctx context.Context, db *gorm.DB, userID uint64, requestID string) (*AgentRun, error) {
 	var row AgentRun
 	if err := db.WithContext(ctx).Where("user_id = ? AND request_id = ?", userID, requestID).First(&row).Error; err != nil {
@@ -58,6 +59,7 @@ func FindAgentRunByUserRequest(ctx context.Context, db *gorm.DB, userID uint64, 
 	return &row, nil
 }
 
+// FindAgentRunOwnedByUser 根据 user_id 和 run_id 查找 AgentRun。
 func FindAgentRunOwnedByUser(ctx context.Context, db *gorm.DB, userID, runID uint64) (*AgentRun, error) {
 	var row AgentRun
 	if err := db.WithContext(ctx).Where("id = ? AND user_id = ?", runID, userID).First(&row).Error; err != nil {
@@ -69,6 +71,7 @@ func FindAgentRunOwnedByUser(ctx context.Context, db *gorm.DB, userID, runID uin
 	return &row, nil
 }
 
+// FinalizeAgentRun 更新 AgentRun 终态与 token 统计，释放 session 的 active run 占用。
 func FinalizeAgentRun(ctx context.Context, db *gorm.DB, runID uint64, updates map[string]any) error {
 	result := db.WithContext(ctx).Model(&AgentRun{}).Where("id = ? AND status = ?", runID, AgentRunRunning).Updates(updates)
 	if result.Error != nil {

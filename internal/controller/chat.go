@@ -39,6 +39,7 @@ func (ctl *ChatController) Stream(c *gin.Context) {
 		return
 	}
 
+	// 准备运行
 	prepared, err := ctl.runs.Prepare(
 		c.Request.Context(),
 		middleware.UserID(c),
@@ -65,6 +66,7 @@ func (ctl *ChatController) Stream(c *gin.Context) {
 	c.Header("X-Accel-Buffering", "no")
 	c.Status(http.StatusOK)
 
+	// 发送事件到客户端
 	emitter := func(event chat.StreamEvent) error {
 		var payload any = event.Payload
 		if event.Type != "run" {
@@ -84,6 +86,7 @@ func (ctl *ChatController) Stream(c *gin.Context) {
 		return nil
 	}
 
+	// 运行 Eino Runner
 	if _, err := ctl.execution.Run(c.Request.Context(), prepared, emitter); err != nil {
 		_ = c.Error(err)
 	}

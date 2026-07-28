@@ -1,0 +1,1720 @@
+ configs/config.yaml       |  8 +++++
+ go.mod                    |  2 +-
+ internal/config/config.go | 92 ++++++++++++++++++++++++++++++++++++++++++-----
+ 3 files changed, 92 insertions(+), 10 deletions(-)
+diff --git a/configs/config.yaml b/configs/config.yaml
+index 4ca0e78..8ed6d3e 100644
+--- a/configs/config.yaml
++++ b/configs/config.yaml
+@@ -10,10 +10,18 @@ mysql:
+   conn_max_lifetime: 3600
+ 
+ logger:
+   environment: development
+   level: info
+   file: logs/app.log
+   max_size_mb: 100
+   max_backups: 10
+   max_age_days: 30
+   compress: true
++
++skills:
++  root_dir: skills
++  sync_cron: "0 0 3 * * *"
++  readme_src: README.md
++  max_zip_bytes: 5242880
++  max_extracted_bytes: 20971520
++  max_files: 200
+diff --git a/go.mod b/go.mod
+index 72659f0..447b56a 100644
+--- a/go.mod
++++ b/go.mod
+@@ -1,35 +1,35 @@
+ module easygo-agent
+ 
+ go 1.25.0
+ 
+ require (
++	github.com/bmatcuk/doublestar/v4 v4.10.0
+ 	github.com/cloudwego/eino v0.9.13
+ 	github.com/cloudwego/eino-ext/components/model/agenticopenai v0.2.2
+ 	github.com/gin-gonic/gin v1.12.0
+ 	github.com/go-sql-driver/mysql v1.8.1
+ 	github.com/google/uuid v1.6.0
+ 	github.com/google/wire v0.7.0
+ 	github.com/joho/godotenv v1.5.1
+ 	go.uber.org/zap v1.28.0
+ 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
+ 	gopkg.in/yaml.v3 v3.0.1
+ 	gorm.io/driver/mysql v1.6.0
+ 	gorm.io/gorm v1.31.2
+ )
+ 
+ require (
+ 	filippo.io/edwards25519 v1.1.0 // indirect
+ 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.17.0 // indirect
+ 	github.com/Azure/azure-sdk-for-go/sdk/internal v1.10.0 // indirect
+ 	github.com/bahlo/generic-list-go v0.2.0 // indirect
+-	github.com/bmatcuk/doublestar/v4 v4.10.0 // indirect
+ 	github.com/buger/jsonparser v1.1.1 // indirect
+ 	github.com/bytedance/gopkg v0.1.4 // indirect
+ 	github.com/bytedance/sonic v1.15.2 // indirect
+ 	github.com/bytedance/sonic/loader v0.5.1 // indirect
+ 	github.com/cloudwego/base64x v0.1.7 // indirect
+ 	github.com/cloudwego/eino-ext/libs/acl/openai v0.1.18-0.20260527084435-846f52bd97c6 // indirect
+ 	github.com/dustin/go-humanize v1.0.1 // indirect
+ 	github.com/eino-contrib/jsonschema v1.0.3 // indirect
+ 	github.com/evanphx/json-patch v0.5.2 // indirect
+ 	github.com/gabriel-vasile/mimetype v1.4.13 // indirect
+diff --git a/internal/config/config.go b/internal/config/config.go
+index ac3498b..da87f8f 100644
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -1,23 +1,27 @@
+ package config
+ 
+ import (
+ 	"bytes"
+ 	"fmt"
+ 	"os"
++	"strings"
+ 
++	"easygo-agent/internal/platform/logger"
++	"go.uber.org/zap"
+ 	"gopkg.in/yaml.v3"
+ )
+ 
+ type Config struct {
+ 	MySQL  MySQL  `yaml:"mysql"`
+ 	Logger Logger `yaml:"logger"`
++	Skills Skills `yaml:"skills"`
+ }
+ 
+ type MySQL struct {
+ 	Host            string `yaml:"host"`
+ 	Port            int    `yaml:"port"`
+ 	User            string `yaml:"user"`
+ 	Password        string `yaml:"password"`
+ 	Database        string `yaml:"database"`
+ 	Charset         string `yaml:"charset"`
+ 	MaxIdleConns    int    `yaml:"max_idle_conns"`
+@@ -28,46 +32,116 @@ type MySQL struct {
+ type Logger struct {
+ 	Environment string `yaml:"environment"`
+ 	Level       string `yaml:"level"`
+ 	File        string `yaml:"file"`
+ 	MaxSizeMB   int    `yaml:"max_size_mb"`
+ 	MaxBackups  int    `yaml:"max_backups"`
+ 	MaxAgeDays  int    `yaml:"max_age_days"`
+ 	Compress    bool   `yaml:"compress"`
+ }
+ 
++type Skills struct {
++	RootDir           string `yaml:"root_dir"`
++	SyncCron          string `yaml:"sync_cron"`
++	ReadmeSrc         string `yaml:"readme_src"`
++	MaxZipBytes       int64  `yaml:"max_zip_bytes"`
++	MaxExtractedBytes int64  `yaml:"max_extracted_bytes"`
++	MaxFiles          int    `yaml:"max_files"`
++}
++
++// Load reads, defaults, and validates the application configuration at path.
+ func Load(path string) (Config, error) {
+ 	if path == "" {
+-		return Config{}, fmt.Errorf("config path cannot be empty")
++		err := fmt.Errorf("config path cannot be empty")
++		logger.Error("load config failed", zap.Error(err))
++		return Config{}, err
+ 	}
+ 	content, err := os.ReadFile(path)
+ 	if err != nil {
+-		return Config{}, fmt.Errorf("read config %q: %w", path, err)
++		wrappedErr := fmt.Errorf("read config %q: %w", path, err)
++		logger.Error("load config failed", zap.String("path", path), zap.Error(wrappedErr))
++		return Config{}, wrappedErr
+ 	}
+ 
+-	var cfg Config
++	cfg := Config{
++		Skills: Skills{
++			RootDir:           "skills",
++			SyncCron:          "0 0 3 * * *",
++			ReadmeSrc:         "README.md",
++			MaxZipBytes:       5 << 20,
++			MaxExtractedBytes: 20 << 20,
++			MaxFiles:          200,
++		},
++	}
+ 	decoder := yaml.NewDecoder(bytes.NewReader(content))
+ 	decoder.KnownFields(true)
+ 	if err := decoder.Decode(&cfg); err != nil {
+-		return Config{}, fmt.Errorf("decode config %q: %w", path, err)
++		wrappedErr := fmt.Errorf("decode config %q: %w", path, err)
++		logger.Error("load config failed", zap.String("path", path), zap.Error(wrappedErr))
++		return Config{}, wrappedErr
+ 	}
+ 	if err := cfg.Validate(); err != nil {
+-		return Config{}, fmt.Errorf("validate config %q: %w", path, err)
++		wrappedErr := fmt.Errorf("validate config %q: %w", path, err)
++		logger.Error("load config failed", zap.String("path", path), zap.Error(wrappedErr))
++		return Config{}, wrappedErr
+ 	}
+ 	return cfg, nil
+ }
+ 
++// Validate checks that the application configuration contains usable values.
+ func (cfg Config) Validate() error {
+ 	if cfg.MySQL.Host == "" || cfg.MySQL.Port <= 0 || cfg.MySQL.Port > 65535 {
+-		return fmt.Errorf("mysql host or port is invalid")
++		err := fmt.Errorf("mysql host or port is invalid")
++		logger.Error("validate config failed", zap.Int("mysql_port", cfg.MySQL.Port), zap.Error(err))
++		return err
+ 	}
+ 	if cfg.MySQL.User == "" || cfg.MySQL.Database == "" || cfg.MySQL.Charset == "" {
+-		return fmt.Errorf("mysql user, database and charset cannot be empty")
++		err := fmt.Errorf("mysql user, database and charset cannot be empty")
++		logger.Error("validate config failed", zap.Error(err))
++		return err
+ 	}
+ 	if cfg.MySQL.MaxOpenConns <= 0 || cfg.MySQL.MaxIdleConns < 0 || cfg.MySQL.MaxIdleConns > cfg.MySQL.MaxOpenConns {
+-		return fmt.Errorf("invalid mysql connection pool settings")
++		err := fmt.Errorf("invalid mysql connection pool settings")
++		logger.Error("validate config failed",
++			zap.Int("mysql_max_open_conns", cfg.MySQL.MaxOpenConns),
++			zap.Int("mysql_max_idle_conns", cfg.MySQL.MaxIdleConns),
++			zap.Error(err),
++		)
++		return err
+ 	}
+ 	if cfg.MySQL.ConnMaxLifetime <= 0 {
+-		return fmt.Errorf("mysql conn_max_lifetime must be greater than zero")
++		err := fmt.Errorf("mysql conn_max_lifetime must be greater than zero")
++		logger.Error("validate config failed", zap.Int("mysql_conn_max_lifetime", cfg.MySQL.ConnMaxLifetime), zap.Error(err))
++		return err
++	}
++	if strings.TrimSpace(cfg.Skills.RootDir) == "" {
++		err := fmt.Errorf("skills root_dir cannot be empty")
++		logger.Error("validate config failed", zap.Error(err))
++		return err
++	}
++	if strings.TrimSpace(cfg.Skills.SyncCron) == "" {
++		err := fmt.Errorf("skills sync_cron cannot be empty")
++		logger.Error("validate config failed", zap.Error(err))
++		return err
++	}
++	if strings.TrimSpace(cfg.Skills.ReadmeSrc) == "" {
++		err := fmt.Errorf("skills readme_src cannot be empty")
++		logger.Error("validate config failed", zap.Error(err))
++		return err
++	}
++	if cfg.Skills.MaxZipBytes <= 0 {
++		err := fmt.Errorf("skills max_zip_bytes must be greater than zero")
++		logger.Error("validate config failed", zap.Int64("skills_max_zip_bytes", cfg.Skills.MaxZipBytes), zap.Error(err))
++		return err
++	}
++	if cfg.Skills.MaxExtractedBytes <= 0 {
++		err := fmt.Errorf("skills max_extracted_bytes must be greater than zero")
++		logger.Error("validate config failed", zap.Int64("skills_max_extracted_bytes", cfg.Skills.MaxExtractedBytes), zap.Error(err))
++		return err
++	}
++	if cfg.Skills.MaxFiles <= 0 {
++		err := fmt.Errorf("skills max_files must be greater than zero")
++		logger.Error("validate config failed", zap.Int("skills_max_files", cfg.Skills.MaxFiles), zap.Error(err))
++		return err
+ 	}
+ 	return nil
+ }
+diff --git a/internal/config/config_test.go b/internal/config/config_test.go
+new file mode 100644
+index 0000000..bab573a
+--- /dev/null
++++ b/internal/config/config_test.go
+@@ -0,0 +1,96 @@
++package config
++
++import (
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++// TestLoadSkillsDefaults verifies that omitted skills configuration receives the documented defaults.
++func TestLoadSkillsDefaults(t *testing.T) {
++	path := writeConfigFile(t, "")
++
++	cfg, err := Load(path)
++	if err != nil {
++		t.Fatalf("Load() error = %v", err)
++	}
++
++	if cfg.Skills.RootDir != "skills" {
++		t.Errorf("Skills.RootDir = %q, want %q", cfg.Skills.RootDir, "skills")
++	}
++	if cfg.Skills.SyncCron != "0 0 3 * * *" {
++		t.Errorf("Skills.SyncCron = %q, want %q", cfg.Skills.SyncCron, "0 0 3 * * *")
++	}
++	if cfg.Skills.ReadmeSrc != "README.md" {
++		t.Errorf("Skills.ReadmeSrc = %q, want %q", cfg.Skills.ReadmeSrc, "README.md")
++	}
++	if cfg.Skills.MaxZipBytes != 5<<20 {
++		t.Errorf("Skills.MaxZipBytes = %d, want %d", cfg.Skills.MaxZipBytes, 5<<20)
++	}
++	if cfg.Skills.MaxExtractedBytes != 20<<20 {
++		t.Errorf("Skills.MaxExtractedBytes = %d, want %d", cfg.Skills.MaxExtractedBytes, 20<<20)
++	}
++	if cfg.Skills.MaxFiles != 200 {
++		t.Errorf("Skills.MaxFiles = %d, want %d", cfg.Skills.MaxFiles, 200)
++	}
++}
++
++// TestSkillsValidate verifies that explicit invalid skills values are rejected after defaults are applied.
++func TestSkillsValidate(t *testing.T) {
++	testCases := []struct {
++		name   string
++		skills string
++	}{
++		{name: "empty root directory", skills: "  root_dir: \"\"\n"},
++		{name: "empty sync cron", skills: "  sync_cron: \"\"\n"},
++		{name: "empty readme source", skills: "  readme_src: \"\"\n"},
++		{name: "zero zip limit", skills: "  max_zip_bytes: 0\n"},
++		{name: "negative zip limit", skills: "  max_zip_bytes: -1\n"},
++		{name: "zero extracted limit", skills: "  max_extracted_bytes: 0\n"},
++		{name: "negative extracted limit", skills: "  max_extracted_bytes: -1\n"},
++		{name: "zero file limit", skills: "  max_files: 0\n"},
++		{name: "negative file limit", skills: "  max_files: -1\n"},
++	}
++
++	for _, testCase := range testCases {
++		path := writeConfigFile(t, "skills:\n"+testCase.skills)
++
++		_, err := Load(path)
++		if err == nil {
++			t.Errorf("%s: Load() error = nil, want validation error", testCase.name)
++		}
++	}
++}
++
++// writeConfigFile writes a minimal valid configuration plus the supplied skills YAML.
++func writeConfigFile(t *testing.T, skillsYAML string) string {
++	t.Helper()
++
++	content := strings.TrimSpace(`
++mysql:
++  host: localhost
++  port: 3306
++  user: test
++  password: test
++  database: test
++  charset: utf8mb4
++  max_idle_conns: 1
++  max_open_conns: 2
++  conn_max_lifetime: 60
++
++logger:
++  environment: development
++  level: info
++  file: test.log
++  max_size_mb: 1
++  max_backups: 1
++  max_age_days: 1
++  compress: false
++`) + "\n" + skillsYAML
++	path := filepath.Join(t.TempDir(), "config.yaml")
++	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
++		t.Fatalf("os.WriteFile() error = %v", err)
++	}
++	return path
++}
+diff --git a/internal/skill/workspace/manager.go b/internal/skill/workspace/manager.go
+new file mode 100644
+index 0000000..4f1e6fa
+--- /dev/null
++++ b/internal/skill/workspace/manager.go
+@@ -0,0 +1,300 @@
++package workspace
++
++import (
++	"context"
++	"fmt"
++	"os"
++	"path/filepath"
++	"regexp"
++	"sort"
++	"strconv"
++	"strings"
++
++	"easygo-agent/internal/config"
++	"easygo-agent/internal/platform/logger"
++	"go.uber.org/zap"
++)
++
++var builtinIDPattern = regexp.MustCompile(`^[a-z0-9-]{2,64}$`)
++
++// Manager owns the physical directories used for builtin and per-user skills.
++type Manager struct {
++	rootDir    string
++	builtinSrc string
++	builtinDir string
++	workspaces string
++}
++
++// NewManager creates the skills directory layout and returns its workspace manager.
++func NewManager(cfg config.Skills) (*Manager, error) {
++	if strings.TrimSpace(cfg.RootDir) == "" {
++		err := fmt.Errorf("skills root directory cannot be empty")
++		logger.Error("create workspace manager failed", zap.Error(err))
++		return nil, err
++	}
++	rootDir, err := filepath.Abs(filepath.Clean(cfg.RootDir))
++	if err != nil {
++		wrappedErr := fmt.Errorf("resolve skills root directory: %w", err)
++		logger.Error("create workspace manager failed", zap.String("root_dir", cfg.RootDir), zap.Error(wrappedErr))
++		return nil, wrappedErr
++	}
++	manager := &Manager{
++		rootDir:    rootDir,
++		builtinSrc: filepath.Join(rootDir, "builtin-src"),
++		builtinDir: filepath.Join(rootDir, "builtin"),
++		workspaces: filepath.Join(rootDir, "workspaces"),
++	}
++	for _, dir := range []string{manager.rootDir, manager.builtinSrc, manager.builtinDir, manager.workspaces} {
++		if err := os.MkdirAll(dir, 0o750); err != nil {
++			wrappedErr := fmt.Errorf("create skills directory %q: %w", dir, err)
++			logger.Error("create workspace manager failed", zap.String("directory", dir), zap.Error(wrappedErr))
++			return nil, wrappedErr
++		}
++	}
++	return manager, nil
++}
++
++// EnsureWorkspace creates a user's workspace and synchronizes its managed builtin links.
++func (m *Manager) EnsureWorkspace(ctx context.Context, userID uint64) (string, error) {
++	if err := ctx.Err(); err != nil {
++		logger.ErrorContext(ctx, "ensure workspace failed", zap.Uint64("user_id", userID), zap.Error(err))
++		return "", err
++	}
++	for _, managedDir := range []string{m.rootDir, m.workspaces} {
++		if err := validateManagedDirectory(ctx, managedDir); err != nil {
++			logger.ErrorContext(ctx, "ensure workspace failed",
++				zap.Uint64("user_id", userID),
++				zap.String("directory", managedDir),
++				zap.Error(err),
++			)
++			return "", err
++		}
++	}
++	workspaceDir := filepath.Join(m.workspaces, strconv.FormatUint(userID, 10))
++	workspaceInfo, err := os.Lstat(workspaceDir)
++	if err == nil {
++		if workspaceInfo.Mode()&os.ModeSymlink != 0 {
++			symlinkErr := fmt.Errorf("user workspace cannot be a symlink")
++			logger.ErrorContext(ctx, "ensure workspace failed",
++				zap.Uint64("user_id", userID),
++				zap.String("workspace", workspaceDir),
++				zap.Error(symlinkErr),
++			)
++			return "", symlinkErr
++		}
++		if !workspaceInfo.IsDir() {
++			typeErr := fmt.Errorf("user workspace path is not a directory")
++			logger.ErrorContext(ctx, "ensure workspace failed",
++				zap.Uint64("user_id", userID),
++				zap.String("workspace", workspaceDir),
++				zap.Error(typeErr),
++			)
++			return "", typeErr
++		}
++	} else if os.IsNotExist(err) {
++		if err := os.Mkdir(workspaceDir, 0o750); err != nil {
++			wrappedErr := fmt.Errorf("create user workspace: %w", err)
++			logger.ErrorContext(ctx, "ensure workspace failed",
++				zap.Uint64("user_id", userID),
++				zap.String("workspace", workspaceDir),
++				zap.Error(wrappedErr),
++			)
++			return "", wrappedErr
++		}
++	} else {
++		wrappedErr := fmt.Errorf("inspect user workspace: %w", err)
++		logger.ErrorContext(ctx, "ensure workspace failed",
++			zap.Uint64("user_id", userID),
++			zap.String("workspace", workspaceDir),
++			zap.Error(wrappedErr),
++		)
++		return "", wrappedErr
++	}
++
++	builtinIDs, err := m.BuiltinIDs(ctx)
++	if err != nil {
++		logger.ErrorContext(ctx, "ensure workspace failed", zap.Uint64("user_id", userID), zap.Error(err))
++		return "", err
++	}
++	sortedIDs := make([]string, 0, len(builtinIDs))
++	for skillID := range builtinIDs {
++		sortedIDs = append(sortedIDs, skillID)
++	}
++	sort.Strings(sortedIDs)
++	for _, skillID := range sortedIDs {
++		if err := ctx.Err(); err != nil {
++			logger.ErrorContext(ctx, "ensure workspace failed", zap.Uint64("user_id", userID), zap.Error(err))
++			return "", err
++		}
++		if err := m.ensureBuiltinLink(ctx, workspaceDir, userID, skillID); err != nil {
++			logger.ErrorContext(ctx, "ensure workspace failed",
++				zap.Uint64("user_id", userID),
++				zap.String("skill_id", skillID),
++				zap.Error(err),
++			)
++			return "", err
++		}
++	}
++	return workspaceDir, nil
++}
++
++// NewBackend creates a read-only Eino backend scoped to one user's workspace.
++func (m *Manager) NewBackend(ctx context.Context, userID uint64) (*Backend, error) {
++	workspaceDir, err := m.EnsureWorkspace(ctx, userID)
++	if err != nil {
++		logger.ErrorContext(ctx, "create workspace backend failed", zap.Uint64("user_id", userID), zap.Error(err))
++		return nil, err
++	}
++	workspaceRoot, err := filepath.EvalSymlinks(workspaceDir)
++	if err != nil {
++		wrappedErr := fmt.Errorf("resolve user workspace: %w", err)
++		logger.ErrorContext(ctx, "create workspace backend failed",
++			zap.Uint64("user_id", userID),
++			zap.String("workspace", workspaceDir),
++			zap.Error(wrappedErr),
++		)
++		return nil, wrappedErr
++	}
++	builtinRoot, err := filepath.EvalSymlinks(m.builtinDir)
++	if err != nil {
++		wrappedErr := fmt.Errorf("resolve builtin directory: %w", err)
++		logger.ErrorContext(ctx, "create workspace backend failed",
++			zap.Uint64("user_id", userID),
++			zap.String("builtin_dir", m.builtinDir),
++			zap.Error(wrappedErr),
++		)
++		return nil, wrappedErr
++	}
++	return &Backend{
++		workspaceDir:  workspaceDir,
++		workspaceRoot: filepath.Clean(workspaceRoot),
++		builtinDir:    m.builtinDir,
++		builtinRoot:   filepath.Clean(builtinRoot),
++	}, nil
++}
++
++// BuiltinIDs returns the names of immediate directories in the active builtin tree.
++func (m *Manager) BuiltinIDs(ctx context.Context) (map[string]struct{}, error) {
++	if err := ctx.Err(); err != nil {
++		logger.ErrorContext(ctx, "list builtin skill IDs failed", zap.Error(err))
++		return nil, err
++	}
++	entries, err := os.ReadDir(m.builtinDir)
++	if err != nil {
++		wrappedErr := fmt.Errorf("read builtin directory: %w", err)
++		logger.ErrorContext(ctx, "list builtin skill IDs failed",
++			zap.String("builtin_dir", m.builtinDir),
++			zap.Error(wrappedErr),
++		)
++		return nil, wrappedErr
++	}
++	ids := make(map[string]struct{})
++	for _, entry := range entries {
++		if err := ctx.Err(); err != nil {
++			logger.ErrorContext(ctx, "list builtin skill IDs failed", zap.Error(err))
++			return nil, err
++		}
++		if !entry.IsDir() {
++			continue
++		}
++		if !builtinIDPattern.MatchString(entry.Name()) {
++			err := fmt.Errorf("builtin skill ID %q must match %s", entry.Name(), builtinIDPattern.String())
++			logger.ErrorContext(ctx, "list builtin skill IDs failed",
++				zap.String("skill_id", entry.Name()),
++				zap.Error(err),
++			)
++			return nil, err
++		}
++		ids[entry.Name()] = struct{}{}
++	}
++	return ids, nil
++}
++
++// validateManagedDirectory verifies that a manager-owned directory exists without being a symlink.
++func validateManagedDirectory(ctx context.Context, directory string) error {
++	info, err := os.Lstat(directory)
++	if err != nil {
++		wrappedErr := fmt.Errorf("inspect managed directory %q: %w", directory, err)
++		logger.ErrorContext(ctx, "validate managed directory failed",
++			zap.String("directory", directory),
++			zap.Error(wrappedErr),
++		)
++		return wrappedErr
++	}
++	if info.Mode()&os.ModeSymlink != 0 {
++		err := fmt.Errorf("managed directory %q cannot be a symlink", directory)
++		logger.ErrorContext(ctx, "validate managed directory failed",
++			zap.String("directory", directory),
++			zap.Error(err),
++		)
++		return err
++	}
++	if !info.IsDir() {
++		err := fmt.Errorf("managed path %q is not a directory", directory)
++		logger.ErrorContext(ctx, "validate managed directory failed",
++			zap.String("directory", directory),
++			zap.Error(err),
++		)
++		return err
++	}
++	return nil
++}
++
++// ensureBuiltinLink installs or repairs one manager-owned builtin symlink.
++func (m *Manager) ensureBuiltinLink(ctx context.Context, workspaceDir string, userID uint64, skillID string) error {
++	linkPath := filepath.Join(workspaceDir, skillID)
++	wantTarget := filepath.Join("..", "..", "builtin", skillID)
++	info, err := os.Lstat(linkPath)
++	if err == nil {
++		if info.Mode()&os.ModeSymlink == 0 {
++			conflictErr := fmt.Errorf("workspace path for builtin skill %q contains user-owned content", skillID)
++			logger.ErrorContext(ctx, "synchronize builtin link failed",
++				zap.Uint64("user_id", userID),
++				zap.String("skill_id", skillID),
++				zap.Error(conflictErr),
++			)
++			return conflictErr
++		}
++		currentTarget, readErr := os.Readlink(linkPath)
++		if readErr != nil {
++			wrappedErr := fmt.Errorf("read managed builtin link %q: %w", skillID, readErr)
++			logger.ErrorContext(ctx, "synchronize builtin link failed",
++				zap.Uint64("user_id", userID),
++				zap.String("skill_id", skillID),
++				zap.Error(wrappedErr),
++			)
++			return wrappedErr
++		}
++		if currentTarget == wantTarget {
++			return nil
++		}
++		if removeErr := os.Remove(linkPath); removeErr != nil {
++			wrappedErr := fmt.Errorf("remove incorrect managed builtin link %q: %w", skillID, removeErr)
++			logger.ErrorContext(ctx, "synchronize builtin link failed",
++				zap.Uint64("user_id", userID),
++				zap.String("skill_id", skillID),
++				zap.Error(wrappedErr),
++			)
++			return wrappedErr
++		}
++	} else if !os.IsNotExist(err) {
++		wrappedErr := fmt.Errorf("inspect managed builtin link %q: %w", skillID, err)
++		logger.ErrorContext(ctx, "synchronize builtin link failed",
++			zap.Uint64("user_id", userID),
++			zap.String("skill_id", skillID),
++			zap.Error(wrappedErr),
++		)
++		return wrappedErr
++	}
++
++	if err := os.Symlink(wantTarget, linkPath); err != nil {
++		wrappedErr := fmt.Errorf("create managed builtin link %q: %w", skillID, err)
++		logger.ErrorContext(ctx, "synchronize builtin link failed",
++			zap.Uint64("user_id", userID),
++			zap.String("skill_id", skillID),
++			zap.Error(wrappedErr),
++		)
++		return wrappedErr
++	}
++	return nil
++}
+diff --git a/internal/skill/workspace/backend.go b/internal/skill/workspace/backend.go
+new file mode 100644
+index 0000000..09a487b
+--- /dev/null
++++ b/internal/skill/workspace/backend.go
+@@ -0,0 +1,620 @@
++package workspace
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"os"
++	"path"
++	"path/filepath"
++	"regexp"
++	"sort"
++	"strings"
++	"time"
++
++	"easygo-agent/internal/platform/logger"
++	"github.com/bmatcuk/doublestar/v4"
++	einofs "github.com/cloudwego/eino/adk/filesystem"
++	"go.uber.org/zap"
++)
++
++// ErrReadOnly indicates that the model-facing workspace backend cannot mutate files.
++var ErrReadOnly = errors.New("workspace backend is read-only")
++
++// Backend exposes one user's skills through virtual absolute paths.
++type Backend struct {
++	workspaceDir  string
++	workspaceRoot string
++	builtinDir    string
++	builtinRoot   string
++}
++
++type virtualEntry struct {
++	virtualPath  string
++	physicalPath string
++	info         os.FileInfo
++}
++
++var _ einofs.Backend = (*Backend)(nil)
++
++// LsInfo lists immediate children with virtual absolute paths.
++func (b *Backend) LsInfo(ctx context.Context, req *einofs.LsInfoRequest) ([]einofs.FileInfo, error) {
++	if req == nil {
++		err := fmt.Errorf("list request cannot be nil")
++		logger.ErrorContext(ctx, "list workspace path failed", zap.Error(err))
++		return nil, err
++	}
++	virtualDir, physicalDir, err := b.resolveExisting(ctx, req.Path)
++	if err != nil {
++		logger.ErrorContext(ctx, "list workspace path failed", zap.String("path", req.Path), zap.Error(err))
++		return nil, err
++	}
++	info, err := os.Stat(physicalDir)
++	if err != nil {
++		wrappedErr := fmt.Errorf("inspect list path %q: %w", virtualDir, err)
++		logger.ErrorContext(ctx, "list workspace path failed", zap.String("path", virtualDir), zap.Error(wrappedErr))
++		return nil, wrappedErr
++	}
++	if !info.IsDir() {
++		err := fmt.Errorf("list path %q is not a directory", virtualDir)
++		logger.ErrorContext(ctx, "list workspace path failed", zap.String("path", virtualDir), zap.Error(err))
++		return nil, err
++	}
++	entries, err := os.ReadDir(physicalDir)
++	if err != nil {
++		wrappedErr := fmt.Errorf("read list path %q: %w", virtualDir, err)
++		logger.ErrorContext(ctx, "list workspace path failed", zap.String("path", virtualDir), zap.Error(wrappedErr))
++		return nil, wrappedErr
++	}
++	result := make([]einofs.FileInfo, 0, len(entries))
++	for _, entry := range entries {
++		if err := ctx.Err(); err != nil {
++			logger.ErrorContext(ctx, "list workspace path failed", zap.String("path", virtualDir), zap.Error(err))
++			return nil, err
++		}
++		childVirtual := virtualJoin(virtualDir, entry.Name())
++		_, childPhysical, err := b.resolveExisting(ctx, childVirtual)
++		if err != nil {
++			logger.ErrorContext(ctx, "list workspace path failed", zap.String("path", childVirtual), zap.Error(err))
++			return nil, err
++		}
++		childInfo, err := os.Stat(childPhysical)
++		if err != nil {
++			wrappedErr := fmt.Errorf("inspect listed path %q: %w", childVirtual, err)
++			logger.ErrorContext(ctx, "list workspace path failed", zap.String("path", childVirtual), zap.Error(wrappedErr))
++			return nil, wrappedErr
++		}
++		result = append(result, toFileInfo(childVirtual, childInfo))
++	}
++	sortFileInfos(result)
++	return result, nil
++}
++
++// Read returns text from a sandboxed virtual file with line pagination.
++func (b *Backend) Read(ctx context.Context, req *einofs.ReadRequest) (*einofs.FileContent, error) {
++	if req == nil {
++		err := fmt.Errorf("read request cannot be nil")
++		logger.ErrorContext(ctx, "read workspace file failed", zap.Error(err))
++		return nil, err
++	}
++	virtualPath, physicalPath, err := b.resolveExisting(ctx, req.FilePath)
++	if err != nil {
++		logger.ErrorContext(ctx, "read workspace file failed", zap.String("path", req.FilePath), zap.Error(err))
++		return nil, err
++	}
++	content, err := os.ReadFile(physicalPath)
++	if err != nil {
++		wrappedErr := fmt.Errorf("read virtual file %q: %w", virtualPath, err)
++		logger.ErrorContext(ctx, "read workspace file failed", zap.String("path", virtualPath), zap.Error(wrappedErr))
++		return nil, wrappedErr
++	}
++	return &einofs.FileContent{Content: paginateContent(string(content), req.Offset, req.Limit)}, nil
++}
++
++// GrepRaw searches sandboxed files with a regular expression and optional context lines.
++func (b *Backend) GrepRaw(ctx context.Context, req *einofs.GrepRequest) ([]einofs.GrepMatch, error) {
++	if req == nil {
++		err := fmt.Errorf("grep request cannot be nil")
++		logger.ErrorContext(ctx, "grep workspace files failed", zap.Error(err))
++		return nil, err
++	}
++	if req.Pattern == "" {
++		err := fmt.Errorf("grep pattern cannot be empty")
++		logger.ErrorContext(ctx, "grep workspace files failed", zap.Error(err))
++		return nil, err
++	}
++	pattern := req.Pattern
++	if req.CaseInsensitive {
++		pattern = "(?i)" + pattern
++	}
++	if req.EnableMultiline {
++		pattern = "(?s)" + pattern
++	}
++	expression, err := regexp.Compile(pattern)
++	if err != nil {
++		wrappedErr := fmt.Errorf("compile grep pattern: %w", err)
++		logger.ErrorContext(ctx, "grep workspace files failed", zap.Error(wrappedErr))
++		return nil, wrappedErr
++	}
++
++	searchPath := req.Path
++	if searchPath == "" {
++		searchPath = "/"
++	}
++	entries, err := b.collectEntries(ctx, searchPath)
++	if err != nil {
++		logger.ErrorContext(ctx, "grep workspace files failed", zap.String("path", searchPath), zap.Error(err))
++		return nil, err
++	}
++	matches := make([]einofs.GrepMatch, 0)
++	for _, entry := range entries {
++		if err := ctx.Err(); err != nil {
++			logger.ErrorContext(ctx, "grep workspace files failed", zap.String("path", searchPath), zap.Error(err))
++			return nil, err
++		}
++		if entry.info.IsDir() {
++			continue
++		}
++		included, err := grepFileIncluded(entry.virtualPath, searchPath, req)
++		if err != nil {
++			logger.ErrorContext(ctx, "grep workspace files failed", zap.String("path", entry.virtualPath), zap.Error(err))
++			return nil, err
++		}
++		if !included {
++			continue
++		}
++		content, err := os.ReadFile(entry.physicalPath)
++		if err != nil {
++			wrappedErr := fmt.Errorf("read grep file %q: %w", entry.virtualPath, err)
++			logger.ErrorContext(ctx, "grep workspace files failed", zap.String("path", entry.virtualPath), zap.Error(wrappedErr))
++			return nil, wrappedErr
++		}
++		matches = append(matches, grepContent(entry.virtualPath, string(content), expression, req)...)
++	}
++	sort.Slice(matches,
++		// orderGrepMatches orders matches deterministically by virtual path and line.
++		func(i, j int) bool {
++			if matches[i].Path == matches[j].Path {
++				return matches[i].Line < matches[j].Line
++			}
++			return matches[i].Path < matches[j].Path
++		},
++	)
++	return matches, nil
++}
++
++// GlobInfo returns deterministic virtual file information for a doublestar pattern.
++func (b *Backend) GlobInfo(ctx context.Context, req *einofs.GlobInfoRequest) ([]einofs.FileInfo, error) {
++	if req == nil {
++		err := fmt.Errorf("glob request cannot be nil")
++		logger.ErrorContext(ctx, "glob workspace files failed", zap.Error(err))
++		return nil, err
++	}
++	if req.Pattern == "" {
++		err := fmt.Errorf("glob pattern cannot be empty")
++		logger.ErrorContext(ctx, "glob workspace files failed", zap.Error(err))
++		return nil, err
++	}
++	basePath := req.Path
++	if basePath == "" {
++		basePath = "/"
++	}
++	baseVirtual, err := normalizeVirtualPath(basePath)
++	if err != nil {
++		logger.ErrorContext(ctx, "glob workspace files failed", zap.String("path", basePath), zap.Error(err))
++		return nil, err
++	}
++	entries, err := b.collectEntries(ctx, baseVirtual)
++	if err != nil {
++		logger.ErrorContext(ctx, "glob workspace files failed", zap.String("path", baseVirtual), zap.Error(err))
++		return nil, err
++	}
++	result := make([]einofs.FileInfo, 0)
++	absolutePattern := strings.HasPrefix(req.Pattern, "/")
++	for _, entry := range entries {
++		matchPath := entry.virtualPath
++		if !absolutePattern {
++			matchPath = virtualRelative(baseVirtual, entry.virtualPath)
++		}
++		matched, err := doublestar.Match(req.Pattern, matchPath)
++		if err != nil {
++			wrappedErr := fmt.Errorf("match glob pattern: %w", err)
++			logger.ErrorContext(ctx, "glob workspace files failed", zap.String("pattern", req.Pattern), zap.Error(wrappedErr))
++			return nil, wrappedErr
++		}
++		if matched {
++			result = append(result, toFileInfo(entry.virtualPath, entry.info))
++		}
++	}
++	sortFileInfos(result)
++	return result, nil
++}
++
++// Write always rejects mutations because this backend is model-facing and read-only.
++func (b *Backend) Write(ctx context.Context, req *einofs.WriteRequest) error {
++	fields := []zap.Field{zap.Error(ErrReadOnly)}
++	if req != nil {
++		fields = append(fields, zap.String("path", req.FilePath))
++	}
++	logger.ErrorContext(ctx, "write workspace file rejected", fields...)
++	return ErrReadOnly
++}
++
++// Edit always rejects mutations because this backend is model-facing and read-only.
++func (b *Backend) Edit(ctx context.Context, req *einofs.EditRequest) error {
++	fields := []zap.Field{zap.Error(ErrReadOnly)}
++	if req != nil {
++		fields = append(fields, zap.String("path", req.FilePath))
++	}
++	logger.ErrorContext(ctx, "edit workspace file rejected", fields...)
++	return ErrReadOnly
++}
++
++// resolveExisting converts a virtual path to an existing allowed physical path.
++func (b *Backend) resolveExisting(ctx context.Context, input string) (string, string, error) {
++	if err := ctx.Err(); err != nil {
++		logger.ErrorContext(ctx, "resolve workspace path failed", zap.String("path", input), zap.Error(err))
++		return "", "", err
++	}
++	virtualPath, err := normalizeVirtualPath(input)
++	if err != nil {
++		logger.ErrorContext(ctx, "resolve workspace path failed", zap.String("path", input), zap.Error(err))
++		return "", "", err
++	}
++	if err := b.validatePathSymlinks(ctx, virtualPath); err != nil {
++		logger.ErrorContext(ctx, "resolve workspace path failed", zap.String("path", virtualPath), zap.Error(err))
++		return "", "", err
++	}
++	relativePath := strings.TrimPrefix(virtualPath, "/")
++	candidate := filepath.Join(b.workspaceDir, filepath.FromSlash(relativePath))
++	resolved, err := filepath.EvalSymlinks(candidate)
++	if err != nil {
++		wrappedErr := fmt.Errorf("resolve virtual path %q: %w", virtualPath, err)
++		logger.ErrorContext(ctx, "resolve workspace path failed", zap.String("path", virtualPath), zap.Error(wrappedErr))
++		return "", "", wrappedErr
++	}
++	resolved = filepath.Clean(resolved)
++	switch {
++	case pathWithin(resolved, b.workspaceRoot):
++		return virtualPath, resolved, nil
++	case pathWithin(resolved, b.builtinRoot):
++		if err := b.validateManagedBuiltinPath(ctx, virtualPath); err != nil {
++			logger.ErrorContext(ctx, "resolve workspace path failed", zap.String("path", virtualPath), zap.Error(err))
++			return "", "", err
++		}
++		return virtualPath, resolved, nil
++	default:
++		err := fmt.Errorf("virtual path %q resolves outside the workspace sandbox", virtualPath)
++		logger.ErrorContext(ctx, "resolve workspace path failed", zap.String("path", virtualPath), zap.Error(err))
++		return "", "", err
++	}
++}
++
++// validatePathSymlinks rejects every path-component symlink except an exact managed builtin link at the virtual root.
++func (b *Backend) validatePathSymlinks(ctx context.Context, virtualPath string) error {
++	relativePath := strings.TrimPrefix(virtualPath, "/")
++	if relativePath == "" {
++		return nil
++	}
++	currentPath := b.workspaceDir
++	for index, part := range strings.Split(relativePath, "/") {
++		currentPath = filepath.Join(currentPath, filepath.FromSlash(part))
++		info, err := os.Lstat(currentPath)
++		if err != nil {
++			wrappedErr := fmt.Errorf("inspect virtual path component %q: %w", virtualPath, err)
++			logger.ErrorContext(ctx, "validate workspace path symlinks failed",
++				zap.String("path", virtualPath),
++				zap.Error(wrappedErr),
++			)
++			return wrappedErr
++		}
++		if info.Mode()&os.ModeSymlink == 0 {
++			continue
++		}
++		if index == 0 {
++			if err := b.validateManagedBuiltinPath(ctx, virtualPath); err == nil {
++				continue
++			}
++		}
++		err = fmt.Errorf("virtual path %q contains an unmanaged symlink", virtualPath)
++		logger.ErrorContext(ctx, "validate workspace path symlinks failed",
++			zap.String("path", virtualPath),
++			zap.Error(err),
++		)
++		return err
++	}
++	return nil
++}
++
++// validateManagedBuiltinPath verifies that builtin access enters through an exact manager-owned link.
++func (b *Backend) validateManagedBuiltinPath(ctx context.Context, virtualPath string) error {
++	firstPart := strings.SplitN(strings.TrimPrefix(virtualPath, "/"), "/", 2)[0]
++	if firstPart == "" {
++		err := fmt.Errorf("builtin path has no skill ID")
++		logger.ErrorContext(ctx, "validate managed builtin path failed", zap.String("path", virtualPath), zap.Error(err))
++		return err
++	}
++	linkPath := filepath.Join(b.workspaceDir, filepath.FromSlash(firstPart))
++	info, err := os.Lstat(linkPath)
++	if err != nil {
++		wrappedErr := fmt.Errorf("inspect managed builtin link %q: %w", firstPart, err)
++		logger.ErrorContext(ctx, "validate managed builtin path failed",
++			zap.String("skill_id", firstPart),
++			zap.Error(wrappedErr),
++		)
++		return wrappedErr
++	}
++	if info.Mode()&os.ModeSymlink == 0 {
++		err := fmt.Errorf("builtin path %q does not use a managed link", virtualPath)
++		logger.ErrorContext(ctx, "validate managed builtin path failed", zap.String("path", virtualPath), zap.Error(err))
++		return err
++	}
++	target, err := os.Readlink(linkPath)
++	if err != nil {
++		wrappedErr := fmt.Errorf("read managed builtin link %q: %w", firstPart, err)
++		logger.ErrorContext(ctx, "validate managed builtin path failed",
++			zap.String("skill_id", firstPart),
++			zap.Error(wrappedErr),
++		)
++		return wrappedErr
++	}
++	wantTarget := filepath.Join("..", "..", "builtin", firstPart)
++	if target != wantTarget {
++		err := fmt.Errorf("builtin path %q does not use the expected managed link", virtualPath)
++		logger.ErrorContext(ctx, "validate managed builtin path failed",
++			zap.String("skill_id", firstPart),
++			zap.Error(err),
++		)
++		return err
++	}
++	return nil
++}
++
++// collectEntries recursively collects sandboxed descendants while following allowed directory links.
++func (b *Backend) collectEntries(ctx context.Context, basePath string) ([]virtualEntry, error) {
++	baseVirtual, basePhysical, err := b.resolveExisting(ctx, basePath)
++	if err != nil {
++		logger.ErrorContext(ctx, "collect workspace entries failed", zap.String("path", basePath), zap.Error(err))
++		return nil, err
++	}
++	baseInfo, err := os.Stat(basePhysical)
++	if err != nil {
++		wrappedErr := fmt.Errorf("inspect collection base %q: %w", baseVirtual, err)
++		logger.ErrorContext(ctx, "collect workspace entries failed", zap.String("path", baseVirtual), zap.Error(wrappedErr))
++		return nil, wrappedErr
++	}
++	if !baseInfo.IsDir() {
++		return []virtualEntry{{virtualPath: baseVirtual, physicalPath: basePhysical, info: baseInfo}}, nil
++	}
++	entries := make([]virtualEntry, 0)
++	visited := map[string]struct{}{basePhysical: {}}
++	if err := b.walkDirectory(ctx, baseVirtual, basePhysical, visited, &entries); err != nil {
++		logger.ErrorContext(ctx, "collect workspace entries failed", zap.String("path", baseVirtual), zap.Error(err))
++		return nil, err
++	}
++	sort.Slice(entries,
++		// orderVirtualEntries orders collected entries by virtual path.
++		func(i, j int) bool {
++			return entries[i].virtualPath < entries[j].virtualPath
++		},
++	)
++	return entries, nil
++}
++
++// walkDirectory recursively walks one already-resolved sandbox directory.
++func (b *Backend) walkDirectory(ctx context.Context, virtualDir, physicalDir string, visited map[string]struct{}, result *[]virtualEntry) error {
++	if err := ctx.Err(); err != nil {
++		logger.ErrorContext(ctx, "walk workspace directory failed", zap.String("path", virtualDir), zap.Error(err))
++		return err
++	}
++	entries, err := os.ReadDir(physicalDir)
++	if err != nil {
++		wrappedErr := fmt.Errorf("read workspace directory %q: %w", virtualDir, err)
++		logger.ErrorContext(ctx, "walk workspace directory failed", zap.String("path", virtualDir), zap.Error(wrappedErr))
++		return wrappedErr
++	}
++	for _, entry := range entries {
++		childVirtual := virtualJoin(virtualDir, entry.Name())
++		_, childPhysical, err := b.resolveExisting(ctx, childVirtual)
++		if err != nil {
++			logger.ErrorContext(ctx, "walk workspace directory failed", zap.String("path", childVirtual), zap.Error(err))
++			return err
++		}
++		childInfo, err := os.Stat(childPhysical)
++		if err != nil {
++			wrappedErr := fmt.Errorf("inspect workspace entry %q: %w", childVirtual, err)
++			logger.ErrorContext(ctx, "walk workspace directory failed", zap.String("path", childVirtual), zap.Error(wrappedErr))
++			return wrappedErr
++		}
++		*result = append(*result, virtualEntry{
++			virtualPath:  childVirtual,
++			physicalPath: childPhysical,
++			info:         childInfo,
++		})
++		if !childInfo.IsDir() {
++			continue
++		}
++		if _, ok := visited[childPhysical]; ok {
++			continue
++		}
++		visited[childPhysical] = struct{}{}
++		if err := b.walkDirectory(ctx, childVirtual, childPhysical, visited, result); err != nil {
++			logger.ErrorContext(ctx, "walk workspace directory failed", zap.String("path", childVirtual), zap.Error(err))
++			return err
++		}
++	}
++	return nil
++}
++
++// normalizeVirtualPath converts relative or absolute virtual input to a safe absolute path.
++func normalizeVirtualPath(input string) (string, error) {
++	slashed := filepath.ToSlash(input)
++	for _, part := range strings.Split(slashed, "/") {
++		if part == ".." {
++			err := fmt.Errorf("virtual path traversal is not allowed")
++			logger.Error("normalize workspace path failed", zap.String("path", input), zap.Error(err))
++			return "", err
++		}
++	}
++	if slashed == "" {
++		return "/", nil
++	}
++	if !strings.HasPrefix(slashed, "/") {
++		slashed = "/" + slashed
++	}
++	return path.Clean(slashed), nil
++}
++
++// pathWithin reports whether candidate is root itself or a descendant of root.
++func pathWithin(candidate, root string) bool {
++	relative, err := filepath.Rel(root, candidate)
++	if err != nil {
++		return false
++	}
++	return relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)))
++}
++
++// virtualJoin joins a virtual directory and child name without losing the virtual root.
++func virtualJoin(virtualDir, name string) string {
++	if virtualDir == "/" {
++		return "/" + name
++	}
++	return path.Join(virtualDir, name)
++}
++
++// virtualRelative returns a slash-separated descendant path relative to a virtual base.
++func virtualRelative(baseVirtual, childVirtual string) string {
++	if baseVirtual == "/" {
++		return strings.TrimPrefix(childVirtual, "/")
++	}
++	return strings.TrimPrefix(childVirtual, strings.TrimSuffix(baseVirtual, "/")+"/")
++}
++
++// paginateContent applies Eino's one-based line offset and optional line limit.
++func paginateContent(content string, offset, limit int) string {
++	startLine := offset - 1
++	if startLine < 0 {
++		startLine = 0
++	}
++	if startLine == 0 && limit <= 0 {
++		return content
++	}
++	start := 0
++	for line := 0; line < startLine; line++ {
++		index := strings.IndexByte(content[start:], '\n')
++		if index == -1 {
++			return ""
++		}
++		start += index + 1
++	}
++	if limit <= 0 {
++		return content[start:]
++	}
++	end := start
++	for line := 0; line < limit; line++ {
++		index := strings.IndexByte(content[end:], '\n')
++		if index == -1 {
++			return content[start:]
++		}
++		end += index + 1
++	}
++	return content[start : end-1]
++}
++
++// grepFileIncluded applies glob and file-type filters to one virtual file.
++func grepFileIncluded(virtualPath, searchPath string, req *einofs.GrepRequest) (bool, error) {
++	if req.FileType != "" {
++		extension := strings.TrimPrefix(path.Ext(virtualPath), ".")
++		if extension != strings.TrimPrefix(req.FileType, ".") {
++			return false, nil
++		}
++	}
++	if req.Glob == "" {
++		return true, nil
++	}
++	matchPath := path.Base(virtualPath)
++	if strings.Contains(req.Glob, "/") || strings.Contains(req.Glob, "**") {
++		baseVirtual, err := normalizeVirtualPath(searchPath)
++		if err != nil {
++			logger.Error("filter grep file failed", zap.String("path", searchPath), zap.Error(err))
++			return false, err
++		}
++		matchPath = virtualRelative(baseVirtual, virtualPath)
++	}
++	matched, err := doublestar.Match(req.Glob, matchPath)
++	if err != nil {
++		wrappedErr := fmt.Errorf("match grep glob: %w", err)
++		logger.Error("filter grep file failed", zap.String("glob", req.Glob), zap.Error(wrappedErr))
++		return false, wrappedErr
++	}
++	return matched, nil
++}
++
++// grepContent returns matching and requested context lines from one file.
++func grepContent(virtualPath, content string, expression *regexp.Regexp, req *einofs.GrepRequest) []einofs.GrepMatch {
++	lines := strings.Split(content, "\n")
++	selected := make(map[int]struct{})
++	if req.EnableMultiline {
++		for _, indexes := range expression.FindAllStringIndex(content, -1) {
++			firstLine := 1 + strings.Count(content[:indexes[0]], "\n")
++			lastLine := firstLine + strings.Count(content[indexes[0]:indexes[1]], "\n")
++			selectLineRange(selected, firstLine, lastLine, len(lines), req.BeforeLines, req.AfterLines)
++		}
++	} else {
++		for index, line := range lines {
++			if expression.MatchString(line) {
++				lineNumber := index + 1
++				selectLineRange(selected, lineNumber, lineNumber, len(lines), req.BeforeLines, req.AfterLines)
++			}
++		}
++	}
++	lineNumbers := make([]int, 0, len(selected))
++	for lineNumber := range selected {
++		lineNumbers = append(lineNumbers, lineNumber)
++	}
++	sort.Ints(lineNumbers)
++	matches := make([]einofs.GrepMatch, 0, len(lineNumbers))
++	for _, lineNumber := range lineNumbers {
++		matches = append(matches, einofs.GrepMatch{
++			Path:    virtualPath,
++			Line:    lineNumber,
++			Content: lines[lineNumber-1],
++		})
++	}
++	return matches
++}
++
++// selectLineRange adds a matched range and its requested context to the selected line set.
++func selectLineRange(selected map[int]struct{}, firstLine, lastLine, lineCount, beforeLines, afterLines int) {
++	start := firstLine - max(beforeLines, 0)
++	if start < 1 {
++		start = 1
++	}
++	end := lastLine + max(afterLines, 0)
++	if end > lineCount {
++		end = lineCount
++	}
++	for lineNumber := start; lineNumber <= end; lineNumber++ {
++		selected[lineNumber] = struct{}{}
++	}
++}
++
++// toFileInfo converts physical metadata to Eino metadata while retaining only a virtual path.
++func toFileInfo(virtualPath string, info os.FileInfo) einofs.FileInfo {
++	return einofs.FileInfo{
++		Path:       virtualPath,
++		IsDir:      info.IsDir(),
++		Size:       info.Size(),
++		ModifiedAt: info.ModTime().Format(time.RFC3339Nano),
++	}
++}
++
++// sortFileInfos sorts Eino file metadata deterministically by virtual path.
++func sortFileInfos(infos []einofs.FileInfo) {
++	sort.Slice(infos,
++		// orderFileInfos orders file metadata by virtual path.
++		func(i, j int) bool {
++			return infos[i].Path < infos[j].Path
++		},
++	)
++}
+diff --git a/internal/skill/workspace/manager_test.go b/internal/skill/workspace/manager_test.go
+new file mode 100644
+index 0000000..dfd231d
+--- /dev/null
++++ b/internal/skill/workspace/manager_test.go
+@@ -0,0 +1,226 @@
++package workspace
++
++import (
++	"context"
++	"os"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"testing"
++
++	"easygo-agent/internal/config"
++)
++
++// TestEnsureWorkspaceCreatesUserDirectory verifies that a private user workspace is created.
++func TestEnsureWorkspaceCreatesUserDirectory(t *testing.T) {
++	manager, rootDir := newTestManager(t)
++
++	workspaceDir, err := manager.EnsureWorkspace(context.Background(), 42)
++	if err != nil {
++		t.Fatalf("EnsureWorkspace() error = %v", err)
++	}
++
++	want := filepath.Join(rootDir, "workspaces", "42")
++	if workspaceDir != want {
++		t.Fatalf("EnsureWorkspace() = %q, want %q", workspaceDir, want)
++	}
++	info, err := os.Stat(workspaceDir)
++	if err != nil {
++		t.Fatalf("os.Stat() error = %v", err)
++	}
++	if !info.IsDir() {
++		t.Fatalf("workspace is not a directory")
++	}
++	if info.Mode().Perm() != 0o750 {
++		t.Fatalf("workspace mode = %o, want 750", info.Mode().Perm())
++	}
++}
++
++// TestEnsureWorkspaceCreatesRelativeBuiltinLinks verifies that each builtin directory is linked by a relative target.
++func TestEnsureWorkspaceCreatesRelativeBuiltinLinks(t *testing.T) {
++	manager, rootDir := newTestManager(t)
++	createSkillFile(t, filepath.Join(rootDir, "builtin", "easygo-agent-skill"), "builtin")
++	createSkillFile(t, filepath.Join(rootDir, "builtin", "another-skill"), "another")
++	if err := os.WriteFile(filepath.Join(rootDir, "builtin", "not-a-directory"), []byte("ignored"), 0o600); err != nil {
++		t.Fatalf("os.WriteFile() error = %v", err)
++	}
++
++	workspaceDir, err := manager.EnsureWorkspace(context.Background(), 7)
++	if err != nil {
++		t.Fatalf("EnsureWorkspace() error = %v", err)
++	}
++
++	for _, skillID := range []string{"another-skill", "easygo-agent-skill"} {
++		linkTarget, err := os.Readlink(filepath.Join(workspaceDir, skillID))
++		if err != nil {
++			t.Fatalf("os.Readlink(%q) error = %v", skillID, err)
++		}
++		want := filepath.Join("..", "..", "builtin", skillID)
++		if linkTarget != want {
++			t.Errorf("link target for %q = %q, want %q", skillID, linkTarget, want)
++		}
++	}
++	if _, err := os.Lstat(filepath.Join(workspaceDir, "not-a-directory")); !os.IsNotExist(err) {
++		t.Fatalf("non-directory builtin link exists, error = %v", err)
++	}
++}
++
++// TestEnsureWorkspaceIsIdempotent verifies that a correct managed link is preserved across repeated calls.
++func TestEnsureWorkspaceIsIdempotent(t *testing.T) {
++	manager, rootDir := newTestManager(t)
++	createSkillFile(t, filepath.Join(rootDir, "builtin", "builtin-skill"), "builtin")
++
++	workspaceDir, err := manager.EnsureWorkspace(context.Background(), 8)
++	if err != nil {
++		t.Fatalf("first EnsureWorkspace() error = %v", err)
++	}
++	linkPath := filepath.Join(workspaceDir, "builtin-skill")
++	before, err := os.Lstat(linkPath)
++	if err != nil {
++		t.Fatalf("first os.Lstat() error = %v", err)
++	}
++
++	if _, err := manager.EnsureWorkspace(context.Background(), 8); err != nil {
++		t.Fatalf("second EnsureWorkspace() error = %v", err)
++	}
++	after, err := os.Lstat(linkPath)
++	if err != nil {
++		t.Fatalf("second os.Lstat() error = %v", err)
++	}
++	if !os.SameFile(before, after) {
++		t.Fatalf("correct managed symlink was replaced")
++	}
++}
++
++// TestEnsureWorkspaceRepairsManagedSymlink verifies that a broken or wrong link at a builtin ID is repaired.
++func TestEnsureWorkspaceRepairsManagedSymlink(t *testing.T) {
++	manager, rootDir := newTestManager(t)
++	createSkillFile(t, filepath.Join(rootDir, "builtin", "builtin-skill"), "builtin")
++	workspaceDir := filepath.Join(rootDir, "workspaces", "9")
++	if err := os.MkdirAll(workspaceDir, 0o750); err != nil {
++		t.Fatalf("os.MkdirAll() error = %v", err)
++	}
++	linkPath := filepath.Join(workspaceDir, "builtin-skill")
++	if err := os.Symlink(filepath.Join("..", "..", "missing"), linkPath); err != nil {
++		t.Fatalf("os.Symlink() error = %v", err)
++	}
++
++	if _, err := manager.EnsureWorkspace(context.Background(), 9); err != nil {
++		t.Fatalf("EnsureWorkspace() error = %v", err)
++	}
++	got, err := os.Readlink(linkPath)
++	if err != nil {
++		t.Fatalf("os.Readlink() error = %v", err)
++	}
++	want := filepath.Join("..", "..", "builtin", "builtin-skill")
++	if got != want {
++		t.Fatalf("repaired link target = %q, want %q", got, want)
++	}
++}
++
++// TestEnsureWorkspaceRejectsBuiltinDirectoryConflict verifies that user-owned content is never removed to install a builtin link.
++func TestEnsureWorkspaceRejectsBuiltinDirectoryConflict(t *testing.T) {
++	manager, rootDir := newTestManager(t)
++	createSkillFile(t, filepath.Join(rootDir, "builtin", "builtin-skill"), "builtin")
++	userSkillDir := filepath.Join(rootDir, "workspaces", "10", "builtin-skill")
++	createSkillFile(t, userSkillDir, "user-owned")
++
++	if _, err := manager.EnsureWorkspace(context.Background(), 10); err == nil {
++		t.Fatalf("EnsureWorkspace() error = nil, want conflict error")
++	}
++
++	content, err := os.ReadFile(filepath.Join(userSkillDir, "SKILL.md"))
++	if err != nil {
++		t.Fatalf("os.ReadFile() error = %v", err)
++	}
++	if string(content) != "user-owned" {
++		t.Fatalf("user content = %q, want %q", content, "user-owned")
++	}
++}
++
++// TestEnsureWorkspaceRejectsUserDirectorySymlink verifies that one user's workspace cannot alias another user's directory.
++func TestEnsureWorkspaceRejectsUserDirectorySymlink(t *testing.T) {
++	manager, rootDir := newTestManager(t)
++	otherWorkspace := userWorkspacePath(rootDir, 20)
++	createSkillFile(t, filepath.Join(otherWorkspace, "other-skill"), "other user")
++	linkPath := userWorkspacePath(rootDir, 19)
++	if err := os.Symlink(otherWorkspace, linkPath); err != nil {
++		t.Fatalf("os.Symlink() error = %v", err)
++	}
++
++	if _, err := manager.EnsureWorkspace(context.Background(), 19); err == nil {
++		t.Fatalf("EnsureWorkspace() error = nil, want workspace symlink rejection")
++	}
++}
++
++// TestBuiltinIDsReturnsImmediateDirectories verifies that only immediate builtin directories are exposed as IDs.
++func TestBuiltinIDsReturnsImmediateDirectories(t *testing.T) {
++	manager, rootDir := newTestManager(t)
++	createSkillFile(t, filepath.Join(rootDir, "builtin", "first"), "first")
++	createSkillFile(t, filepath.Join(rootDir, "builtin", "second"), "second")
++	if err := os.WriteFile(filepath.Join(rootDir, "builtin", "file"), []byte("ignored"), 0o600); err != nil {
++		t.Fatalf("os.WriteFile() error = %v", err)
++	}
++
++	ids, err := manager.BuiltinIDs(context.Background())
++	if err != nil {
++		t.Fatalf("BuiltinIDs() error = %v", err)
++	}
++	if len(ids) != 2 {
++		t.Fatalf("BuiltinIDs() count = %d, want 2", len(ids))
++	}
++	for _, skillID := range []string{"first", "second"} {
++		if _, ok := ids[skillID]; !ok {
++			t.Errorf("BuiltinIDs() missing %q", skillID)
++		}
++	}
++}
++
++// TestBuiltinIDsRejectsInvalidNames verifies that builtin directory names must match the exact skill ID grammar.
++func TestBuiltinIDsRejectsInvalidNames(t *testing.T) {
++	invalidNames := []string{
++		"Uppercase",
++		"a",
++		strings.Repeat("a", 65),
++		"under_score",
++		"dotted.name",
++	}
++
++	for _, invalidName := range invalidNames {
++		manager, rootDir := newTestManager(t)
++		createSkillFile(t, filepath.Join(rootDir, "builtin", invalidName), "invalid")
++
++		if _, err := manager.BuiltinIDs(context.Background()); err == nil {
++			t.Errorf("BuiltinIDs() with %q error = nil, want invalid ID error", invalidName)
++		}
++	}
++}
++
++// newTestManager creates a manager rooted in an isolated temporary directory.
++func newTestManager(t *testing.T) (*Manager, string) {
++	t.Helper()
++
++	rootDir := filepath.Join(t.TempDir(), "skills")
++	manager, err := NewManager(config.Skills{RootDir: rootDir})
++	if err != nil {
++		t.Fatalf("NewManager() error = %v", err)
++	}
++	return manager, rootDir
++}
++
++// createSkillFile creates a skill directory containing one SKILL.md file.
++func createSkillFile(t *testing.T, skillDir, content string) {
++	t.Helper()
++
++	if err := os.MkdirAll(skillDir, 0o750); err != nil {
++		t.Fatalf("os.MkdirAll(%q) error = %v", skillDir, err)
++	}
++	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(content), 0o600); err != nil {
++		t.Fatalf("os.WriteFile(%q) error = %v", skillDir, err)
++	}
++}
++
++// userWorkspacePath returns the physical workspace directory for a user ID.
++func userWorkspacePath(rootDir string, userID uint64) string {
++	return filepath.Join(rootDir, "workspaces", strconv.FormatUint(userID, 10))
++}
+diff --git a/internal/skill/workspace/backend_test.go b/internal/skill/workspace/backend_test.go
+new file mode 100644
+index 0000000..112dfa7
+--- /dev/null
++++ b/internal/skill/workspace/backend_test.go
+@@ -0,0 +1,222 @@
++package workspace
++
++import (
++	"context"
++	"errors"
++	"os"
++	"path/filepath"
++	"reflect"
++	"strings"
++	"testing"
++
++	einofs "github.com/cloudwego/eino/adk/filesystem"
++)
++
++// TestBackendReadIsUserScoped verifies that reads resolve only within the selected user's workspace.
++func TestBackendReadIsUserScoped(t *testing.T) {
++	manager, rootDir := newTestManager(t)
++	createSkillFile(t, filepath.Join(userWorkspacePath(rootDir, 11), "user-skill"), "user eleven")
++	createSkillFile(t, filepath.Join(userWorkspacePath(rootDir, 12), "user-skill"), "user twelve")
++	backend, err := manager.NewBackend(context.Background(), 11)
++	if err != nil {
++		t.Fatalf("NewBackend() error = %v", err)
++	}
++
++	content, err := backend.Read(context.Background(), &einofs.ReadRequest{FilePath: "/user-skill/SKILL.md"})
++	if err != nil {
++		t.Fatalf("Read() error = %v", err)
++	}
++	if content.Content != "user eleven" {
++		t.Fatalf("Read() content = %q, want %q", content.Content, "user eleven")
++	}
++
++	otherUserPath := filepath.Join(userWorkspacePath(rootDir, 12), "user-skill", "SKILL.md")
++	for _, unsafePath := range []string{"../12/user-skill/SKILL.md", otherUserPath} {
++		if _, err := backend.Read(context.Background(), &einofs.ReadRequest{FilePath: unsafePath}); err == nil {
++			t.Errorf("Read(%q) error = nil, want rejection", unsafePath)
++		}
++	}
++}
++
++// TestBackendReadFollowsManagedBuiltinLink verifies that manager-created builtin links remain readable.
++func TestBackendReadFollowsManagedBuiltinLink(t *testing.T) {
++	manager, rootDir := newTestManager(t)
++	createSkillFile(t, filepath.Join(rootDir, "builtin", "easygo-agent-skill"), "builtin content")
++	backend, err := manager.NewBackend(context.Background(), 13)
++	if err != nil {
++		t.Fatalf("NewBackend() error = %v", err)
++	}
++
++	content, err := backend.Read(context.Background(), &einofs.ReadRequest{FilePath: "/easygo-agent-skill/SKILL.md"})
++	if err != nil {
++		t.Fatalf("Read() error = %v", err)
++	}
++	if content.Content != "builtin content" {
++		t.Fatalf("Read() content = %q, want %q", content.Content, "builtin content")
++	}
++}
++
++// TestBackendRejectsUnsafePaths verifies traversal, physical paths, and out-of-sandbox links cannot be read.
++func TestBackendRejectsUnsafePaths(t *testing.T) {
++	manager, rootDir := newTestManager(t)
++	createSkillFile(t, filepath.Join(userWorkspacePath(rootDir, 14), "user-skill"), "safe")
++	backend, err := manager.NewBackend(context.Background(), 14)
++	if err != nil {
++		t.Fatalf("NewBackend() error = %v", err)
++	}
++	outsideFile := filepath.Join(t.TempDir(), "outside.md")
++	if err := os.WriteFile(outsideFile, []byte("outside"), 0o600); err != nil {
++		t.Fatalf("os.WriteFile() error = %v", err)
++	}
++	workspaceDir := userWorkspacePath(rootDir, 14)
++	if err := os.Symlink(outsideFile, filepath.Join(workspaceDir, "outside-link.md")); err != nil {
++		t.Fatalf("os.Symlink() error = %v", err)
++	}
++
++	unsafePaths := []string{
++		"..",
++		"../user-skill/SKILL.md",
++		filepath.Join(workspaceDir, "user-skill", "SKILL.md"),
++		"/outside-link.md",
++	}
++	for _, unsafePath := range unsafePaths {
++		if _, err := backend.Read(context.Background(), &einofs.ReadRequest{FilePath: unsafePath}); err == nil {
++			t.Errorf("Read(%q) error = nil, want rejection", unsafePath)
++		}
++	}
++}
++
++// TestBackendRejectsArbitraryInternalSymlinks verifies that only manager-owned builtin symlinks may be followed.
++func TestBackendRejectsArbitraryInternalSymlinks(t *testing.T) {
++	manager, rootDir := newTestManager(t)
++	createSkillFile(t, filepath.Join(userWorkspacePath(rootDir, 21), "user-skill"), "safe")
++	backend, err := manager.NewBackend(context.Background(), 21)
++	if err != nil {
++		t.Fatalf("NewBackend() error = %v", err)
++	}
++	workspaceDir := userWorkspacePath(rootDir, 21)
++	if err := os.Symlink(filepath.Join("user-skill", "SKILL.md"), filepath.Join(workspaceDir, "leaf-link.md")); err != nil {
++		t.Fatalf("leaf os.Symlink() error = %v", err)
++	}
++	if err := os.Symlink("user-skill", filepath.Join(workspaceDir, "directory-link")); err != nil {
++		t.Fatalf("directory os.Symlink() error = %v", err)
++	}
++
++	for _, virtualPath := range []string{"/leaf-link.md", "/directory-link/SKILL.md"} {
++		if _, err := backend.Read(context.Background(), &einofs.ReadRequest{FilePath: virtualPath}); err == nil {
++			t.Errorf("Read(%q) error = nil, want arbitrary symlink rejection", virtualPath)
++		}
++	}
++}
++
++// TestBackendGlobFindsUserAndBuiltinSkills verifies glob discovery explicitly traverses managed builtin links.
++func TestBackendGlobFindsUserAndBuiltinSkills(t *testing.T) {
++	manager, rootDir := newTestManager(t)
++	createSkillFile(t, filepath.Join(rootDir, "builtin", "easygo-agent-skill"), "builtin")
++	createSkillFile(t, filepath.Join(userWorkspacePath(rootDir, 15), "user-skill"), "user")
++	backend, err := manager.NewBackend(context.Background(), 15)
++	if err != nil {
++		t.Fatalf("NewBackend() error = %v", err)
++	}
++
++	infos, err := backend.GlobInfo(context.Background(), &einofs.GlobInfoRequest{Pattern: "/*/SKILL.md", Path: "/"})
++	if err != nil {
++		t.Fatalf("GlobInfo() error = %v", err)
++	}
++	got := fileInfoPaths(infos)
++	want := []string{"/easygo-agent-skill/SKILL.md", "/user-skill/SKILL.md"}
++	if !reflect.DeepEqual(got, want) {
++		t.Fatalf("GlobInfo() paths = %#v, want %#v", got, want)
++	}
++}
++
++// TestBackendReturnsVirtualPaths verifies listing and grep results never expose physical paths.
++func TestBackendReturnsVirtualPaths(t *testing.T) {
++	manager, rootDir := newTestManager(t)
++	createSkillFile(t, filepath.Join(userWorkspacePath(rootDir, 16), "user-skill"), "before\nneedle\nafter\n")
++	backend, err := manager.NewBackend(context.Background(), 16)
++	if err != nil {
++		t.Fatalf("NewBackend() error = %v", err)
++	}
++
++	infos, err := backend.LsInfo(context.Background(), &einofs.LsInfoRequest{Path: "/"})
++	if err != nil {
++		t.Fatalf("LsInfo() error = %v", err)
++	}
++	if got := fileInfoPaths(infos); !reflect.DeepEqual(got, []string{"/user-skill"}) {
++		t.Fatalf("LsInfo() paths = %#v, want %#v", got, []string{"/user-skill"})
++	}
++
++	matches, err := backend.GrepRaw(context.Background(), &einofs.GrepRequest{
++		Pattern:     "needle",
++		Path:        "/user-skill",
++		Glob:        "*.md",
++		BeforeLines: 1,
++		AfterLines:  1,
++	})
++	if err != nil {
++		t.Fatalf("GrepRaw() error = %v", err)
++	}
++	wantMatches := []einofs.GrepMatch{
++		{Path: "/user-skill/SKILL.md", Line: 1, Content: "before"},
++		{Path: "/user-skill/SKILL.md", Line: 2, Content: "needle"},
++		{Path: "/user-skill/SKILL.md", Line: 3, Content: "after"},
++	}
++	if !reflect.DeepEqual(matches, wantMatches) {
++		t.Fatalf("GrepRaw() matches = %#v, want %#v", matches, wantMatches)
++	}
++	for _, match := range matches {
++		if strings.Contains(match.Path, rootDir) {
++			t.Errorf("GrepRaw() exposed physical path %q", match.Path)
++		}
++	}
++}
++
++// TestBackendReadPaginatesLines verifies Eino's one-based offset and line-limit behavior.
++func TestBackendReadPaginatesLines(t *testing.T) {
++	manager, rootDir := newTestManager(t)
++	createSkillFile(t, filepath.Join(userWorkspacePath(rootDir, 17), "user-skill"), "one\ntwo\nthree\nfour")
++	backend, err := manager.NewBackend(context.Background(), 17)
++	if err != nil {
++		t.Fatalf("NewBackend() error = %v", err)
++	}
++
++	content, err := backend.Read(context.Background(), &einofs.ReadRequest{
++		FilePath: "user-skill/SKILL.md",
++		Offset:   2,
++		Limit:    2,
++	})
++	if err != nil {
++		t.Fatalf("Read() error = %v", err)
++	}
++	if content.Content != "two\nthree" {
++		t.Fatalf("Read() content = %q, want %q", content.Content, "two\nthree")
++	}
++}
++
++// TestBackendIsReadOnly verifies model-facing mutation methods consistently return the read-only sentinel.
++func TestBackendIsReadOnly(t *testing.T) {
++	manager, _ := newTestManager(t)
++	backend, err := manager.NewBackend(context.Background(), 18)
++	if err != nil {
++		t.Fatalf("NewBackend() error = %v", err)
++	}
++
++	writeErr := backend.Write(context.Background(), &einofs.WriteRequest{FilePath: "/new", Content: "new"})
++	if !errors.Is(writeErr, ErrReadOnly) {
++		t.Fatalf("Write() error = %v, want ErrReadOnly", writeErr)
++	}
++	editErr := backend.Edit(context.Background(), &einofs.EditRequest{FilePath: "/new", OldString: "a", NewString: "b"})
++	if !errors.Is(editErr, ErrReadOnly) {
++		t.Fatalf("Edit() error = %v, want ErrReadOnly", editErr)
++	}
++}
++
++// fileInfoPaths returns file information paths in their existing order.
++func fileInfoPaths(infos []einofs.FileInfo) []string {
++	paths := make([]string, 0, len(infos))
++	for _, info := range infos {
++		paths = append(paths, info.Path)
++	}
++	return paths
++}

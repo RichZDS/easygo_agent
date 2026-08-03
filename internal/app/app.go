@@ -18,6 +18,9 @@ import (
 	"easygo-agent/internal/platform/logger"
 	mysqlplatform "easygo-agent/internal/platform/mysql"
 	"easygo-agent/internal/server"
+	skillstore "easygo-agent/internal/skill/store"
+	skillsync "easygo-agent/internal/skill/sync"
+	"easygo-agent/internal/skill/workspace"
 	"easygo-agent/internal/wire"
 
 	"go.uber.org/zap"
@@ -47,10 +50,34 @@ func Run(configPath string) error {
 	}); err != nil {
 		return fmt.Errorf("init logger: %w", err)
 	}
+	// syncLogger flushes buffered structured log entries during shutdown.
 	defer func() { _ = logger.Sync() }()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	workspaceManager, err := workspace.NewManager(cfg.Skills)
+	if err != nil {
+		logger.ErrorContext(ctx, "initialize skill workspace failed", zap.Error(err))
+		return fmt.Errorf("initialize skill workspace: %w", err)
+	}
+	syncer, err := skillsync.New(cfg.Skills)
+	if err != nil {
+		logger.ErrorContext(ctx, "initialize builtin skill sync failed", zap.Error(err))
+		return fmt.Errorf("initialize builtin skill sync: %w", err)
+	}
+	if err := syncer.Sync(ctx); err != nil {
+		logger.ErrorContext(ctx, "synchronize builtin skills failed", zap.Error(err))
+		return fmt.Errorf("synchronize builtin skills: %w", err)
+	}
+	skillStore, err := skillstore.New(cfg.Skills, workspaceManager)
+	if err != nil {
+		logger.ErrorContext(ctx, "initialize skill store failed", zap.Error(err))
+		return fmt.Errorf("initialize skill store: %w", err)
+	}
+	if err := skillStore.CleanupStaging(ctx); err != nil {
+		logger.ErrorContext(ctx, "clean skill staging directory failed", zap.Error(err))
+		return fmt.Errorf("clean skill staging directory: %w", err)
+	}
 
 	db, err := mysqlplatform.Open(ctx, cfg.MySQL)
 	if err != nil {
@@ -60,6 +87,7 @@ func Run(configPath string) error {
 	if err != nil {
 		return fmt.Errorf("get mysql pool: %w", err)
 	}
+	// closeSQLPool releases database connections and records shutdown failures.
 	defer func() {
 		if closeErr := sqlDB.Close(); closeErr != nil {
 			logger.Error("close mysql", zap.Error(closeErr))
@@ -80,17 +108,18 @@ func Run(configPath string) error {
 	frameMgr.Start(ctx)
 	defer frameMgr.Stop()
 
-	runtime := agentframework.NewRuntimeFactory(agentframework.NewRegistry())
+	runtime := agentframework.NewRuntimeFactory(agentframework.NewRegistry(), workspaceManager)
 	healthHandler := handler.NewHealthHandler(map[string]handler.CheckFunc{
 		"mysql": sqlDB.PingContext,
 	})
-	controllers := wire.InitControllers(db, cipher, issuer, runtime)
+	controllers := wire.InitControllers(db, cipher, issuer, runtime, skillStore)
 	router := server.NewRouter(
 		healthHandler,
 		controllers.User,
 		controllers.Auth,
 		controllers.Provider,
 		controllers.Chat,
+		controllers.Skill,
 		issuer,
 	)
 	logger.Info("application initialized", zap.String("name", "easygo-agent"))

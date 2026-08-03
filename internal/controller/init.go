@@ -6,4 +6,5 @@ type AllControllers struct {
 	Auth     *AuthController
 	Provider *ProviderController
 	Chat     *ChatController
+	Skill    *SkillController
 }

@@ -94,7 +94,7 @@ func (s *RunService) Prepare(
 	// ── Step 5: 构建 Eino Runner（事务外，避免长事务） ─────────────────
 	// Registry.Build → AgenticModel → TypedChatModelAgent → TypedRunner。
 	// Runner 在事务外创建：HTTP 客户端初始化不涉及 DB，且避免持锁期间做网络 IO。
-	runner, err := s.runtime.Build(ctx, spec)
+	runner, err := s.runtime.Build(ctx, userID, spec)
 	if err != nil {
 		return nil, errorcode.Wrap(errorcode.InvalidParameter, fmt.Errorf("build TypedRunner: %w", err))
 	}

@@ -19,6 +19,7 @@ func NewRouter(
 	authCtl *controller.AuthController,
 	providerCtl *controller.ProviderController,
 	chatCtl *controller.ChatController,
+	skillCtl *controller.SkillController,
 	issuer *auth.Issuer,
 ) *gin.Engine {
 	router := gin.New()
@@ -50,6 +51,10 @@ func NewRouter(
 			authorized.PATCH("/sessions/:id/model", chatCtl.SwitchModel)
 			authorized.POST("/sessions/:id/runs:stream", chatCtl.Stream)
 			authorized.GET("/runs/:run_id", chatCtl.GetRun)
+
+			authorized.POST("/skills", skillCtl.Upload)
+			authorized.GET("/skills", skillCtl.List)
+			authorized.DELETE("/skills/:skill_id", skillCtl.Delete)
 		}
 		v1.GET("/users/:id", userCtl.GetByID)
 		v1.GET("/users", userCtl.GetByName)
@@ -58,11 +63,15 @@ func NewRouter(
 		v1.DELETE("/users/:id", userCtl.Delete)
 	}
 
-	router.NoRoute(func(c *gin.Context) {
+	// handleUnknownRoute returns the stable not-found response envelope.
+	handleUnknownRoute := func(c *gin.Context) {
 		response.Fail(c, errorcode.New(errorcode.NotFound, "接口不存在"))
-	})
-	router.NoMethod(func(c *gin.Context) {
+	}
+	router.NoRoute(handleUnknownRoute)
+	// handleUnsupportedMethod returns the stable method-not-allowed response envelope.
+	handleUnsupportedMethod := func(c *gin.Context) {
 		response.JSON(c, http.StatusMethodNotAllowed, errorcode.InvalidParameter, nil, "请求方法不支持")
-	})
+	}
+	router.NoMethod(handleUnsupportedMethod)
 	return router
 }

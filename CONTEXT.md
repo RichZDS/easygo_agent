@@ -31,3 +31,11 @@ _Avoid_: System Message, model response
 **Agent Event**:
 An ephemeral Eino ADK event produced while a Runner executes. It drives the live SSE projection and terminal Message persistence, but is not itself durable conversation history.
 _Avoid_: Message, replay record
+
+**Skill**:
+A reusable instruction and knowledge package rooted at `SKILL.md`. Builtin Skills are shared read-only; user Skills are private to one user workspace. A Skill is knowledge loaded by the model, not an action integration.
+_Avoid_: Tool, plugin, system prompt
+
+**Skill Catalog**:
+The complete set of builtin and private Skills visible to one user when a Turn's Runner is built. It is reconstructed from the user's workspace for every Turn and is never persisted in Session history.
+_Avoid_: Global cache, Session configuration

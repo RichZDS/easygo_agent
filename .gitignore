@@ -5,3 +5,6 @@ logs/
 *.log
 bin/
 coverage.out
+skills/builtin/
+skills/staging/
+skills/workspaces/

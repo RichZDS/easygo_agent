@@ -41,7 +41,6 @@ type Logger struct {
 
 type Skills struct {
 	RootDir           string `yaml:"root_dir"`
-	SyncCron          string `yaml:"sync_cron"`
 	ReadmeSrc         string `yaml:"readme_src"`
 	MaxZipBytes       int64  `yaml:"max_zip_bytes"`
 	MaxExtractedBytes int64  `yaml:"max_extracted_bytes"`
@@ -65,7 +64,6 @@ func Load(path string) (Config, error) {
 	cfg := Config{
 		Skills: Skills{
 			RootDir:           "skills",
-			SyncCron:          "0 0 3 * * *",
 			ReadmeSrc:         "README.md",
 			MaxZipBytes:       5 << 20,
 			MaxExtractedBytes: 20 << 20,
@@ -115,11 +113,6 @@ func (cfg Config) Validate() error {
 	}
 	if strings.TrimSpace(cfg.Skills.RootDir) == "" {
 		err := fmt.Errorf("skills root_dir cannot be empty")
-		logger.Error("validate config failed", zap.Error(err))
-		return err
-	}
-	if strings.TrimSpace(cfg.Skills.SyncCron) == "" {
-		err := fmt.Errorf("skills sync_cron cannot be empty")
 		logger.Error("validate config failed", zap.Error(err))
 		return err
 	}

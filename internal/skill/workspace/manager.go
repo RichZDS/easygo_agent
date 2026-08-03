@@ -22,6 +22,7 @@ type Manager struct {
 	rootDir    string
 	builtinSrc string
 	builtinDir string
+	staging    string
 	workspaces string
 }
 
@@ -42,9 +43,10 @@ func NewManager(cfg config.Skills) (*Manager, error) {
 		rootDir:    rootDir,
 		builtinSrc: filepath.Join(rootDir, "builtin-src"),
 		builtinDir: filepath.Join(rootDir, "builtin"),
+		staging:    filepath.Join(rootDir, "staging"),
 		workspaces: filepath.Join(rootDir, "workspaces"),
 	}
-	for _, dir := range []string{manager.rootDir, manager.builtinSrc, manager.builtinDir, manager.workspaces} {
+	for _, dir := range []string{manager.rootDir, manager.builtinSrc, manager.builtinDir, manager.staging, manager.workspaces} {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			wrappedErr := fmt.Errorf("create skills directory %q: %w", dir, err)
 			logger.Error("create workspace manager failed", zap.String("directory", dir), zap.Error(wrappedErr))
@@ -52,6 +54,19 @@ func NewManager(cfg config.Skills) (*Manager, error) {
 		}
 	}
 	return manager, nil
+}
+
+// StagingDir returns the validated manager-owned directory for transient skill operations.
+func (m *Manager) StagingDir(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		logger.ErrorContext(ctx, "get skill staging directory failed", zap.Error(err))
+		return "", err
+	}
+	if err := validateManagedDirectory(ctx, m.staging); err != nil {
+		logger.ErrorContext(ctx, "get skill staging directory failed", zap.String("directory", m.staging), zap.Error(err))
+		return "", err
+	}
+	return m.staging, nil
 }
 
 // EnsureWorkspace creates a user's workspace and synchronizes its managed builtin links.

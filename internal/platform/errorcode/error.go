@@ -21,6 +21,7 @@ var (
 	Forbidden        = Code{Value: 10003, HTTPStatus: http.StatusForbidden, Message: "无权执行此操作"}
 	NotFound         = Code{Value: 10004, HTTPStatus: http.StatusNotFound, Message: "资源不存在"}
 	Conflict         = Code{Value: 10009, HTTPStatus: http.StatusConflict, Message: "资源已存在"}
+	PayloadTooLarge  = Code{Value: 10010, HTTPStatus: http.StatusRequestEntityTooLarge, Message: "上传内容超过限制"}
 	Database         = Code{Value: 20001, HTTPStatus: http.StatusInternalServerError, Message: "数据库操作失败"}
 	Cache            = Code{Value: 20002, HTTPStatus: http.StatusInternalServerError, Message: "缓存操作失败"}
 	Internal         = Code{Value: 50000, HTTPStatus: http.StatusInternalServerError, Message: "服务器内部错误"}

@@ -69,13 +69,40 @@ mysql:
   max_open_conns: 100
   conn_max_lifetime: 3600
 
-agent:
-  instruction: "You are EasyGo, a helpful assistant."
-  revision: "chat-v1"
-  turn_timeout_seconds: 300
+skills:
+  root_dir: skills
+  readme_src: README.md
+  max_zip_bytes: 5242880
+  max_extracted_bytes: 20971520
+  max_files: 200
 ```
 
-`agent.revision` 会固化到 Turn，system instruction 不会作为普通 Message 重复写入历史。`turn_timeout_seconds` 默认建议为 300 秒。
+配置使用严格 YAML 字段校验。Skill 上传默认限制为 ZIP 5 MiB、解压后 20 MiB、最多 200 个普通文件。
+
+## Skills
+
+启动时，服务会将 `skills/builtin-src/` 原子同步到运行态 `skills/builtin/`。内置 `easygo-agent-skill` 引用当前项目 README，供模型在回答框架、技术栈和架构问题时自主加载。
+
+每个 Turn 都按认证用户重新构建 Skill catalog，并且只向模型开放 `ls`、`read_file`、`glob`、`grep` 四个文件工具。模型不能通过这些工具写入或编辑 workspace。
+
+登录后可管理当前用户的私有 Skill：
+
+```bash
+curl -X POST http://localhost:8080/api/v1/skills \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "skill_id=my-skill" \
+  -F "file=@my-skill.zip"
+
+curl http://localhost:8080/api/v1/skills \
+  -H "Authorization: Bearer $TOKEN"
+
+curl -X DELETE http://localhost:8080/api/v1/skills/my-skill \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+ZIP 根目录或唯一顶层目录内必须包含 `SKILL.md`。Frontmatter 的 `name` 必须与 `skill_id` 一致，`description` 不能为空；当前仅支持 inline skill，不接受 `context`、`agent` 或 `model` 覆盖。内置和已有同名 Skill 不会被覆盖。
+
+上传或删除成功后，同一 Session 的下一 Turn 会立即使用新的 catalog，无需重启服务。已经开始执行的 Turn 不保证动态切换 Skill 视图。
 
 ## SSE 协议
 
@@ -101,6 +128,7 @@ internal/
 ├── controller/     # HTTP/SSE 投影
 ├── model/          # Eino-aligned Message 与 EasyGo 持久化 envelope
 ├── service/chat/   # Turn 事务边界与 AgentEvent 消费
+├── skill/          # manifest、workspace、原子同步与用户 Skill Store
 └── platform/       # MySQL、日志等基础设施
 ```
 

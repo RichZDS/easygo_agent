@@ -19,9 +19,6 @@ func TestLoadSkillsDefaults(t *testing.T) {
 	if cfg.Skills.RootDir != "skills" {
 		t.Errorf("Skills.RootDir = %q, want %q", cfg.Skills.RootDir, "skills")
 	}
-	if cfg.Skills.SyncCron != "0 0 3 * * *" {
-		t.Errorf("Skills.SyncCron = %q, want %q", cfg.Skills.SyncCron, "0 0 3 * * *")
-	}
 	if cfg.Skills.ReadmeSrc != "README.md" {
 		t.Errorf("Skills.ReadmeSrc = %q, want %q", cfg.Skills.ReadmeSrc, "README.md")
 	}
@@ -43,7 +40,6 @@ func TestSkillsValidate(t *testing.T) {
 		skills string
 	}{
 		{name: "empty root directory", skills: "  root_dir: \"\"\n"},
-		{name: "empty sync cron", skills: "  sync_cron: \"\"\n"},
 		{name: "empty readme source", skills: "  readme_src: \"\"\n"},
 		{name: "zero zip limit", skills: "  max_zip_bytes: 0\n"},
 		{name: "negative zip limit", skills: "  max_zip_bytes: -1\n"},
@@ -60,6 +56,15 @@ func TestSkillsValidate(t *testing.T) {
 		if err == nil {
 			t.Errorf("%s: Load() error = nil, want validation error", testCase.name)
 		}
+	}
+}
+
+// TestLoadRejectsRemovedSyncCron verifies that inactive configuration is not silently accepted.
+func TestLoadRejectsRemovedSyncCron(t *testing.T) {
+	path := writeConfigFile(t, "skills:\n  sync_cron: \"0 0 3 * * *\"\n")
+
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load() error = nil, want unknown-field error")
 	}
 }
 

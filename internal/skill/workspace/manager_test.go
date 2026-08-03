@@ -36,6 +36,27 @@ func TestEnsureWorkspaceCreatesUserDirectory(t *testing.T) {
 	}
 }
 
+// TestStagingDirReturnsManagedDirectory verifies that transient skill work stays outside user workspaces.
+func TestStagingDirReturnsManagedDirectory(t *testing.T) {
+	manager, rootDir := newTestManager(t)
+
+	stagingDir, err := manager.StagingDir(context.Background())
+	if err != nil {
+		t.Fatalf("StagingDir() error = %v", err)
+	}
+	want := filepath.Join(rootDir, "staging")
+	if stagingDir != want {
+		t.Fatalf("StagingDir() = %q, want %q", stagingDir, want)
+	}
+	info, err := os.Lstat(stagingDir)
+	if err != nil {
+		t.Fatalf("os.Lstat() error = %v", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o750 {
+		t.Fatalf("staging info = mode %v, want non-symlink directory 0750", info.Mode())
+	}
+}
+
 // TestEnsureWorkspaceCreatesRelativeBuiltinLinks verifies that each builtin directory is linked by a relative target.
 func TestEnsureWorkspaceCreatesRelativeBuiltinLinks(t *testing.T) {
 	manager, rootDir := newTestManager(t)

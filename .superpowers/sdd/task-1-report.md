@@ -186,7 +186,7 @@ Result: exit code `0`, with no whitespace errors.
 - `internal/skill/workspace/backend_test.go`
 - `.superpowers/sdd/task-1-report.md`
 
-Unrelated existing changes in `internal/framejob/register.go`, `docs/superpowers`, and `easygo_agnet_frontend` were not modified.
+Unrelated existing changes in `internal/framejob/register.go`, `docs/superpowers`, and `easygo_agent_frontend` were not modified.
 
 ## Self-Review
 

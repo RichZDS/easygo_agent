@@ -15,11 +15,13 @@ import (
 	"easygo-agent/internal/service/chat"
 	"easygo-agent/internal/service/providerconfig"
 	"easygo-agent/internal/service/user"
-
+	"easygo-agent/internal/skill/store"
 	"gorm.io/gorm"
 )
 
-func InitControllers(db *gorm.DB, cipher *credential.Cipher, issuer *auth.Issuer, runtime *agent.RuntimeFactory) *controller.AllControllers {
+// Injectors from wire.go:
+
+func InitControllers(db *gorm.DB, cipher *credential.Cipher, issuer *auth.Issuer, runtime *agent.RuntimeFactory, skills *store.Store) *controller.AllControllers {
 	userService := user.NewUserService(db)
 	userController := controller.NewUserController(userService)
 	service := account.New(userService, issuer)
@@ -29,11 +31,13 @@ func InitControllers(db *gorm.DB, cipher *credential.Cipher, issuer *auth.Issuer
 	runService := chat.NewRunService(db, runtime, providerconfigService)
 	executionService := chat.NewExecutionService(runService)
 	chatController := controller.NewChatController(runService, executionService)
+	skillController := controller.NewSkillController(skills)
 	allControllers := &controller.AllControllers{
 		User:     userController,
 		Auth:     authController,
 		Provider: providerController,
 		Chat:     chatController,
+		Skill:    skillController,
 	}
 	return allControllers
 }

@@ -20,7 +20,6 @@ logger:
 
 skills:
   root_dir: skills
-  sync_cron: "0 0 3 * * *"
   readme_src: README.md
   max_zip_bytes: 5242880
   max_extracted_bytes: 20971520

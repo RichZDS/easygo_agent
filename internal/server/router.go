@@ -42,6 +42,7 @@ func NewRouter(
 		{
 			authorized.PUT("/providers", providerCtl.UpsertProvider)
 			authorized.GET("/providers", providerCtl.ListProviders)
+			authorized.POST("/providers/models", providerCtl.DiscoverModels)
 			authorized.POST("/ai-models", providerCtl.CreateAIModel)
 			authorized.GET("/ai-models", providerCtl.ListAIModels)
 

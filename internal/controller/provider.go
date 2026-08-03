@@ -106,3 +106,25 @@ func (ctl *ProviderController) ListAIModels(c *gin.Context) {
 	}
 	response.Success(c, rows)
 }
+
+func (ctl *ProviderController) DiscoverModels(c *gin.Context) {
+	var req struct {
+		Type    string `json:"type" binding:"required"`
+		APIKey  string `json:"api_key" binding:"required"`
+		BaseURL string `json:"base_url"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, errorcode.New(errorcode.InvalidParameter, "invalid provider models request"))
+		return
+	}
+	rows, err := ctl.svc.DiscoverModels(c.Request.Context(), providerconfig.DiscoverModelsInput{
+		Type:    req.Type,
+		APIKey:  req.APIKey,
+		BaseURL: req.BaseURL,
+	})
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.Success(c, rows)
+}

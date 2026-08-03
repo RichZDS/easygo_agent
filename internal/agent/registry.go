@@ -75,9 +75,9 @@ func (r *Registry) Build(ctx context.Context, spec ModelSpec) (model.AgenticMode
 		return nil, fmt.Errorf("provider API key and model are required")
 	}
 	spec.Provider = provider
-	// DeepSeek 未配置 BaseURL 时使用官方默认地址。
-	if provider == ProviderDeepSeek && strings.TrimSpace(spec.BaseURL) == "" {
-		spec.BaseURL = "https://api.deepseek.com"
+	// 未配置 BaseURL 时使用各 Provider 官方默认地址。
+	if strings.TrimSpace(spec.BaseURL) == "" {
+		spec.BaseURL = DefaultBaseURL(provider)
 	}
 	return builder(ctx, spec, r.httpClient)
 }

@@ -7,6 +7,8 @@ import (
 	"io"
 	"strings"
 
+	"easygo-agent/internal/logger"
+
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
@@ -26,7 +28,6 @@ type Gateway struct {
 	agent        *react.Agent
 	tracer       trace.Tracer
 	traceHandler callbacks.Handler
-	logger       *zap.Logger
 }
 
 // New 构造一个并发安全的 Eino ReAct Gateway。
@@ -37,11 +38,7 @@ func New(
 	tools []tool.BaseTool,
 	tracer trace.Tracer,
 	traceHandler callbacks.Handler,
-	logger *zap.Logger,
 ) (*Gateway, error) {
-	if logger == nil {
-		logger = zap.NewNop()
-	}
 	if cfg.MaxSteps <= 0 {
 		err := errors.New("Gateway max steps must be greater than zero")
 		logger.Error("create Gateway failed", zap.String("field", "max_steps"), zap.Error(err))
@@ -78,7 +75,6 @@ func New(
 		agent:        reactAgent,
 		tracer:       tracer,
 		traceHandler: traceHandler,
-		logger:       logger,
 	}, nil
 }
 
@@ -87,13 +83,13 @@ func (gateway *Gateway) Run(ctx context.Context, request Request) (EventStream, 
 	messages, err := gateway.convertMessages(request.Messages)
 	if err != nil {
 		wrappedErr := fmt.Errorf("validate Gateway request: %w", err)
-		gateway.logger.Error("start Gateway run failed", zap.String("stage", "request"), zap.Error(wrappedErr))
+		logger.Error("start Gateway run failed", zap.String("stage", "request"), zap.Error(wrappedErr))
 		return nil, wrappedErr
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)
 	runCtx, rootSpan := gateway.tracer.Start(runCtx, "agent.run")
-	stream := newEventStream(cancel, gateway.logger)
+	stream := newEventStream(cancel)
 	toolHandler := gateway.newToolEventHandler(stream)
 	handlers := []callbacks.Handler{toolHandler, gateway.traceHandler}
 
@@ -123,7 +119,7 @@ func (gateway *Gateway) executeRun(ctx context.Context, messages []*schema.Messa
 			return Event{Kind: EventCanceled}
 		}
 		wrappedErr := fmt.Errorf("start Eino ReAct stream: %w", err)
-		gateway.logger.Error("start Gateway run failed", zap.String("stage", "react_stream"), zap.Error(wrappedErr))
+		logger.Error("start Gateway run failed", zap.String("stage", "react_stream"), zap.Error(wrappedErr))
 		return Event{Kind: EventFailed, Err: wrappedErr}
 	}
 	defer einoStream.Close()
@@ -143,7 +139,7 @@ func (gateway *Gateway) consumeRun(ctx context.Context, einoStream *schema.Strea
 				return Event{Kind: EventCompleted, Text: content.String()}
 			}
 			wrappedErr := fmt.Errorf("receive Eino ReAct stream: %w", err)
-			gateway.logger.Error("consume Gateway run failed", zap.String("stage", "stream_receive"), zap.Error(wrappedErr))
+			logger.Error("consume Gateway run failed", zap.String("stage", "stream_receive"), zap.Error(wrappedErr))
 			return Event{Kind: EventFailed, Err: wrappedErr}
 		}
 		if message == nil || message.Content == "" {
@@ -158,7 +154,7 @@ func (gateway *Gateway) consumeRun(ctx context.Context, einoStream *schema.Strea
 func (gateway *Gateway) convertMessages(messages []Message) ([]*schema.Message, error) {
 	if len(messages) == 0 {
 		err := errors.New("request messages cannot be empty")
-		gateway.logger.Error("convert Gateway messages failed", zap.Error(err))
+		logger.Error("convert Gateway messages failed", zap.Error(err))
 		return nil, err
 	}
 	converted := make([]*schema.Message, 0, len(messages))
@@ -166,7 +162,7 @@ func (gateway *Gateway) convertMessages(messages []Message) ([]*schema.Message, 
 		content := strings.TrimSpace(message.Content)
 		if content == "" {
 			err := fmt.Errorf("message %d content cannot be empty", index)
-			gateway.logger.Error("convert Gateway messages failed", zap.Int("message_index", index), zap.Error(err))
+			logger.Error("convert Gateway messages failed", zap.Int("message_index", index), zap.Error(err))
 			return nil, err
 		}
 		switch message.Role {
@@ -178,7 +174,7 @@ func (gateway *Gateway) convertMessages(messages []Message) ([]*schema.Message, 
 			converted = append(converted, schema.AssistantMessage(content, nil))
 		default:
 			err := fmt.Errorf("message %d has unsupported role %q", index, message.Role)
-			gateway.logger.Error("convert Gateway messages failed", zap.Int("message_index", index), zap.Error(err))
+			logger.Error("convert Gateway messages failed", zap.Int("message_index", index), zap.Error(err))
 			return nil, err
 		}
 	}
@@ -200,7 +196,7 @@ func (gateway *Gateway) newToolEventHandler(stream *eventStream) callbacks.Handl
 	// onToolError 发出只携带错误的 Tool 完成事件。
 	onToolError := func(ctx context.Context, info *callbacks.RunInfo, err error) context.Context {
 		toolName := callbackName(info)
-		gateway.logger.Error("Eino Tool failed", zap.String("tool", toolName), zap.Error(err))
+		logger.Error("Eino Tool failed", zap.String("tool", toolName), zap.Error(err))
 		stream.emit(Event{Kind: EventToolEnd, ToolName: toolName, Err: err})
 		return ctx
 	}

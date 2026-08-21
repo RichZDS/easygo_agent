@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"easygo-agent/internal/gateway"
+	"easygo-agent/internal/logger"
+
 	tea "github.com/charmbracelet/bubbletea"
 	"go.uber.org/zap"
 )
@@ -35,7 +37,7 @@ type fakeStream struct {
 func (stream *fakeStream) Recv() (gateway.Event, error) {
 	if stream.index == len(stream.events) {
 		err := io.EOF
-		zap.NewNop().Error("fake stream exhausted", zap.Error(err))
+		logger.Error("fake stream exhausted", zap.Error(err))
 		return gateway.Event{}, err
 	}
 	event := stream.events[stream.index]
@@ -55,7 +57,7 @@ func TestCompletedRunAppendsHistory(t *testing.T) {
 
 	stream := &fakeStream{}
 	runner := &fakeRunner{stream: stream}
-	model := New(runner, "system", zap.NewNop())
+	model := New(runner, "system")
 	model.input.SetValue("hello")
 	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
 	model = applyGatewayEvent(t, model, gateway.Event{Kind: gateway.EventTextDelta, Text: "partial"})
@@ -118,7 +120,7 @@ func TestDuplicateSubmitIsIgnored(t *testing.T) {
 	t.Parallel()
 
 	runner := &fakeRunner{stream: &fakeStream{}}
-	model := New(runner, "system", zap.NewNop())
+	model := New(runner, "system")
 	model.input.SetValue("first")
 	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
 	model.input.SetValue("second")
@@ -133,7 +135,7 @@ func submittedModel(t *testing.T, stream gateway.EventStream) *Model {
 	t.Helper()
 
 	runner := &fakeRunner{stream: stream}
-	model := New(runner, "system", zap.NewNop())
+	model := New(runner, "system")
 	model.input.SetValue("hello")
 	return updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
 }

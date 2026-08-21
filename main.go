@@ -11,6 +11,7 @@ import (
 
 	"easygo-agent/internal/app"
 	"easygo-agent/internal/config"
+	"easygo-agent/internal/logger"
 
 	"go.uber.org/zap"
 )
@@ -25,7 +26,7 @@ func run() int {
 	// 载入环境变量
 	if err := loadDotEnv(".env"); err != nil {
 		if _, printErr := fmt.Fprintf(os.Stderr, "application stopped: %v\n", err); printErr != nil {
-			zap.NewNop().Error("print application error failed", zap.Error(printErr))
+			logger.Error("print application error failed", zap.Error(printErr))
 		}
 		return 1
 	}
@@ -35,7 +36,7 @@ func run() int {
 	// 运行应用
 	if err := app.Run(ctx, config.DefaultPath); err != nil {
 		if _, printErr := fmt.Fprintf(os.Stderr, "application stopped: %v\n", err); printErr != nil {
-			zap.NewNop().Error("print application error failed", zap.Error(printErr))
+			logger.Error("print application error failed", zap.Error(printErr))
 		}
 		return 1
 	}
@@ -50,13 +51,13 @@ func loadDotEnv(path string) error {
 			return nil
 		}
 		wrappedErr := fmt.Errorf("read env file: %w", err)
-		zap.NewNop().Error("load env file failed", zap.String("path", path), zap.Error(wrappedErr))
+		logger.Error("load env file failed", zap.String("path", path), zap.Error(wrappedErr))
 		return wrappedErr
 	}
 	// closeEnvFile 关闭已打开的 .env 文件。
 	defer func() {
 		if closeErr := file.Close(); closeErr != nil {
-			zap.NewNop().Error("close env file failed", zap.String("path", path), zap.Error(closeErr))
+			logger.Error("close env file failed", zap.String("path", path), zap.Error(closeErr))
 		}
 	}()
 
@@ -80,13 +81,13 @@ func loadDotEnv(path string) error {
 		}
 		if err := os.Setenv(key, value); err != nil {
 			wrappedErr := fmt.Errorf("set env %s: %w", key, err)
-			zap.NewNop().Error("load env file failed", zap.String("key", key), zap.Error(wrappedErr))
+			logger.Error("load env file failed", zap.String("key", key), zap.Error(wrappedErr))
 			return wrappedErr
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		wrappedErr := fmt.Errorf("read env file: %w", err)
-		zap.NewNop().Error("load env file failed", zap.String("path", path), zap.Error(wrappedErr))
+		logger.Error("load env file failed", zap.String("path", path), zap.Error(wrappedErr))
 		return wrappedErr
 	}
 	return nil

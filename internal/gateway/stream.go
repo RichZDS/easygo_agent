@@ -5,6 +5,8 @@ import (
 	"io"
 	"sync"
 
+	"easygo-agent/internal/logger"
+
 	"go.uber.org/zap"
 )
 
@@ -16,15 +18,13 @@ type eventStream struct {
 	cancel     context.CancelFunc
 	done       chan struct{}
 	finishOnce sync.Once
-	logger     *zap.Logger
 }
 
 // newEventStream 构造内存流，保证生产者不会被阻塞。
-func newEventStream(cancel context.CancelFunc, logger *zap.Logger) *eventStream {
+func newEventStream(cancel context.CancelFunc) *eventStream {
 	stream := &eventStream{
 		cancel: cancel,
 		done:   make(chan struct{}),
-		logger: logger,
 	}
 	stream.ready = sync.NewCond(&stream.mu)
 	return stream
@@ -39,7 +39,7 @@ func (stream *eventStream) Recv() (Event, error) {
 	}
 	if len(stream.queue) == 0 {
 		err := io.EOF
-		stream.logger.Error("receive Gateway event finished", zap.String("stage", "stream_exhausted"), zap.Error(err))
+		logger.Error("receive Gateway event finished", zap.String("stage", "stream_exhausted"), zap.Error(err))
 		return Event{}, err
 	}
 	event := stream.queue[0]

@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"easygo-agent/internal/gateway"
+	"easygo-agent/internal/logger"
+
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -35,7 +37,6 @@ type streamCloseMessage struct {
 // Model 是模板的最小 Bubble Tea 状态机。
 type Model struct {
 	runner     gateway.Runner
-	logger     *zap.Logger
 	input      textarea.Model
 	viewport   viewport.Model
 	state      runState
@@ -51,10 +52,7 @@ type Model struct {
 }
 
 // New 构造带有进程内对话历史的空闲 TUI。
-func New(runner gateway.Runner, systemPrompt string, logger *zap.Logger) *Model {
-	if logger == nil {
-		logger = zap.NewNop()
-	}
+func New(runner gateway.Runner, systemPrompt string) *Model {
 	input := textarea.New()
 	input.Placeholder = "Ask the agent..."
 	input.Prompt = "> "
@@ -66,7 +64,6 @@ func New(runner gateway.Runner, systemPrompt string, logger *zap.Logger) *Model 
 
 	model := &Model{
 		runner:   runner,
-		logger:   logger,
 		input:    input,
 		viewport: viewport.New(80, 18),
 		state:    stateIdle,
@@ -106,7 +103,7 @@ func (model *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return model, model.applyGatewayEvent(message)
 	case streamCloseMessage:
 		if message.err != nil {
-			model.logger.Error("close Gateway stream failed", zap.Error(message.err))
+			logger.Error("close Gateway stream failed", zap.Error(message.err))
 			model.lines = append(model.lines, "error: failed to close stream")
 			model.refreshViewport()
 		}
@@ -150,7 +147,7 @@ func (model *Model) submit() tea.Cmd {
 	request := gateway.Request{Messages: append([]gateway.Message(nil), model.history...)}
 	stream, err := model.runner.Run(model.runContext, request)
 	if err != nil {
-		model.logger.Error("start TUI run failed", zap.Error(err))
+		logger.Error("start TUI run failed", zap.Error(err))
 		model.lines = append(model.lines, "error: "+err.Error())
 		model.resetRun()
 		model.refreshViewport()
@@ -167,7 +164,7 @@ func (model *Model) applyGatewayEvent(message gatewayEventMessage) tea.Cmd {
 		if errors.Is(message.err, io.EOF) {
 			return nil
 		}
-		model.logger.Error("receive TUI Gateway event failed", zap.Error(message.err))
+		logger.Error("receive TUI Gateway event failed", zap.Error(message.err))
 		model.lines = append(model.lines, "error: "+message.err.Error())
 		return model.finishRun()
 	}
@@ -207,14 +204,14 @@ func (model *Model) applyGatewayEvent(message gatewayEventMessage) tea.Cmd {
 		}
 		model.partial = ""
 		if event.Err != nil {
-			model.logger.Error("Gateway run failed", zap.Error(event.Err))
+			logger.Error("Gateway run failed", zap.Error(event.Err))
 			model.lines = append(model.lines, "error: "+event.Err.Error())
 		} else {
 			model.lines = append(model.lines, "error: Gateway run failed")
 		}
 		return model.finishRun()
 	default:
-		model.logger.Error("unknown Gateway event", zap.String("event_kind", string(event.Kind)))
+		logger.Error("unknown Gateway event", zap.String("event_kind", string(event.Kind)))
 		return waitForEvent(model.active)
 	}
 }

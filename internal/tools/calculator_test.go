@@ -8,7 +8,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// TestCalculator verifies all supported operations through Eino's InvokableTool interface.
+// TestCalculator 通过 Eino InvokableTool 接口校验全部受支持运算。
 func TestCalculator(t *testing.T) {
 	t.Parallel()
 
@@ -32,7 +32,7 @@ func TestCalculator(t *testing.T) {
 
 	for _, test := range tests {
 		test := test
-		// runCase verifies one Calculator invocation.
+		// runCase 校验一次 Calculator 调用。
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -57,7 +57,7 @@ func TestCalculator(t *testing.T) {
 	}
 }
 
-// TestCalculatorInfo verifies the Tool exposes the intended stable name.
+// TestCalculatorInfo 验证 Tool 暴露稳定名称。
 func TestCalculatorInfo(t *testing.T) {
 	t.Parallel()
 

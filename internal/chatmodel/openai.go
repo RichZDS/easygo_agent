@@ -1,4 +1,4 @@
-// Package chatmodel constructs the template's single Eino chat model.
+// Package chatmodel 构造模板使用的单个 Eino 聊天模型。
 package chatmodel
 
 import (
@@ -12,7 +12,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// New constructs an OpenAI-compatible Eino ToolCallingChatModel.
+// New 构造 OpenAI 兼容的 Eino ToolCallingChatModel。
 func New(ctx context.Context, cfg config.ModelConfig, logger *zap.Logger) (model.ToolCallingChatModel, error) {
 	if logger == nil {
 		logger = zap.NewNop()
@@ -30,7 +30,7 @@ func New(ctx context.Context, cfg config.ModelConfig, logger *zap.Logger) (model
 	return chatModel, nil
 }
 
-// toOpenAIConfig maps operational fields without adding identity or authorization policy.
+// toOpenAIConfig 映射运行字段，不附加身份或授权策略。
 func toOpenAIConfig(cfg config.ModelConfig) *openaiadapter.ChatModelConfig {
 	return &openaiadapter.ChatModelConfig{
 		APIKey:  cfg.APIKey,
@@ -40,7 +40,7 @@ func toOpenAIConfig(cfg config.ModelConfig) *openaiadapter.ChatModelConfig {
 	}
 }
 
-// safeBaseURLHost extracts a non-sensitive endpoint host for diagnostics.
+// safeBaseURLHost 提取用于诊断的非敏感 endpoint host。
 func safeBaseURLHost(baseURL string) string {
 	if baseURL == "" {
 		return "default"

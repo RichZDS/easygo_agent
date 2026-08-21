@@ -17,12 +17,22 @@ model:
   name: test-model
   base_url: https://example.com/v1
   timeout: 2m
+  apikey: "{EASYGO_AGENT_API_KEY}"
 tracing:
   enabled: false
   exporter: stdout
 `
 
-// TestLoadValidConfig verifies strict YAML loading and environment-only API Key injection.
+// TestDefaultPathIsConfigsConfigYAML 保证运行时只读取 configs/config.yaml。
+func TestDefaultPathIsConfigsConfigYAML(t *testing.T) {
+	t.Parallel()
+
+	if DefaultPath != "configs/config.yaml" {
+		t.Fatalf("DefaultPath = %q, want configs/config.yaml", DefaultPath)
+	}
+}
+
+// TestLoadValidConfig 验证严格 YAML 加载，以及通过 {ENV} 引用注入 API Key。
 func TestLoadValidConfig(t *testing.T) {
 	t.Parallel()
 
@@ -55,7 +65,7 @@ func TestLoadValidConfig(t *testing.T) {
 	}
 }
 
-// TestLoadRejectsInvalidConfig verifies operational validation without permission policy.
+// TestLoadRejectsInvalidConfig 验证运行所需字段的校验，不包含权限策略。
 func TestLoadRejectsInvalidConfig(t *testing.T) {
 	t.Parallel()
 
@@ -65,9 +75,9 @@ func TestLoadRejectsInvalidConfig(t *testing.T) {
 		lookupEnv func(string) (string, bool)
 	}{
 		{name: "unknown field", yaml: validConfigYAML + "unknown: true\n", lookupEnv: testLookupKey},
-		{name: "api key in yaml", yaml: strings.Replace(validConfigYAML, "  timeout: 2m\n", "  timeout: 2m\n  api_key: committed-secret\n", 1), lookupEnv: testLookupKey},
+		{name: "plaintext apikey", yaml: strings.Replace(validConfigYAML, `  apikey: "{EASYGO_AGENT_API_KEY}"`, "  apikey: committed-secret", 1), lookupEnv: testLookupKey},
 		{name: "missing model", yaml: strings.Replace(validConfigYAML, "  name: test-model", "  name: \"\"", 1), lookupEnv: testLookupKey},
-		{name: "missing api key", yaml: validConfigYAML, lookupEnv: missingLookupKey},
+		{name: "missing api key env", yaml: validConfigYAML, lookupEnv: missingLookupKey},
 		{name: "malformed base url", yaml: strings.Replace(validConfigYAML, "https://example.com/v1", "://bad", 1), lookupEnv: testLookupKey},
 		{name: "zero timeout", yaml: strings.Replace(validConfigYAML, "  timeout: 2m", "  timeout: 0s", 1), lookupEnv: testLookupKey},
 		{name: "zero max steps", yaml: strings.Replace(validConfigYAML, "  max_steps: 8", "  max_steps: 0", 1), lookupEnv: testLookupKey},
@@ -77,7 +87,7 @@ func TestLoadRejectsInvalidConfig(t *testing.T) {
 
 	for _, test := range tests {
 		test := test
-		// runCase verifies one invalid configuration scenario.
+		// runCase 校验一种非法配置场景。
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -89,7 +99,7 @@ func TestLoadRejectsInvalidConfig(t *testing.T) {
 	}
 }
 
-// testLookupKey returns a deterministic API Key for configuration tests.
+// testLookupKey 返回配置测试使用的确定性 API Key。
 func testLookupKey(key string) (string, bool) {
 	if key != APIKeyEnvironmentVariable {
 		return "", false
@@ -97,12 +107,12 @@ func testLookupKey(key string) (string, bool) {
 	return "test-key", true
 }
 
-// missingLookupKey reports that no environment variable exists.
+// missingLookupKey 表示对应环境变量不存在。
 func missingLookupKey(string) (string, bool) {
 	return "", false
 }
 
-// writeConfig writes one test configuration with private file permissions.
+// writeConfig 以私有文件权限写入一份测试配置。
 func writeConfig(t *testing.T, content string) string {
 	t.Helper()
 

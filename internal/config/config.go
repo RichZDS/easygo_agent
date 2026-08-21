@@ -1,4 +1,4 @@
-// Package config loads the non-secret template configuration.
+// Package config 加载模板的非密钥 YAML 配置。
 package config
 
 import (
@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -16,7 +17,9 @@ import (
 )
 
 const (
-	// APIKeyEnvironmentVariable names the only supported model credential source.
+	// DefaultPath 是应用唯一读取的运行时配置文件。
+	DefaultPath = "configs/config.yaml"
+	// APIKeyEnvironmentVariable 是默认的模型凭证环境变量名。
 	APIKeyEnvironmentVariable = "EASYGO_AGENT_API_KEY"
 	defaultSystemPrompt       = "You are a helpful assistant."
 	defaultMaxSteps           = 8
@@ -24,20 +27,22 @@ const (
 	defaultTracingExporter    = "stdout"
 )
 
-// Config contains all runtime configuration for the template.
+var envRefPattern = regexp.MustCompile(`^\{([A-Za-z_][A-Za-z0-9_]*)\}$`)
+
+// Config 包含模板的全部运行时配置。
 type Config struct {
 	Agent   AgentConfig
 	Model   ModelConfig
 	Tracing TracingConfig
 }
 
-// AgentConfig controls Eino ReAct behavior.
+// AgentConfig 控制 Eino ReAct 行为。
 type AgentConfig struct {
 	SystemPrompt string
 	MaxSteps     int
 }
 
-// ModelConfig controls the single OpenAI-compatible model.
+// ModelConfig 控制单个 OpenAI 兼容模型。
 type ModelConfig struct {
 	Name    string
 	BaseURL string
@@ -45,7 +50,7 @@ type ModelConfig struct {
 	APIKey  string
 }
 
-// TracingConfig controls optional OpenTelemetry export.
+// TracingConfig 控制可选的 OpenTelemetry 导出。
 type TracingConfig struct {
 	Enabled  bool
 	Exporter string
@@ -66,6 +71,7 @@ type rawModelConfig struct {
 	Name    string `yaml:"name"`
 	BaseURL string `yaml:"base_url"`
 	Timeout string `yaml:"timeout"`
+	APIKey  string `yaml:"apikey"`
 }
 
 type rawTracingConfig struct {
@@ -73,7 +79,7 @@ type rawTracingConfig struct {
 	Exporter string `yaml:"exporter"`
 }
 
-// Load reads one strict YAML document and injects the model credential from the environment.
+// Load 读取一份严格 YAML，并把 apikey 中的 {ENV} 引用解析为环境变量值。
 func Load(path string, lookupEnv func(string) (string, bool), logger *zap.Logger) (Config, error) {
 	logger = safeLogger(logger)
 	if strings.TrimSpace(path) == "" {
@@ -127,11 +133,11 @@ func Load(path string, lookupEnv func(string) (string, bool), logger *zap.Logger
 		logger.Error("load config failed", zap.String("field", "model.timeout"), zap.Error(wrappedErr))
 		return Config{}, wrappedErr
 	}
-	apiKey, ok := lookupEnv(APIKeyEnvironmentVariable)
-	if !ok || strings.TrimSpace(apiKey) == "" {
-		err := fmt.Errorf("%s is required", APIKeyEnvironmentVariable)
-		logger.Error("load config failed", zap.String("field", APIKeyEnvironmentVariable), zap.Error(err))
-		return Config{}, err
+	apiKey, err := resolveAPIKey(raw.Model.APIKey, lookupEnv, logger)
+	if err != nil {
+		wrappedErr := fmt.Errorf("resolve model apikey: %w", err)
+		logger.Error("load config failed", zap.String("field", "model.apikey"), zap.Error(wrappedErr))
+		return Config{}, wrappedErr
 	}
 
 	cfg := Config{
@@ -158,7 +164,26 @@ func Load(path string, lookupEnv func(string) (string, bool), logger *zap.Logger
 	return cfg, nil
 }
 
-// parseDuration converts a YAML duration string into a positive Go duration.
+// resolveAPIKey 将 YAML 中的 {ENV_NAME} 引用解析为对应环境变量值。
+func resolveAPIKey(raw string, lookupEnv func(string) (string, bool), logger *zap.Logger) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	matches := envRefPattern.FindStringSubmatch(trimmed)
+	if matches == nil {
+		err := errors.New("model apikey must be an env reference like {EASYGO_AGENT_API_KEY}")
+		logger.Error("resolve apikey failed", zap.String("field", "model.apikey"), zap.Error(err))
+		return "", err
+	}
+	envName := matches[1]
+	apiKey, ok := lookupEnv(envName)
+	if !ok || strings.TrimSpace(apiKey) == "" {
+		err := fmt.Errorf("environment variable %s is required", envName)
+		logger.Error("resolve apikey failed", zap.String("env", envName), zap.Error(err))
+		return "", err
+	}
+	return apiKey, nil
+}
+
+// parseDuration 将 YAML 时长字符串解析为正的 Go duration。
 func parseDuration(value string, logger *zap.Logger) (time.Duration, error) {
 	duration, err := time.ParseDuration(strings.TrimSpace(value))
 	if err != nil {
@@ -174,7 +199,7 @@ func parseDuration(value string, logger *zap.Logger) (time.Duration, error) {
 	return duration, nil
 }
 
-// validateConfig checks only the fields required to run the template.
+// validateConfig 只校验运行模板所需的字段。
 func validateConfig(cfg Config, logger *zap.Logger) error {
 	if cfg.Agent.SystemPrompt == "" {
 		err := errors.New("agent system_prompt cannot be empty")
@@ -207,6 +232,11 @@ func validateConfig(cfg Config, logger *zap.Logger) error {
 		logger.Error("validate config failed", zap.String("field", "model.timeout"), zap.Error(err))
 		return err
 	}
+	if cfg.Model.APIKey == "" {
+		err := errors.New("model apikey cannot be empty")
+		logger.Error("validate config failed", zap.String("field", "model.apikey"), zap.Error(err))
+		return err
+	}
 	if cfg.Tracing.Exporter != defaultTracingExporter {
 		err := fmt.Errorf("unsupported tracing exporter %q", cfg.Tracing.Exporter)
 		logger.Error("validate config failed", zap.String("field", "tracing.exporter"), zap.Error(err))
@@ -215,7 +245,7 @@ func validateConfig(cfg Config, logger *zap.Logger) error {
 	return nil
 }
 
-// safeLogger replaces a nil logger with a no-op logger.
+// safeLogger 在 logger 为空时返回 no-op logger。
 func safeLogger(logger *zap.Logger) *zap.Logger {
 	if logger == nil {
 		return zap.NewNop()

@@ -1,4 +1,4 @@
-// Package tui implements the template's Bubble Tea adapter.
+// Package tui 实现模板的 Bubble Tea 适配器。
 package tui
 
 import (
@@ -32,7 +32,7 @@ type streamCloseMessage struct {
 	err error
 }
 
-// Model is the template's minimal Bubble Tea state machine.
+// Model 是模板的最小 Bubble Tea 状态机。
 type Model struct {
 	runner     gateway.Runner
 	logger     *zap.Logger
@@ -50,7 +50,7 @@ type Model struct {
 	height     int
 }
 
-// New constructs an idle TUI with process-local conversation history.
+// New 构造带有进程内对话历史的空闲 TUI。
 func New(runner gateway.Runner, systemPrompt string, logger *zap.Logger) *Model {
 	if logger == nil {
 		logger = zap.NewNop()
@@ -81,12 +81,12 @@ func New(runner gateway.Runner, systemPrompt string, logger *zap.Logger) *Model 
 	return model
 }
 
-// Init starts the textarea cursor blink command.
+// Init 启动 textarea 光标闪烁命令。
 func (model *Model) Init() tea.Cmd {
 	return textarea.Blink
 }
 
-// Update applies terminal input and Gateway events on Bubble Tea's single state thread.
+// Update 在 Bubble Tea 单线程中处理终端输入和 Gateway 事件。
 func (model *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch message := message.(type) {
 	case tea.WindowSizeMsg:
@@ -121,7 +121,7 @@ func (model *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	return model, nil
 }
 
-// handleControlC cancels a running request or quits from idle.
+// handleControlC 在运行中取消请求，或在空闲时退出。
 func (model *Model) handleControlC() (tea.Model, tea.Cmd) {
 	if model.state == stateRunning {
 		model.status = "canceling..."
@@ -134,7 +134,7 @@ func (model *Model) handleControlC() (tea.Model, tea.Cmd) {
 	return model, tea.Quit
 }
 
-// submit starts one Gateway run from the current process-local history.
+// submit 基于当前进程内历史启动一次 Gateway 运行。
 func (model *Model) submit() tea.Cmd {
 	content := strings.TrimSpace(model.input.Value())
 	if content == "" || model.runner == nil {
@@ -161,7 +161,7 @@ func (model *Model) submit() tea.Cmd {
 	return waitForEvent(stream)
 }
 
-// applyGatewayEvent updates transcript state and schedules the next stream receive.
+// applyGatewayEvent 更新 transcript 状态，并调度下一次流接收。
 func (model *Model) applyGatewayEvent(message gatewayEventMessage) tea.Cmd {
 	if message.err != nil {
 		if errors.Is(message.err, io.EOF) {
@@ -219,7 +219,7 @@ func (model *Model) applyGatewayEvent(message gatewayEventMessage) tea.Cmd {
 	}
 }
 
-// finishRun returns to idle and closes the completed stream asynchronously.
+// finishRun 回到空闲状态，并异步关闭已完成的流。
 func (model *Model) finishRun() tea.Cmd {
 	stream := model.active
 	model.resetRun()
@@ -230,7 +230,7 @@ func (model *Model) finishRun() tea.Cmd {
 	return closeStream(stream)
 }
 
-// resetRun clears active run state without modifying conversation history.
+// resetRun 清除进行中的运行状态，但不修改对话历史。
 func (model *Model) resetRun() {
 	model.state = stateIdle
 	model.status = "idle · Enter send · Ctrl+C quit"
@@ -239,24 +239,24 @@ func (model *Model) resetRun() {
 	model.runContext = nil
 }
 
-// waitForEvent creates a Bubble Tea command for one blocking stream receive.
+// waitForEvent 创建一次阻塞流接收的 Bubble Tea 命令。
 func waitForEvent(stream gateway.EventStream) tea.Cmd {
-	// receiveEvent performs one blocking read outside Bubble Tea's Update method.
+	// receiveEvent 在 Update 方法外执行一次阻塞读取。
 	return func() tea.Msg {
 		event, err := stream.Recv()
 		return gatewayEventMessage{event: event, err: err}
 	}
 }
 
-// closeStream creates a Bubble Tea command that releases one Gateway stream.
+// closeStream 创建释放一个 Gateway 流的 Bubble Tea 命令。
 func closeStream(stream gateway.EventStream) tea.Cmd {
-	// releaseStream closes the stream outside Bubble Tea's Update method.
+	// releaseStream 在 Update 方法外关闭流。
 	return func() tea.Msg {
 		return streamCloseMessage{err: stream.Close()}
 	}
 }
 
-// transcript returns the display transcript including an active partial response.
+// transcript 返回展示用 transcript，包含进行中的部分响应。
 func (model *Model) transcript() string {
 	lines := append([]string(nil), model.lines...)
 	if model.partial != "" {
@@ -265,13 +265,13 @@ func (model *Model) transcript() string {
 	return strings.Join(lines, "\n\n")
 }
 
-// refreshViewport applies the current transcript and follows its bottom edge.
+// refreshViewport 应用当前 transcript 并跟随底部。
 func (model *Model) refreshViewport() {
 	model.viewport.SetContent(model.transcript())
 	model.viewport.GotoBottom()
 }
 
-// resize updates the transcript and input dimensions for the terminal window.
+// resize 按终端窗口更新 transcript 与输入框尺寸。
 func (model *Model) resize(width int, height int) {
 	model.width = max(width, 20)
 	model.height = max(height, 10)

@@ -12,7 +12,7 @@ var (
 	statusStyle = lipgloss.NewStyle().Faint(true)
 )
 
-// View renders the transcript, input, and one-line status.
+// View 渲染 transcript、输入框和一行状态。
 func (model *Model) View() string {
 	if model.state == stateQuitting {
 		return ""

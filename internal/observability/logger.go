@@ -1,4 +1,4 @@
-// Package observability constructs logging and tracing for the template.
+// Package observability 为模板构造日志与 tracing。
 package observability
 
 import (
@@ -7,7 +7,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// NewLogger constructs the project's production Zap logger.
+// NewLogger 构造项目使用的生产级 Zap logger。
 func NewLogger() (*zap.Logger, error) {
 	logger, err := zap.NewProduction()
 	if err != nil {

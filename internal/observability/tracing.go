@@ -21,7 +21,7 @@ const instrumentationName = "easygo-agent"
 
 type callbackSpanContextKey struct{}
 
-// Tracing contains the run tracer, Eino callback handler, and exporter lifecycle.
+// Tracing 包含运行 tracer、Eino callback handler 以及导出器生命周期。
 type Tracing struct {
 	Tracer   trace.Tracer
 	Handler  callbacks.Handler
@@ -31,7 +31,7 @@ type Tracing struct {
 	err      error
 }
 
-// NewTracing constructs disabled no-op tracing or the optional stdout exporter.
+// NewTracing 构造禁用的空 tracing，或可选的 stdout 导出器。
 func NewTracing(_ context.Context, cfg config.TracingConfig, logger *zap.Logger) (*Tracing, error) {
 	if logger == nil {
 		logger = zap.NewNop()
@@ -67,11 +67,12 @@ func NewTracing(_ context.Context, cfg config.TracingConfig, logger *zap.Logger)
 	}, nil
 }
 
-// Shutdown flushes and closes the tracing provider at most once.
+// Shutdown 最多一次地刷新并关闭 tracing provider。
 func (tracing *Tracing) Shutdown(ctx context.Context) error {
 	if tracing == nil {
 		return nil
 	}
+	// shutdownOnce 保证 tracing 只关闭一次。
 	tracing.once.Do(func() {
 		tracing.err = tracing.shutdown(ctx)
 		if tracing.err != nil {
@@ -84,17 +85,17 @@ func (tracing *Tracing) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-// noopShutdown leaves disabled tracing unchanged.
+// noopShutdown 保持禁用 tracing 不变。
 func noopShutdown(context.Context) error {
 	return nil
 }
 
-// newEinoTracingHandler creates payload-blind spans for model and Tool callbacks.
+// newEinoTracingHandler 为模型和 Tool callback 创建不记录载荷的 span。
 func newEinoTracingHandler(tracer trace.Tracer, logger *zap.Logger) callbacks.Handler {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	// onStart begins a span only for model and Tool components.
+	// onStart 仅为模型和 Tool 组件开启 span。
 	onStart := func(ctx context.Context, info *callbacks.RunInfo, _ callbacks.CallbackInput) context.Context {
 		spanName, ok := callbackSpanName(info)
 		if !ok {
@@ -114,14 +115,14 @@ func newEinoTracingHandler(tracer trace.Tracer, logger *zap.Logger) callbacks.Ha
 		)
 		return context.WithValue(ctx, callbackSpanContextKey{}, true)
 	}
-	// onEnd finishes a component span without inspecting its output.
+	// onEnd 结束组件 span，且不检查输出内容。
 	onEnd := func(ctx context.Context, _ *callbacks.RunInfo, _ callbacks.CallbackOutput) context.Context {
 		if hasCallbackSpan(ctx) {
 			trace.SpanFromContext(ctx).End()
 		}
 		return ctx
 	}
-	// onError records and finishes a failed component span.
+	// onError 记录失败组件 span 并结束它。
 	onError := func(ctx context.Context, info *callbacks.RunInfo, err error) context.Context {
 		if hasCallbackSpan(ctx) {
 			span := trace.SpanFromContext(ctx)
@@ -143,13 +144,13 @@ func newEinoTracingHandler(tracer trace.Tracer, logger *zap.Logger) callbacks.Ha
 		Build()
 }
 
-// hasCallbackSpan reports whether this handler started a child span in the context.
+// hasCallbackSpan 判断当前 handler 是否已在 context 中启动子 span。
 func hasCallbackSpan(ctx context.Context) bool {
 	started, _ := ctx.Value(callbackSpanContextKey{}).(bool)
 	return started
 }
 
-// callbackSpanName maps supported Eino components to stable span names.
+// callbackSpanName 将支持的 Eino 组件映射为稳定 span 名。
 func callbackSpanName(info *callbacks.RunInfo) (string, bool) {
 	if info == nil {
 		return "", false

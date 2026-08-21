@@ -1,0 +1,109 @@
+<style>
+  #gateway-seam .arch {
+    display: grid;
+    gap: 10px;
+    margin-top: 14px;
+  }
+  #gateway-seam .flow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 14px 8px;
+  }
+  #gateway-seam .node {
+    min-width: 112px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    text-align: center;
+    background: var(--card);
+    color: var(--card-foreground);
+  }
+  #gateway-seam .node strong,
+  #gateway-seam .node span {
+    display: block;
+  }
+  #gateway-seam .node span {
+    margin-top: 3px;
+    color: var(--muted-foreground);
+  }
+  #gateway-seam .arrow {
+    color: var(--muted-foreground);
+    font-size: 18px;
+  }
+  #gateway-seam .future {
+    border-style: dashed;
+  }
+  #gateway-seam .recommended {
+    color: var(--green);
+    font-weight: 500;
+  }
+  #gateway-seam .warning {
+    color: var(--orange);
+  }
+</style>
+
+<div id="gateway-seam">
+  <h2>Gateway 的 seam 应该放在哪里？</h2>
+  <p class="subtitle">Mastra 是 TypeScript 框架，不能直接实现 Go interface；未来跨项目调用最终仍需要 HTTP、MCP、gRPC 等传输适配器。</p>
+
+  <div class="cards">
+    <div class="card" data-choice="a" onclick="toggleSelect(this)">
+      <div class="card-body">
+        <div class="label recommended">A · 推荐</div>
+        <h3>一个 Gateway 核心，多种入口适配</h3>
+        <div class="arch">
+          <div class="flow">
+            <div class="node"><strong>TUI</strong><span>本项目实现</span></div>
+            <div class="arrow">→</div>
+            <div class="node"><strong>Gateway</strong><span>Run / Stream</span></div>
+            <div class="arrow">→</div>
+            <div class="node"><strong>Eino ReAct</strong><span>模型 + Tool</span></div>
+          </div>
+          <div class="flow">
+            <div class="node future"><strong>Mastra</strong><span>未来项目</span></div>
+            <div class="arrow">→</div>
+            <div class="node future"><strong>HTTP / MCP</strong><span>未来适配器</span></div>
+            <div class="arrow">→</div>
+            <div class="node"><strong>Gateway</strong><span>复用同一接口</span></div>
+          </div>
+        </div>
+        <p>本仓库只实现 TUI 和进程内 Gateway；保留稳定请求、事件与流式语义，不实现对外服务器。</p>
+      </div>
+    </div>
+
+    <div class="card" data-choice="b" onclick="toggleSelect(this)">
+      <div class="card-body">
+        <div class="label warning">B · 双入口</div>
+        <h3>TUI 与外部 Gateway 各自驱动 Eino</h3>
+        <div class="flow">
+          <div class="node"><strong>TUI Runtime</strong><span>一套编排</span></div>
+          <div class="arrow">→</div>
+          <div class="node"><strong>Eino</strong></div>
+          <div class="node future"><strong>External Runtime</strong><span>另一套编排</span></div>
+          <div class="arrow">→</div>
+          <div class="node"><strong>Eino</strong></div>
+        </div>
+        <p>入口看似独立，但取消、流式事件、错误和 Tool 状态容易逐渐分叉。</p>
+      </div>
+    </div>
+
+    <div class="card" data-choice="c" onclick="toggleSelect(this)">
+      <div class="card-body">
+        <div class="label">C · 协议优先</div>
+        <h3>现在就定义跨语言协议</h3>
+        <div class="flow">
+          <div class="node"><strong>TUI</strong></div>
+          <div class="arrow">→</div>
+          <div class="node"><strong>OpenAPI / MCP</strong><span>本项目先定义</span></div>
+          <div class="arrow">→</div>
+          <div class="node"><strong>Eino Runtime</strong></div>
+          <div class="node future"><strong>Mastra</strong><span>未来接入</span></div>
+        </div>
+        <p>跨语言最明确，但会在没有真实消费者时过早冻结协议，并把模板重新拖回 API 设计。</p>
+      </div>
+    </div>
+  </div>
+</div>

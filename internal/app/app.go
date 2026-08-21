@@ -1,127 +1,140 @@
+// Package app assembles and runs the Eino TUI template.
 package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
-	"os/signal"
 	"syscall"
+	"time"
 
-	agentframework "easygo-agent/internal/agent"
-	"easygo-agent/internal/agent/callback"
+	"easygo-agent/internal/chatmodel"
 	"easygo-agent/internal/config"
-	"easygo-agent/internal/credential"
-	"easygo-agent/internal/cronjob"
-	"easygo-agent/internal/framejob"
-	"easygo-agent/internal/platform/auth"
-	"easygo-agent/internal/platform/handler"
-	"easygo-agent/internal/platform/logger"
-	mysqlplatform "easygo-agent/internal/platform/mysql"
-	"easygo-agent/internal/server"
-	skillstore "easygo-agent/internal/skill/store"
-	skillsync "easygo-agent/internal/skill/sync"
-	"easygo-agent/internal/skill/workspace"
-	"easygo-agent/internal/wire"
-
+	"easygo-agent/internal/gateway"
+	"easygo-agent/internal/observability"
+	"easygo-agent/internal/tools"
+	"easygo-agent/internal/tui"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/cloudwego/eino/components/tool"
 	"go.uber.org/zap"
 )
 
-func Run(configPath string) error {
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		return fmt.Errorf("load config: %w", err)
-	}
-	issuer, err := auth.NewIssuer(os.Getenv("EASYGO_JWT_HS256_SECRET"), auth.DefaultTTL)
-	if err != nil {
-		return fmt.Errorf("configure JWT: %w", err)
-	}
-	cipher, err := credential.NewFromBase64(os.Getenv("EASYGO_CREDENTIAL_KEK_V1"), "v1")
-	if err != nil {
-		return fmt.Errorf("configure credential encryption: %w", err)
-	}
-	if err := logger.Init(logger.Config{
-		Environment: cfg.Logger.Environment,
-		Level:       cfg.Logger.Level,
-		File:        cfg.Logger.File,
-		MaxSizeMB:   cfg.Logger.MaxSizeMB,
-		MaxBackups:  cfg.Logger.MaxBackups,
-		MaxAgeDays:  cfg.Logger.MaxAgeDays,
-		Compress:    cfg.Logger.Compress,
-	}); err != nil {
-		return fmt.Errorf("init logger: %w", err)
-	}
-	// syncLogger flushes buffered structured log entries during shutdown.
-	defer func() { _ = logger.Sync() }()
+type programRunner func(*tea.Program, *zap.Logger) (tea.Model, error)
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-	workspaceManager, err := workspace.NewManager(cfg.Skills)
+// Run loads configuration and runs the terminal application.
+func Run(ctx context.Context, configPath string) error {
+	err := run(ctx, configPath, os.LookupEnv, runTeaProgram)
 	if err != nil {
-		logger.ErrorContext(ctx, "initialize skill workspace failed", zap.Error(err))
-		return fmt.Errorf("initialize skill workspace: %w", err)
-	}
-	syncer, err := skillsync.New(cfg.Skills)
-	if err != nil {
-		logger.ErrorContext(ctx, "initialize builtin skill sync failed", zap.Error(err))
-		return fmt.Errorf("initialize builtin skill sync: %w", err)
-	}
-	if err := syncer.Sync(ctx); err != nil {
-		logger.ErrorContext(ctx, "synchronize builtin skills failed", zap.Error(err))
-		return fmt.Errorf("synchronize builtin skills: %w", err)
-	}
-	skillStore, err := skillstore.New(cfg.Skills, workspaceManager)
-	if err != nil {
-		logger.ErrorContext(ctx, "initialize skill store failed", zap.Error(err))
-		return fmt.Errorf("initialize skill store: %w", err)
-	}
-	if err := skillStore.CleanupStaging(ctx); err != nil {
-		logger.ErrorContext(ctx, "clean skill staging directory failed", zap.Error(err))
-		return fmt.Errorf("clean skill staging directory: %w", err)
-	}
-
-	db, err := mysqlplatform.Open(ctx, cfg.MySQL)
-	if err != nil {
+		zap.L().Error("application failed", zap.String("stage", "app_run"), zap.Error(err))
 		return err
 	}
-	sqlDB, err := db.DB()
-	if err != nil {
-		return fmt.Errorf("get mysql pool: %w", err)
+	return nil
+}
+
+// run assembles dependencies with injectable environment and terminal execution for tests.
+func run(
+	ctx context.Context,
+	configPath string,
+	lookupEnv func(string) (string, bool),
+	runProgram programRunner,
+) (resultErr error) {
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	// closeSQLPool releases database connections and records shutdown failures.
+	logger, err := observability.NewLogger()
+	if err != nil {
+		wrappedErr := fmt.Errorf("initialize logger: %w", err)
+		zap.NewNop().Error("assemble application failed", zap.String("stage", "logger"), zap.Error(wrappedErr))
+		return wrappedErr
+	}
+	var tracing *observability.Tracing
+	// cleanup flushes tracing and logging after every assembly outcome.
 	defer func() {
-		if closeErr := sqlDB.Close(); closeErr != nil {
-			logger.Error("close mysql", zap.Error(closeErr))
+		if tracing != nil {
+			shutdownContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			shutdownErr := tracing.Shutdown(shutdownContext)
+			cancel()
+			if shutdownErr != nil {
+				logger.Error("assemble application cleanup failed", zap.String("stage", "tracing"), zap.Error(shutdownErr))
+				resultErr = errors.Join(resultErr, shutdownErr)
+			}
+		}
+		if syncErr := syncLogger(logger); syncErr != nil {
+			resultErr = errors.Join(resultErr, syncErr)
 		}
 	}()
 
-	callback.Init()
-
-	cronMgr := cronjob.NewManager(db)
-	cronjob.RegisterBuiltinCronJobs(cronMgr)
-	if err := cronMgr.Start(ctx); err != nil {
-		return fmt.Errorf("start cronjob manager: %w", err)
+	cfg, err := config.Load(configPath, lookupEnv, logger)
+	if err != nil {
+		wrappedErr := fmt.Errorf("load configuration: %w", err)
+		logger.Error("assemble application failed", zap.String("stage", "config"), zap.Error(wrappedErr))
+		return wrappedErr
 	}
-	defer cronMgr.Stop()
-
-	frameMgr := framejob.NewManager()
-	framejob.RegisterBuiltinFrameJobs(frameMgr)
-	frameMgr.Start(ctx)
-	defer frameMgr.Stop()
-
-	runtime := agentframework.NewRuntimeFactory(agentframework.NewRegistry(), workspaceManager)
-	healthHandler := handler.NewHealthHandler(map[string]handler.CheckFunc{
-		"mysql": sqlDB.PingContext,
-	})
-	controllers := wire.InitControllers(db, cipher, issuer, runtime, skillStore)
-	router := server.NewRouter(
-		healthHandler,
-		controllers.User,
-		controllers.Auth,
-		controllers.Provider,
-		controllers.Chat,
-		controllers.Skill,
-		issuer,
+	tracing, err = observability.NewTracing(ctx, cfg.Tracing, logger)
+	if err != nil {
+		wrappedErr := fmt.Errorf("initialize tracing: %w", err)
+		logger.Error("assemble application failed", zap.String("stage", "tracing"), zap.Error(wrappedErr))
+		return wrappedErr
+	}
+	calculator, err := tools.NewCalculator(logger)
+	if err != nil {
+		wrappedErr := fmt.Errorf("initialize Calculator Tool: %w", err)
+		logger.Error("assemble application failed", zap.String("stage", "tool"), zap.Error(wrappedErr))
+		return wrappedErr
+	}
+	model, err := chatmodel.New(ctx, cfg.Model, logger)
+	if err != nil {
+		wrappedErr := fmt.Errorf("initialize chat model: %w", err)
+		logger.Error("assemble application failed", zap.String("stage", "model"), zap.Error(wrappedErr))
+		return wrappedErr
+	}
+	agentGateway, err := gateway.New(
+		ctx,
+		gateway.Config{MaxSteps: cfg.Agent.MaxSteps},
+		model,
+		[]tool.BaseTool{calculator},
+		tracing.Tracer,
+		tracing.Handler,
+		logger,
 	)
-	logger.Info("application initialized", zap.String("name", "easygo-agent"))
-	return server.Run(ctx, server.DefaultConfig(), router)
+	if err != nil {
+		wrappedErr := fmt.Errorf("initialize Gateway: %w", err)
+		logger.Error("assemble application failed", zap.String("stage", "gateway"), zap.Error(wrappedErr))
+		return wrappedErr
+	}
+	program := tea.NewProgram(
+		tui.New(agentGateway, cfg.Agent.SystemPrompt, logger),
+		tea.WithAltScreen(),
+		tea.WithContext(ctx),
+	)
+	logger.Info("application initialized", zap.String("mode", "tui"), zap.String("model", cfg.Model.Name))
+	if _, err := runProgram(program, logger); err != nil {
+		wrappedErr := fmt.Errorf("run terminal UI: %w", err)
+		logger.Error("assemble application failed", zap.String("stage", "tui"), zap.Error(wrappedErr))
+		return wrappedErr
+	}
+	return nil
+}
+
+// runTeaProgram executes one Bubble Tea program.
+func runTeaProgram(program *tea.Program, logger *zap.Logger) (tea.Model, error) {
+	model, err := program.Run()
+	if err != nil {
+		wrappedErr := fmt.Errorf("run Bubble Tea program: %w", err)
+		logger.Error("run terminal program failed", zap.Error(wrappedErr))
+		return nil, wrappedErr
+	}
+	return model, nil
+}
+
+// syncLogger flushes Zap while ignoring terminal-specific invalid sync errors.
+func syncLogger(logger *zap.Logger) error {
+	err := logger.Sync()
+	if err == nil || errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTTY) || errors.Is(err, syscall.EBADF) {
+		return nil
+	}
+	wrappedErr := fmt.Errorf("sync logger: %w", err)
+	logger.Error("sync logger failed", zap.Error(wrappedErr))
+	return wrappedErr
 }

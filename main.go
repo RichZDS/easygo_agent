@@ -22,14 +22,17 @@ func main() {
 
 // run 加载可选 .env，并使用固定配置文件启动应用。
 func run() int {
+	// 载入环境变量
 	if err := loadDotEnv(".env"); err != nil {
 		if _, printErr := fmt.Fprintf(os.Stderr, "application stopped: %v\n", err); printErr != nil {
 			zap.NewNop().Error("print application error failed", zap.Error(printErr))
 		}
 		return 1
 	}
+	// 启动应用
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// 运行应用
 	if err := app.Run(ctx, config.DefaultPath); err != nil {
 		if _, printErr := fmt.Fprintf(os.Stderr, "application stopped: %v\n", err); printErr != nil {
 			zap.NewNop().Error("print application error failed", zap.Error(printErr))

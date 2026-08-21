@@ -111,7 +111,8 @@ func Load(path string, lookupEnv func(string) (string, bool), logger *zap.Logger
 		},
 	}
 	decoder := yaml.NewDecoder(bytes.NewReader(content))
-	decoder.KnownFields(true)
+	// 允许未知字段 true 为不允许，false 允许
+	decoder.KnownFields(false)
 	if err := decoder.Decode(&raw); err != nil {
 		wrappedErr := fmt.Errorf("decode config: %w", err)
 		logger.Error("load config failed", zap.String("path", path), zap.Error(wrappedErr))

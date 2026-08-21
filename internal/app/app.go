@@ -15,8 +15,8 @@ import (
 	"easygo-agent/internal/observability"
 	"easygo-agent/internal/tools"
 	"easygo-agent/internal/tui"
+
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/cloudwego/eino/components/tool"
 	"go.uber.org/zap"
 )
 
@@ -24,6 +24,7 @@ type programRunner func(*tea.Program, *zap.Logger) (tea.Model, error)
 
 // Run 加载配置并运行终端应用。
 func Run(ctx context.Context, configPath string) error {
+	// 运行应用
 	err := run(ctx, configPath, os.LookupEnv, runTeaProgram)
 	if err != nil {
 		zap.L().Error("application failed", zap.String("stage", "app_run"), zap.Error(err))
@@ -37,11 +38,12 @@ func run(
 	ctx context.Context,
 	configPath string,
 	lookupEnv func(string) (string, bool),
-	runProgram programRunner,
+	runProgram programRunner, // Bubble Tea
 ) (resultErr error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// 初始化日志
 	logger, err := observability.NewLogger()
 	if err != nil {
 		wrappedErr := fmt.Errorf("initialize logger: %w", err)
@@ -65,35 +67,41 @@ func run(
 		}
 	}()
 
+	// 加载 YAML 配置，并把 {ENV} 形式的 apikey 解析为环境变量。
 	cfg, err := config.Load(configPath, lookupEnv, logger)
 	if err != nil {
 		wrappedErr := fmt.Errorf("load configuration: %w", err)
 		logger.Error("assemble application failed", zap.String("stage", "config"), zap.Error(wrappedErr))
 		return wrappedErr
 	}
+
+	// 按配置初始化 OpenTelemetry tracing；失败时后续组装全部中止。
 	tracing, err = observability.NewTracing(ctx, cfg.Tracing, logger)
 	if err != nil {
 		wrappedErr := fmt.Errorf("initialize tracing: %w", err)
 		logger.Error("assemble application failed", zap.String("stage", "tracing"), zap.Error(wrappedErr))
 		return wrappedErr
 	}
-	calculator, err := tools.NewCalculator(logger)
+	// 集中构造全部内置 Tool，供 ReAct Agent 调用。
+	allTools, err := tools.NewAgentTool(logger).AllTools(ctx)
 	if err != nil {
-		wrappedErr := fmt.Errorf("initialize Calculator Tool: %w", err)
+		wrappedErr := fmt.Errorf("initialize tools: %w", err)
 		logger.Error("assemble application failed", zap.String("stage", "tool"), zap.Error(wrappedErr))
 		return wrappedErr
 	}
+	// 创建单个 OpenAI 兼容 Chat Model，作为 Agent 的推理后端。
 	model, err := chatmodel.New(ctx, cfg.Model, logger)
 	if err != nil {
 		wrappedErr := fmt.Errorf("initialize chat model: %w", err)
 		logger.Error("assemble application failed", zap.String("stage", "model"), zap.Error(wrappedErr))
 		return wrappedErr
 	}
+	// 组装 Gateway：把模型、Tool、tracing 接到 Eino ReAct，对 TUI 隐藏流式细节。
 	agentGateway, err := gateway.New(
 		ctx,
 		gateway.Config{MaxSteps: cfg.Agent.MaxSteps},
 		model,
-		[]tool.BaseTool{calculator},
+		allTools,
 		tracing.Tracer,
 		tracing.Handler,
 		logger,
@@ -103,6 +111,7 @@ func run(
 		logger.Error("assemble application failed", zap.String("stage", "gateway"), zap.Error(wrappedErr))
 		return wrappedErr
 	}
+	// 启动 Bubble Tea TUI，占用备用屏幕；退出后由 ctx 取消。
 	program := tea.NewProgram(
 		tui.New(agentGateway, cfg.Agent.SystemPrompt, logger),
 		tea.WithAltScreen(),

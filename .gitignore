@@ -8,3 +8,4 @@ coverage.out
 skills/builtin/
 skills/staging/
 skills/workspaces/
+.vscode/

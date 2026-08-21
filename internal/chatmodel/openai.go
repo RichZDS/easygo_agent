@@ -7,6 +7,7 @@ import (
 	"net/url"
 
 	"easygo-agent/internal/config"
+
 	openaiadapter "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/components/model"
 	"go.uber.org/zap"

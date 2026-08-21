@@ -7,6 +7,7 @@ import (
 	"net/url"
 
 	"easygo-agent/internal/config"
+	"easygo-agent/internal/logger"
 
 	openaiadapter "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/components/model"
@@ -14,10 +15,7 @@ import (
 )
 
 // New 构造 OpenAI 兼容的 Eino ToolCallingChatModel。
-func New(ctx context.Context, cfg config.ModelConfig, logger *zap.Logger) (model.ToolCallingChatModel, error) {
-	if logger == nil {
-		logger = zap.NewNop()
-	}
+func New(ctx context.Context, cfg config.ModelConfig) (model.ToolCallingChatModel, error) {
 	chatModel, err := openaiadapter.NewChatModel(ctx, toOpenAIConfig(cfg))
 	if err != nil {
 		wrappedErr := fmt.Errorf("create OpenAI-compatible chat model: %w", err)

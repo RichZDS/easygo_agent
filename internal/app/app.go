@@ -12,6 +12,7 @@ import (
 	"easygo-agent/internal/chatmodel"
 	"easygo-agent/internal/config"
 	"easygo-agent/internal/gateway"
+	"easygo-agent/internal/logger"
 	"easygo-agent/internal/observability"
 	"easygo-agent/internal/tools"
 	"easygo-agent/internal/tui"
@@ -20,14 +21,14 @@ import (
 	"go.uber.org/zap"
 )
 
-type programRunner func(*tea.Program, *zap.Logger) (tea.Model, error)
+type programRunner func(*tea.Program) (tea.Model, error)
 
 // Run 加载配置并运行终端应用。
 func Run(ctx context.Context, configPath string) error {
 	// 运行应用
 	err := run(ctx, configPath, os.LookupEnv, runTeaProgram)
 	if err != nil {
-		zap.L().Error("application failed", zap.String("stage", "app_run"), zap.Error(err))
+		logger.Error("application failed", zap.String("stage", "app_run"), zap.Error(err))
 		return err
 	}
 	return nil
@@ -44,10 +45,9 @@ func run(
 		ctx = context.Background()
 	}
 	// 初始化日志
-	logger, err := observability.NewLogger()
-	if err != nil {
+	if _, err := observability.NewLogger(); err != nil {
 		wrappedErr := fmt.Errorf("initialize logger: %w", err)
-		zap.NewNop().Error("assemble application failed", zap.String("stage", "logger"), zap.Error(wrappedErr))
+		logger.Error("assemble application failed", zap.String("stage", "logger"), zap.Error(wrappedErr))
 		return wrappedErr
 	}
 	var tracing *observability.Tracing
@@ -62,13 +62,13 @@ func run(
 				resultErr = errors.Join(resultErr, shutdownErr)
 			}
 		}
-		if syncErr := syncLogger(logger); syncErr != nil {
+		if syncErr := syncLogger(); syncErr != nil {
 			resultErr = errors.Join(resultErr, syncErr)
 		}
 	}()
 
-	// 加载 YAML 配置，并把 {ENV} 形式的 apikey 解析为环境变量。
-	cfg, err := config.Load(configPath, lookupEnv, logger)
+	// 加载 YAML 配置，并把 {ENV} 形式的 apikey 解析为环境变量值。
+	cfg, err := config.Load(configPath, lookupEnv)
 	if err != nil {
 		wrappedErr := fmt.Errorf("load configuration: %w", err)
 		logger.Error("assemble application failed", zap.String("stage", "config"), zap.Error(wrappedErr))
@@ -76,21 +76,21 @@ func run(
 	}
 
 	// 按配置初始化 OpenTelemetry tracing；失败时后续组装全部中止。
-	tracing, err = observability.NewTracing(ctx, cfg.Tracing, logger)
+	tracing, err = observability.NewTracing(ctx, cfg.Tracing)
 	if err != nil {
 		wrappedErr := fmt.Errorf("initialize tracing: %w", err)
 		logger.Error("assemble application failed", zap.String("stage", "tracing"), zap.Error(wrappedErr))
 		return wrappedErr
 	}
 	// 集中构造全部内置 Tool，供 ReAct Agent 调用。
-	allTools, err := tools.NewAgentTool(logger).AllTools(ctx)
+	allTools, err := tools.NewAgentTool().AllTools(ctx)
 	if err != nil {
 		wrappedErr := fmt.Errorf("initialize tools: %w", err)
 		logger.Error("assemble application failed", zap.String("stage", "tool"), zap.Error(wrappedErr))
 		return wrappedErr
 	}
 	// 创建单个 OpenAI 兼容 Chat Model，作为 Agent 的推理后端。
-	model, err := chatmodel.New(ctx, cfg.Model, logger)
+	model, err := chatmodel.New(ctx, cfg.Model)
 	if err != nil {
 		wrappedErr := fmt.Errorf("initialize chat model: %w", err)
 		logger.Error("assemble application failed", zap.String("stage", "model"), zap.Error(wrappedErr))
@@ -104,7 +104,6 @@ func run(
 		allTools,
 		tracing.Tracer,
 		tracing.Handler,
-		logger,
 	)
 	if err != nil {
 		wrappedErr := fmt.Errorf("initialize Gateway: %w", err)
@@ -113,12 +112,12 @@ func run(
 	}
 	// 启动 Bubble Tea TUI，占用备用屏幕；退出后由 ctx 取消。
 	program := tea.NewProgram(
-		tui.New(agentGateway, cfg.Agent.SystemPrompt, logger),
+		tui.New(agentGateway, cfg.Agent.SystemPrompt),
 		tea.WithAltScreen(),
 		tea.WithContext(ctx),
 	)
 	logger.Info("application initialized", zap.String("mode", "tui"), zap.String("model", cfg.Model.Name))
-	if _, err := runProgram(program, logger); err != nil {
+	if _, err := runProgram(program); err != nil {
 		wrappedErr := fmt.Errorf("run terminal UI: %w", err)
 		logger.Error("assemble application failed", zap.String("stage", "tui"), zap.Error(wrappedErr))
 		return wrappedErr
@@ -127,7 +126,7 @@ func run(
 }
 
 // runTeaProgram 执行一个 Bubble Tea 程序。
-func runTeaProgram(program *tea.Program, logger *zap.Logger) (tea.Model, error) {
+func runTeaProgram(program *tea.Program) (tea.Model, error) {
 	model, err := program.Run()
 	if err != nil {
 		wrappedErr := fmt.Errorf("run Bubble Tea program: %w", err)
@@ -138,7 +137,7 @@ func runTeaProgram(program *tea.Program, logger *zap.Logger) (tea.Model, error) 
 }
 
 // syncLogger 刷新 Zap，并忽略终端场景下的无效 Sync 错误。
-func syncLogger(logger *zap.Logger) error {
+func syncLogger() error {
 	err := logger.Sync()
 	if err == nil || errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTTY) || errors.Is(err, syscall.EBADF) {
 		return nil

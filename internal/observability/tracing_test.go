@@ -13,7 +13,6 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
-	"go.uber.org/zap"
 )
 
 // TestEinoCallbackCreatesSafeSpans 验证模型和 Tool callback 会创建不含载荷的 span。
@@ -22,7 +21,7 @@ func TestEinoCallbackCreatesSafeSpans(t *testing.T) {
 
 	recorder := tracetest.NewSpanRecorder()
 	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
-	handler := newEinoTracingHandler(provider.Tracer(instrumentationName), zap.NewNop())
+	handler := newEinoTracingHandler(provider.Tracer(instrumentationName))
 
 	modelInfo := &callbacks.RunInfo{Name: "test-model", Component: components.ComponentOfChatModel}
 	modelContext := handler.OnStart(context.Background(), modelInfo, "prompt text")
@@ -55,7 +54,7 @@ func TestEinoCallbackRecordsErrors(t *testing.T) {
 
 	recorder := tracetest.NewSpanRecorder()
 	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
-	handler := newEinoTracingHandler(provider.Tracer(instrumentationName), zap.NewNop())
+	handler := newEinoTracingHandler(provider.Tracer(instrumentationName))
 	info := &callbacks.RunInfo{Name: "calculator", Component: components.ComponentOfTool}
 	spanContext := handler.OnStart(context.Background(), info, nil)
 	handler.OnError(spanContext, info, errors.New("tool failed"))
@@ -77,7 +76,7 @@ func TestEinoCallbackIgnoresUnsupportedComponents(t *testing.T) {
 	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
 	tracer := provider.Tracer(instrumentationName)
 	parentContext, parentSpan := tracer.Start(context.Background(), "agent.run")
-	handler := newEinoTracingHandler(tracer, zap.NewNop())
+	handler := newEinoTracingHandler(tracer)
 	info := &callbacks.RunInfo{Name: "loader", Component: components.ComponentOfLoader}
 	callbackContext := handler.OnStart(parentContext, info, nil)
 	handler.OnEnd(callbackContext, info, nil)
@@ -95,7 +94,7 @@ func TestEinoCallbackIgnoresUnsupportedComponents(t *testing.T) {
 func TestNewTracingDisabled(t *testing.T) {
 	t.Parallel()
 
-	tracing, err := NewTracing(context.Background(), config.TracingConfig{Enabled: false, Exporter: "stdout"}, zap.NewNop())
+	tracing, err := NewTracing(context.Background(), config.TracingConfig{Enabled: false, Exporter: "stdout"})
 	if err != nil {
 		t.Fatalf("NewTracing() error = %v", err)
 	}
@@ -114,7 +113,7 @@ func TestNewTracingDisabled(t *testing.T) {
 func TestNewTracingRejectsUnsupportedExporter(t *testing.T) {
 	t.Parallel()
 
-	_, err := NewTracing(context.Background(), config.TracingConfig{Enabled: true, Exporter: "vendor"}, zap.NewNop())
+	_, err := NewTracing(context.Background(), config.TracingConfig{Enabled: true, Exporter: "vendor"})
 	if err == nil {
 		t.Fatal("NewTracing() error = nil, want unsupported exporter error")
 	}

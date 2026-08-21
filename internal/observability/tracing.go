@@ -6,6 +6,8 @@ import (
 	"sync"
 
 	"easygo-agent/internal/config"
+	"easygo-agent/internal/logger"
+
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
 	"go.opentelemetry.io/otel/attribute"
@@ -25,23 +27,18 @@ type callbackSpanContextKey struct{}
 type Tracing struct {
 	Tracer   trace.Tracer
 	Handler  callbacks.Handler
-	logger   *zap.Logger
 	shutdown func(context.Context) error
 	once     sync.Once
 	err      error
 }
 
 // NewTracing 构造禁用的空 tracing，或可选的 stdout 导出器。
-func NewTracing(_ context.Context, cfg config.TracingConfig, logger *zap.Logger) (*Tracing, error) {
-	if logger == nil {
-		logger = zap.NewNop()
-	}
+func NewTracing(_ context.Context, cfg config.TracingConfig) (*Tracing, error) {
 	if !cfg.Enabled {
 		provider := noop.NewTracerProvider()
 		return &Tracing{
 			Tracer:   provider.Tracer(instrumentationName),
 			Handler:  callbacks.NewHandlerBuilder().Build(),
-			logger:   logger,
 			shutdown: noopShutdown,
 		}, nil
 	}
@@ -61,8 +58,7 @@ func NewTracing(_ context.Context, cfg config.TracingConfig, logger *zap.Logger)
 	tracer := provider.Tracer(instrumentationName)
 	return &Tracing{
 		Tracer:   tracer,
-		Handler:  newEinoTracingHandler(tracer, logger),
-		logger:   logger,
+		Handler:  newEinoTracingHandler(tracer),
 		shutdown: provider.Shutdown,
 	}, nil
 }
@@ -76,7 +72,7 @@ func (tracing *Tracing) Shutdown(ctx context.Context) error {
 	tracing.once.Do(func() {
 		tracing.err = tracing.shutdown(ctx)
 		if tracing.err != nil {
-			tracing.logger.Error("shutdown tracing failed", zap.Error(tracing.err))
+			logger.Error("shutdown tracing failed", zap.Error(tracing.err))
 		}
 	})
 	if tracing.err != nil {
@@ -91,10 +87,7 @@ func noopShutdown(context.Context) error {
 }
 
 // newEinoTracingHandler 为模型和 Tool callback 创建不记录载荷的 span。
-func newEinoTracingHandler(tracer trace.Tracer, logger *zap.Logger) callbacks.Handler {
-	if logger == nil {
-		logger = zap.NewNop()
-	}
+func newEinoTracingHandler(tracer trace.Tracer) callbacks.Handler {
 	// onStart 仅为模型和 Tool 组件开启 span。
 	onStart := func(ctx context.Context, info *callbacks.RunInfo, _ callbacks.CallbackInput) context.Context {
 		spanName, ok := callbackSpanName(info)

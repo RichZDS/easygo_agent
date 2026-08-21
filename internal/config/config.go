@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"easygo-agent/internal/logger"
+
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
@@ -80,8 +82,7 @@ type rawTracingConfig struct {
 }
 
 // Load 读取一份严格 YAML，并把 apikey 中的 {ENV} 引用解析为环境变量值。
-func Load(path string, lookupEnv func(string) (string, bool), logger *zap.Logger) (Config, error) {
-	logger = safeLogger(logger)
+func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 	if strings.TrimSpace(path) == "" {
 		err := errors.New("config path cannot be empty")
 		logger.Error("load config failed", zap.String("field", "path"), zap.Error(err))
@@ -128,13 +129,13 @@ func Load(path string, lookupEnv func(string) (string, bool), logger *zap.Logger
 		return Config{}, wrappedErr
 	}
 
-	timeout, err := parseDuration(raw.Model.Timeout, logger)
+	timeout, err := parseDuration(raw.Model.Timeout)
 	if err != nil {
 		wrappedErr := fmt.Errorf("parse model timeout: %w", err)
 		logger.Error("load config failed", zap.String("field", "model.timeout"), zap.Error(wrappedErr))
 		return Config{}, wrappedErr
 	}
-	apiKey, err := resolveAPIKey(raw.Model.APIKey, lookupEnv, logger)
+	apiKey, err := resolveAPIKey(raw.Model.APIKey, lookupEnv)
 	if err != nil {
 		wrappedErr := fmt.Errorf("resolve model apikey: %w", err)
 		logger.Error("load config failed", zap.String("field", "model.apikey"), zap.Error(wrappedErr))
@@ -157,7 +158,7 @@ func Load(path string, lookupEnv func(string) (string, bool), logger *zap.Logger
 			Exporter: strings.TrimSpace(raw.Tracing.Exporter),
 		},
 	}
-	if err := validateConfig(cfg, logger); err != nil {
+	if err := validateConfig(cfg); err != nil {
 		wrappedErr := fmt.Errorf("validate config: %w", err)
 		logger.Error("load config failed", zap.String("path", path), zap.Error(wrappedErr))
 		return Config{}, wrappedErr
@@ -166,7 +167,7 @@ func Load(path string, lookupEnv func(string) (string, bool), logger *zap.Logger
 }
 
 // resolveAPIKey 将 YAML 中的 {ENV_NAME} 引用解析为对应环境变量值。
-func resolveAPIKey(raw string, lookupEnv func(string) (string, bool), logger *zap.Logger) (string, error) {
+func resolveAPIKey(raw string, lookupEnv func(string) (string, bool)) (string, error) {
 	trimmed := strings.TrimSpace(raw)
 	matches := envRefPattern.FindStringSubmatch(trimmed)
 	if matches == nil {
@@ -185,7 +186,7 @@ func resolveAPIKey(raw string, lookupEnv func(string) (string, bool), logger *za
 }
 
 // parseDuration 将 YAML 时长字符串解析为正的 Go duration。
-func parseDuration(value string, logger *zap.Logger) (time.Duration, error) {
+func parseDuration(value string) (time.Duration, error) {
 	duration, err := time.ParseDuration(strings.TrimSpace(value))
 	if err != nil {
 		wrappedErr := fmt.Errorf("invalid duration: %w", err)
@@ -201,7 +202,7 @@ func parseDuration(value string, logger *zap.Logger) (time.Duration, error) {
 }
 
 // validateConfig 只校验运行模板所需的字段。
-func validateConfig(cfg Config, logger *zap.Logger) error {
+func validateConfig(cfg Config) error {
 	if cfg.Agent.SystemPrompt == "" {
 		err := errors.New("agent system_prompt cannot be empty")
 		logger.Error("validate config failed", zap.String("field", "agent.system_prompt"), zap.Error(err))
@@ -244,12 +245,4 @@ func validateConfig(cfg Config, logger *zap.Logger) error {
 		return err
 	}
 	return nil
-}
-
-// safeLogger 在 logger 为空时返回 no-op logger。
-func safeLogger(logger *zap.Logger) *zap.Logger {
-	if logger == nil {
-		return zap.NewNop()
-	}
-	return logger
 }

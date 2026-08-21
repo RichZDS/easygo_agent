@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 
+	"easygo-agent/internal/logger"
+
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"go.uber.org/zap"
@@ -24,10 +26,7 @@ type CalculatorOutput struct {
 }
 
 // NewCalculator 构造模板内置的 Eino Calculator Tool。
-func NewCalculator(logger *zap.Logger) (tool.InvokableTool, error) {
-	if logger == nil {
-		logger = zap.NewNop()
-	}
+func NewCalculator() (tool.InvokableTool, error) {
 	// calculate 执行一次受支持的算术运算。
 	calculate := func(_ context.Context, input CalculatorInput) (CalculatorOutput, error) {
 		var result float64

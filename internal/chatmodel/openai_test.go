@@ -7,7 +7,7 @@ import (
 	"easygo-agent/internal/config"
 )
 
-// TestToOpenAIConfig verifies the single-model configuration maps without policy fields.
+// TestToOpenAIConfig 验证单模型配置映射，且不带策略字段。
 func TestToOpenAIConfig(t *testing.T) {
 	t.Parallel()
 

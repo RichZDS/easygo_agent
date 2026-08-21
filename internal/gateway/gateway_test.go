@@ -16,7 +16,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// TestGatewayRunsReActWithCalculator verifies the outward stream over a real Eino ReAct loop.
+// TestGatewayRunsReActWithCalculator 通过真实 Eino ReAct 循环校验对外事件流。
 func TestGatewayRunsReActWithCalculator(t *testing.T) {
 	t.Parallel()
 
@@ -64,7 +64,7 @@ func TestGatewayRunsReActWithCalculator(t *testing.T) {
 	}
 }
 
-// TestGatewayRejectsInvalidRequests verifies stable request validation precedes model execution.
+// TestGatewayRejectsInvalidRequests 验证稳定请求校验发生在模型执行之前。
 func TestGatewayRejectsInvalidRequests(t *testing.T) {
 	t.Parallel()
 
@@ -81,7 +81,7 @@ func TestGatewayRejectsInvalidRequests(t *testing.T) {
 	}
 }
 
-// TestGatewayCancellationProducesCanceled verifies caller cancellation is not reported as failure.
+// TestGatewayCancellationProducesCanceled 验证调用方取消不会被报告为失败。
 func TestGatewayCancellationProducesCanceled(t *testing.T) {
 	t.Parallel()
 
@@ -100,7 +100,7 @@ func TestGatewayCancellationProducesCanceled(t *testing.T) {
 	}
 }
 
-// newTestGateway creates a Gateway with deterministic no-op infrastructure.
+// newTestGateway 使用确定性空基础设施创建 Gateway。
 func newTestGateway(t *testing.T, chatModel einomodel.ToolCallingChatModel) *Gateway {
 	t.Helper()
 
@@ -123,12 +123,12 @@ func newTestGateway(t *testing.T, chatModel einomodel.ToolCallingChatModel) *Gat
 	return agentGateway
 }
 
-// receiveAll consumes outward events until the stable EOF marker.
+// receiveAll 消费对外事件直到稳定的 EOF 标记。
 func receiveAll(t *testing.T, stream EventStream) []Event {
 	t.Helper()
 
 	done := make(chan []Event, 1)
-	// receive reads the stream off the test goroutine so hangs have a deadline.
+	// receive 在测试 goroutine 外读取流，以便超时检测卡住。
 	go func() {
 		var events []Event
 		for {
@@ -155,7 +155,7 @@ func receiveAll(t *testing.T, stream EventStream) []Event {
 	}
 }
 
-// closeStream closes a Gateway stream and reports cleanup errors.
+// closeStream 关闭 Gateway 流并报告清理错误。
 func closeStream(t *testing.T, stream EventStream) {
 	t.Helper()
 
@@ -168,12 +168,12 @@ type fakeToolCallingModel struct {
 	tools []*schema.ToolInfo
 }
 
-// WithTools returns an immutable fake bound to the requested Tool definitions.
+// WithTools 返回绑定到请求 Tool 定义的不可变假模型。
 func (model *fakeToolCallingModel) WithTools(tools []*schema.ToolInfo) (einomodel.ToolCallingChatModel, error) {
 	return &fakeToolCallingModel{tools: append([]*schema.ToolInfo(nil), tools...)}, nil
 }
 
-// Generate returns the deterministic non-streaming equivalent response.
+// Generate 返回确定性的非流式等价响应。
 func (model *fakeToolCallingModel) Generate(_ context.Context, input []*schema.Message, _ ...einomodel.Option) (*schema.Message, error) {
 	if hasToolResult(input) {
 		return schema.AssistantMessage("result is 5", nil), nil
@@ -181,7 +181,7 @@ func (model *fakeToolCallingModel) Generate(_ context.Context, input []*schema.M
 	return calculatorToolCall(), nil
 }
 
-// Stream requests Calculator and then emits the deterministic final response.
+// Stream 先请求 Calculator，再发出确定性最终响应。
 func (model *fakeToolCallingModel) Stream(_ context.Context, input []*schema.Message, _ ...einomodel.Option) (*schema.StreamReader[*schema.Message], error) {
 	if hasToolResult(input) {
 		return schema.StreamReaderFromArray([]*schema.Message{
@@ -192,7 +192,7 @@ func (model *fakeToolCallingModel) Stream(_ context.Context, input []*schema.Mes
 	return schema.StreamReaderFromArray([]*schema.Message{calculatorToolCall()}), nil
 }
 
-// calculatorToolCall returns the fake model's deterministic Tool request.
+// calculatorToolCall 返回假模型的确定性 Tool 请求。
 func calculatorToolCall() *schema.Message {
 	return schema.AssistantMessage("", []schema.ToolCall{{
 		ID:   "call-1",
@@ -204,7 +204,7 @@ func calculatorToolCall() *schema.Message {
 	}})
 }
 
-// hasToolResult reports whether ReAct has supplied a Tool result to the model.
+// hasToolResult 判断 ReAct 是否已向模型提供 Tool 结果。
 func hasToolResult(messages []*schema.Message) bool {
 	for _, message := range messages {
 		if message.Role == schema.Tool {
@@ -216,21 +216,21 @@ func hasToolResult(messages []*schema.Message) bool {
 
 type blockingToolCallingModel struct{}
 
-// WithTools returns the cancellation test model unchanged.
+// WithTools 原样返回取消测试使用的模型。
 func (model *blockingToolCallingModel) WithTools([]*schema.ToolInfo) (einomodel.ToolCallingChatModel, error) {
 	return model, nil
 }
 
-// Generate blocks until its context is canceled.
+// Generate 阻塞直到 context 被取消。
 func (model *blockingToolCallingModel) Generate(ctx context.Context, _ []*schema.Message, _ ...einomodel.Option) (*schema.Message, error) {
 	<-ctx.Done()
 	return nil, ctx.Err()
 }
 
-// Stream returns a stream that terminates only when its context is canceled.
+// Stream 返回仅在 context 取消时结束的流。
 func (model *blockingToolCallingModel) Stream(ctx context.Context, _ []*schema.Message, _ ...einomodel.Option) (*schema.StreamReader[*schema.Message], error) {
 	reader, writer := schema.Pipe[*schema.Message](1)
-	// waitForCancellation forwards context cancellation into the Eino stream.
+	// waitForCancellation 把 context 取消转发到 Eino 流。
 	go func() {
 		<-ctx.Done()
 		writer.Send(nil, ctx.Err())

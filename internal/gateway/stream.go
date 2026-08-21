@@ -19,7 +19,7 @@ type eventStream struct {
 	logger     *zap.Logger
 }
 
-// newEventStream constructs an in-memory stream that cannot block its producer.
+// newEventStream 构造内存流，保证生产者不会被阻塞。
 func newEventStream(cancel context.CancelFunc, logger *zap.Logger) *eventStream {
 	stream := &eventStream{
 		cancel: cancel,
@@ -30,7 +30,7 @@ func newEventStream(cancel context.CancelFunc, logger *zap.Logger) *eventStream 
 	return stream
 }
 
-// Recv waits for one event or returns EOF after the terminal event is consumed.
+// Recv 等待一条事件，或在终态事件消费后返回 EOF。
 func (stream *eventStream) Recv() (Event, error) {
 	stream.mu.Lock()
 	defer stream.mu.Unlock()
@@ -48,14 +48,14 @@ func (stream *eventStream) Recv() (Event, error) {
 	return event, nil
 }
 
-// Close cancels an active run and waits until its producer releases resources.
+// Close 取消进行中的运行，并等待生产者释放资源。
 func (stream *eventStream) Close() error {
 	stream.cancel()
 	<-stream.done
 	return nil
 }
 
-// emit appends a non-terminal event unless the stream already finished.
+// emit 追加一条非终态事件；流已结束时直接丢弃。
 func (stream *eventStream) emit(event Event) bool {
 	stream.mu.Lock()
 	defer stream.mu.Unlock()
@@ -67,8 +67,9 @@ func (stream *eventStream) emit(event Event) bool {
 	return true
 }
 
-// finish appends exactly one terminal event and closes the producer lifecycle.
+// finish 恰好追加一条终态事件，并关闭生产者生命周期。
 func (stream *eventStream) finish(event Event) {
+	// closeProducer 关闭流并唤醒所有等待者。
 	stream.finishOnce.Do(func() {
 		stream.mu.Lock()
 		stream.queue = append(stream.queue, event)
@@ -79,8 +80,9 @@ func (stream *eventStream) finish(event Event) {
 	})
 }
 
-// abort closes setup-failed streams that were never returned to a caller.
+// abort 关闭从未返回给调用方的、组装失败的流。
 func (stream *eventStream) abort() {
+	// closeAbandoned 关闭未对外暴露的流。
 	stream.finishOnce.Do(func() {
 		stream.mu.Lock()
 		stream.closed = true

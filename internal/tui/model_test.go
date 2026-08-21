@@ -18,7 +18,7 @@ type fakeRunner struct {
 	ctx    context.Context
 }
 
-// Run records one request and returns the configured fake stream.
+// Run 记录一次请求并返回配置好的假流。
 func (runner *fakeRunner) Run(ctx context.Context, _ gateway.Request) (gateway.EventStream, error) {
 	runner.calls++
 	runner.ctx = ctx
@@ -31,7 +31,7 @@ type fakeStream struct {
 	closed bool
 }
 
-// Recv returns deterministic events followed by EOF.
+// Recv 返回确定性事件，随后返回 EOF。
 func (stream *fakeStream) Recv() (gateway.Event, error) {
 	if stream.index == len(stream.events) {
 		err := io.EOF
@@ -43,13 +43,13 @@ func (stream *fakeStream) Recv() (gateway.Event, error) {
 	return event, nil
 }
 
-// Close records that the TUI released the stream.
+// Close 记录 TUI 已释放该流。
 func (stream *fakeStream) Close() error {
 	stream.closed = true
 	return nil
 }
 
-// TestCompletedRunAppendsHistory verifies only authoritative completed text is reused.
+// TestCompletedRunAppendsHistory 验证只有权威完成文本会被复用。
 func TestCompletedRunAppendsHistory(t *testing.T) {
 	t.Parallel()
 
@@ -69,7 +69,7 @@ func TestCompletedRunAppendsHistory(t *testing.T) {
 	}
 }
 
-// TestFailedRunDoesNotAppendPartialHistory verifies failed partial output remains display-only.
+// TestFailedRunDoesNotAppendPartialHistory 验证失败时的部分输出只用于展示。
 func TestFailedRunDoesNotAppendPartialHistory(t *testing.T) {
 	t.Parallel()
 
@@ -86,7 +86,7 @@ func TestFailedRunDoesNotAppendPartialHistory(t *testing.T) {
 	}
 }
 
-// TestControlCCancelsWhileRunningAndQuitsWhileIdle verifies the two-stage key behavior.
+// TestControlCCancelsWhileRunningAndQuitsWhileIdle 验证两阶段按键行为。
 func TestControlCCancelsWhileRunningAndQuitsWhileIdle(t *testing.T) {
 	t.Parallel()
 
@@ -113,7 +113,7 @@ func TestControlCCancelsWhileRunningAndQuitsWhileIdle(t *testing.T) {
 	}
 }
 
-// TestDuplicateSubmitIsIgnored verifies only one active stream exists.
+// TestDuplicateSubmitIsIgnored 验证同一时刻只有一条活动流。
 func TestDuplicateSubmitIsIgnored(t *testing.T) {
 	t.Parallel()
 
@@ -128,7 +128,7 @@ func TestDuplicateSubmitIsIgnored(t *testing.T) {
 	}
 }
 
-// submittedModel returns a TUI model with one active run.
+// submittedModel 返回已有一次活动运行的 TUI 模型。
 func submittedModel(t *testing.T, stream gateway.EventStream) *Model {
 	t.Helper()
 
@@ -138,7 +138,7 @@ func submittedModel(t *testing.T, stream gateway.EventStream) *Model {
 	return updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
 }
 
-// updateModel applies one Bubble Tea message and returns the concrete model.
+// updateModel 应用一条 Bubble Tea 消息并返回具体模型。
 func updateModel(t *testing.T, model *Model, message tea.Msg) *Model {
 	t.Helper()
 
@@ -150,7 +150,7 @@ func updateModel(t *testing.T, model *Model, message tea.Msg) *Model {
 	return concrete
 }
 
-// applyGatewayEvent routes one Gateway event through the Bubble Tea update path.
+// applyGatewayEvent 通过 Bubble Tea 更新路径投递一条 Gateway 事件。
 func applyGatewayEvent(t *testing.T, model *Model, event gateway.Event) *Model {
 	t.Helper()
 

@@ -27,8 +27,6 @@ future adapter ----+             `-- Calculator Tool
 
 Gateway 隐藏 Eino message、stream 和 callback 细节。TUI 只依赖稳定的请求与事件；未来项目可以在同一个 Gateway 外增加 HTTP、gRPC 或消息队列 adapter。
 
-详细说明见 [架构文档](docs/architecture.md)；延后能力见 [扩展文档](docs/extensions.md)。
-
 ## 环境要求
 
 - Go 1.25 或更高版本；
@@ -37,13 +35,7 @@ Gateway 隐藏 Eino message、stream 和 callback 细节。TUI 只依赖稳定�
 
 ## 配置
 
-复制无秘密配置：
-
-```bash
-cp configs/config.example.yaml configs/config.local.yaml
-```
-
-配置项：
+程序只读取 `configs/config.yaml`：
 
 ```yaml
 agent:
@@ -54,16 +46,21 @@ model:
   name: gpt-4.1-mini
   base_url: ""
   timeout: 120s
+  apikey: "{EASYGO_AGENT_API_KEY}"
 
 tracing:
   enabled: false
   exporter: stdout
 ```
 
-API Key 只从环境变量读取：
+API Key 在 YAML 中通过 `{ENV}` 引用环境变量；环境变量可从项目根目录 `.env` 加载：
 
 ```bash
-export EASYGO_AGENT_API_KEY='replace-with-a-disposable-key'
+cp .env.example .env
+```
+
+```bash
+EASYGO_AGENT_API_KEY='replace-with-a-disposable-key'
 ```
 
 程序只校验运行必需字段，不执行用户归属、provider 状态、模型白名单、权限或额度判断。
@@ -71,7 +68,7 @@ export EASYGO_AGENT_API_KEY='replace-with-a-disposable-key'
 ## 启动
 
 ```bash
-go run ./cmd/agent -config configs/config.local.yaml
+go run main.go
 ```
 
 按键：
@@ -95,7 +92,7 @@ operation = add | subtract | multiply | divide
 
 ## Tracing
 
-将本地配置改为：
+将 `configs/config.yaml` 改为：
 
 ```yaml
 tracing:

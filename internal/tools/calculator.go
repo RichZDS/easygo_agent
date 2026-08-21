@@ -1,4 +1,4 @@
-// Package tools contains the template's fixed Eino Tool examples.
+// Package tools 包含模板固定的 Eino Tool 示例。
 package tools
 
 import (
@@ -11,24 +11,24 @@ import (
 	"go.uber.org/zap"
 )
 
-// CalculatorInput contains one deterministic arithmetic operation.
+// CalculatorInput 表示一次确定性算术运算。
 type CalculatorInput struct {
 	Operation string  `json:"operation" jsonschema:"required,description=Operation to perform,enum=add,enum=subtract,enum=multiply,enum=divide"`
 	A         float64 `json:"a" jsonschema:"required,description=Left operand"`
 	B         float64 `json:"b" jsonschema:"required,description=Right operand"`
 }
 
-// CalculatorOutput contains the arithmetic result.
+// CalculatorOutput 包含算术结果。
 type CalculatorOutput struct {
 	Result float64 `json:"result"`
 }
 
-// NewCalculator constructs the template's native Eino Calculator Tool.
+// NewCalculator 构造模板内置的 Eino Calculator Tool。
 func NewCalculator(logger *zap.Logger) (tool.InvokableTool, error) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	// calculate performs one supported arithmetic operation.
+	// calculate 执行一次受支持的算术运算。
 	calculate := func(_ context.Context, input CalculatorInput) (CalculatorOutput, error) {
 		var result float64
 		switch input.Operation {

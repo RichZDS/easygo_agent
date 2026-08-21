@@ -10,7 +10,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// TestRunBuildsTemplateWithoutNetwork verifies assembly reaches the injected TUI runner.
+// TestRunBuildsTemplateWithoutNetwork 验证组装流程能到达注入的 TUI runner。
 func TestRunBuildsTemplateWithoutNetwork(t *testing.T) {
 	t.Parallel()
 
@@ -22,6 +22,7 @@ model:
   name: test-model
   base_url: https://example.com/v1
   timeout: 2m
+  apikey: "{EASYGO_AGENT_API_KEY}"
 tracing:
   enabled: false
   exporter: stdout
@@ -36,7 +37,7 @@ tracing:
 	}
 }
 
-// testLookupEnv returns the assembly test credential.
+// testLookupEnv 返回组装测试使用的凭证。
 func testLookupEnv(key string) (string, bool) {
 	if key != "EASYGO_AGENT_API_KEY" {
 		return "", false
@@ -44,7 +45,7 @@ func testLookupEnv(key string) (string, bool) {
 	return "test-key", true
 }
 
-// successfulProgramRunner accepts the assembled Bubble Tea program without opening a terminal.
+// successfulProgramRunner 接受已组装的 Bubble Tea 程序，但不打开真实终端。
 func successfulProgramRunner(*tea.Program, *zap.Logger) (tea.Model, error) {
 	return nil, nil
 }

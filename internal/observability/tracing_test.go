@@ -16,7 +16,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// TestEinoCallbackCreatesSafeSpans verifies model and Tool callbacks create spans without payloads.
+// TestEinoCallbackCreatesSafeSpans 验证模型和 Tool callback 会创建不含载荷的 span。
 func TestEinoCallbackCreatesSafeSpans(t *testing.T) {
 	t.Parallel()
 
@@ -49,7 +49,7 @@ func TestEinoCallbackCreatesSafeSpans(t *testing.T) {
 	}
 }
 
-// TestEinoCallbackRecordsErrors verifies callback failures set an OTel error status.
+// TestEinoCallbackRecordsErrors 验证 callback 失败会设置 OTel error 状态。
 func TestEinoCallbackRecordsErrors(t *testing.T) {
 	t.Parallel()
 
@@ -69,7 +69,7 @@ func TestEinoCallbackRecordsErrors(t *testing.T) {
 	}
 }
 
-// TestEinoCallbackIgnoresUnsupportedComponents verifies generic callbacks cannot end a parent span.
+// TestEinoCallbackIgnoresUnsupportedComponents 验证通用 callback 不能结束父 span。
 func TestEinoCallbackIgnoresUnsupportedComponents(t *testing.T) {
 	t.Parallel()
 
@@ -91,7 +91,7 @@ func TestEinoCallbackIgnoresUnsupportedComponents(t *testing.T) {
 	}
 }
 
-// TestNewTracingDisabled verifies disabled tracing remains safe and idempotently closable.
+// TestNewTracingDisabled 验证禁用 tracing 安全且可幂等关闭。
 func TestNewTracingDisabled(t *testing.T) {
 	t.Parallel()
 
@@ -110,7 +110,7 @@ func TestNewTracingDisabled(t *testing.T) {
 	}
 }
 
-// TestNewTracingRejectsUnsupportedExporter verifies vendor-specific exporters are not accepted.
+// TestNewTracingRejectsUnsupportedExporter 验证不接受厂商专用导出器。
 func TestNewTracingRejectsUnsupportedExporter(t *testing.T) {
 	t.Parallel()
 

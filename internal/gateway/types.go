@@ -1,50 +1,50 @@
-// Package gateway exposes the transport-neutral Agent execution seam.
+// Package gateway 对外暴露与传输无关的 Agent 执行缝。
 package gateway
 
 import "context"
 
-// Role identifies one stable conversation role.
+// Role 标识一种稳定的对话角色。
 type Role string
 
 const (
-	// RoleSystem identifies system instructions.
+	// RoleSystem 标识系统指令。
 	RoleSystem Role = "system"
-	// RoleUser identifies user input.
+	// RoleUser 标识用户输入。
 	RoleUser Role = "user"
-	// RoleAssistant identifies completed assistant output.
+	// RoleAssistant 标识已完成的助手输出。
 	RoleAssistant Role = "assistant"
 )
 
-// Message is the stable text-only message accepted by the template Gateway.
+// Message 是模板 Gateway 接受的稳定纯文本消息。
 type Message struct {
 	Role    Role
 	Content string
 }
 
-// Request contains the complete current-process conversation for one run.
+// Request 包含一次运行所需的当前进程完整对话。
 type Request struct {
 	Messages []Message
 }
 
-// EventKind identifies one stable outward streaming event.
+// EventKind 标识一种稳定的对外流式事件。
 type EventKind string
 
 const (
-	// EventTextDelta carries incremental assistant text.
+	// EventTextDelta 携带增量助手文本。
 	EventTextDelta EventKind = "text_delta"
-	// EventToolStart reports a Tool invocation without its arguments.
+	// EventToolStart 报告 Tool 调用开始，不包含参数。
 	EventToolStart EventKind = "tool_start"
-	// EventToolEnd reports Tool completion without its output.
+	// EventToolEnd 报告 Tool 完成，不包含输出。
 	EventToolEnd EventKind = "tool_end"
-	// EventCompleted carries the authoritative final assistant text.
+	// EventCompleted 携带权威的最终助手文本。
 	EventCompleted EventKind = "completed"
-	// EventCanceled reports caller-requested cancellation.
+	// EventCanceled 报告调用方请求的取消。
 	EventCanceled EventKind = "canceled"
-	// EventFailed reports a non-cancellation runtime error.
+	// EventFailed 报告非取消类运行时错误。
 	EventFailed EventKind = "failed"
 )
 
-// Event is one Gateway stream update.
+// Event 是一条 Gateway 流更新。
 type Event struct {
 	Kind     EventKind
 	Text     string
@@ -52,18 +52,18 @@ type Event struct {
 	Err      error
 }
 
-// EventStream receives stable Gateway events and owns cancellation cleanup.
+// EventStream 接收稳定 Gateway 事件，并负责取消时的清理。
 type EventStream interface {
 	Recv() (Event, error)
 	Close() error
 }
 
-// Runner starts one stateless Agent run.
+// Runner 启动一次无状态 Agent 运行。
 type Runner interface {
 	Run(context.Context, Request) (EventStream, error)
 }
 
-// Config contains Eino ReAct limits owned by the Gateway.
+// Config 包含 Gateway 持有的 Eino ReAct 限制。
 type Config struct {
 	MaxSteps int
 }

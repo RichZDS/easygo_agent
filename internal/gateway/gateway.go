@@ -21,7 +21,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// Gateway owns Eino ReAct execution behind the stable Runner interface.
+// Gateway 在稳定 Runner 接口后面持有 Eino ReAct 执行。
 type Gateway struct {
 	agent        *react.Agent
 	tracer       trace.Tracer
@@ -29,7 +29,7 @@ type Gateway struct {
 	logger       *zap.Logger
 }
 
-// New constructs one concurrency-safe Eino ReAct Gateway.
+// New 构造一个并发安全的 Eino ReAct Gateway。
 func New(
 	ctx context.Context,
 	cfg Config,
@@ -82,7 +82,7 @@ func New(
 	}, nil
 }
 
-// Run validates one request and starts its independent event stream.
+// Run 校验一次请求并启动其独立事件流。
 func (gateway *Gateway) Run(ctx context.Context, request Request) (EventStream, error) {
 	messages, err := gateway.convertMessages(request.Messages)
 	if err != nil {
@@ -97,7 +97,7 @@ func (gateway *Gateway) Run(ctx context.Context, request Request) (EventStream, 
 	toolHandler := gateway.newToolEventHandler(stream)
 	handlers := []callbacks.Handler{toolHandler, gateway.traceHandler}
 
-	// executeRun owns Eino startup and streaming until all resources are released.
+	// executeRun 负责 Eino 启动与流式读取，直到资源全部释放。
 	go func() {
 		terminal := gateway.executeRun(runCtx, messages, stream, handlers)
 		if terminal.Kind == EventFailed {
@@ -111,7 +111,7 @@ func (gateway *Gateway) Run(ctx context.Context, request Request) (EventStream, 
 	return stream, nil
 }
 
-// executeRun starts Eino asynchronously so the caller can cancel before the first model chunk.
+// executeRun 异步启动 Eino，以便调用方可在首个模型分片前取消。
 func (gateway *Gateway) executeRun(ctx context.Context, messages []*schema.Message, stream *eventStream, handlers []callbacks.Handler) Event {
 	einoStream, err := gateway.agent.Stream(
 		ctx,
@@ -130,7 +130,7 @@ func (gateway *Gateway) executeRun(ctx context.Context, messages []*schema.Messa
 	return gateway.consumeRun(ctx, einoStream, stream)
 }
 
-// consumeRun projects Eino message chunks into stable Gateway events.
+// consumeRun 将 Eino 消息分片投影为稳定 Gateway 事件。
 func (gateway *Gateway) consumeRun(ctx context.Context, einoStream *schema.StreamReader[*schema.Message], stream *eventStream) Event {
 	var content strings.Builder
 	for {
@@ -154,7 +154,7 @@ func (gateway *Gateway) consumeRun(ctx context.Context, einoStream *schema.Strea
 	}
 }
 
-// convertMessages validates stable roles and converts them to Eino messages.
+// convertMessages 校验稳定角色并把它们转换成 Eino 消息。
 func (gateway *Gateway) convertMessages(messages []Message) ([]*schema.Message, error) {
 	if len(messages) == 0 {
 		err := errors.New("request messages cannot be empty")
@@ -185,19 +185,19 @@ func (gateway *Gateway) convertMessages(messages []Message) ([]*schema.Message, 
 	return converted, nil
 }
 
-// newToolEventHandler projects Tool lifecycle callbacks without payload data.
+// newToolEventHandler 投影 Tool 生命周期 callback，且不携带载荷。
 func (gateway *Gateway) newToolEventHandler(stream *eventStream) callbacks.Handler {
-	// onToolStart emits a Tool start event without arguments.
+	// onToolStart 发出不含参数的 Tool 开始事件。
 	onToolStart := func(ctx context.Context, info *callbacks.RunInfo, _ *tool.CallbackInput) context.Context {
 		stream.emit(Event{Kind: EventToolStart, ToolName: callbackName(info)})
 		return ctx
 	}
-	// onToolEnd emits a Tool completion event without output.
+	// onToolEnd 发出不含输出的 Tool 完成事件。
 	onToolEnd := func(ctx context.Context, info *callbacks.RunInfo, _ *tool.CallbackOutput) context.Context {
 		stream.emit(Event{Kind: EventToolEnd, ToolName: callbackName(info)})
 		return ctx
 	}
-	// onToolError emits a Tool completion event carrying only the error.
+	// onToolError 发出只携带错误的 Tool 完成事件。
 	onToolError := func(ctx context.Context, info *callbacks.RunInfo, err error) context.Context {
 		toolName := callbackName(info)
 		gateway.logger.Error("Eino Tool failed", zap.String("tool", toolName), zap.Error(err))
@@ -211,7 +211,7 @@ func (gateway *Gateway) newToolEventHandler(stream *eventStream) callbacks.Handl
 	})
 }
 
-// callbackName safely extracts a callback component name.
+// callbackName 安全提取 callback 组件名称。
 func callbackName(info *callbacks.RunInfo) string {
 	if info == nil {
 		return ""

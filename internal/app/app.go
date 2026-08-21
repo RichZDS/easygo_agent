@@ -1,4 +1,4 @@
-// Package app assembles and runs the Eino TUI template.
+// Package app 组装并运行 Eino TUI 模板。
 package app
 
 import (
@@ -22,7 +22,7 @@ import (
 
 type programRunner func(*tea.Program, *zap.Logger) (tea.Model, error)
 
-// Run loads configuration and runs the terminal application.
+// Run 加载配置并运行终端应用。
 func Run(ctx context.Context, configPath string) error {
 	err := run(ctx, configPath, os.LookupEnv, runTeaProgram)
 	if err != nil {
@@ -32,7 +32,7 @@ func Run(ctx context.Context, configPath string) error {
 	return nil
 }
 
-// run assembles dependencies with injectable environment and terminal execution for tests.
+// run 组装依赖；测试可注入环境查找与终端执行。
 func run(
 	ctx context.Context,
 	configPath string,
@@ -49,7 +49,7 @@ func run(
 		return wrappedErr
 	}
 	var tracing *observability.Tracing
-	// cleanup flushes tracing and logging after every assembly outcome.
+	// cleanup 在每次组装结束后刷新 tracing 与日志。
 	defer func() {
 		if tracing != nil {
 			shutdownContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -117,7 +117,7 @@ func run(
 	return nil
 }
 
-// runTeaProgram executes one Bubble Tea program.
+// runTeaProgram 执行一个 Bubble Tea 程序。
 func runTeaProgram(program *tea.Program, logger *zap.Logger) (tea.Model, error) {
 	model, err := program.Run()
 	if err != nil {
@@ -128,7 +128,7 @@ func runTeaProgram(program *tea.Program, logger *zap.Logger) (tea.Model, error) 
 	return model, nil
 }
 
-// syncLogger flushes Zap while ignoring terminal-specific invalid sync errors.
+// syncLogger 刷新 Zap，并忽略终端场景下的无效 Sync 错误。
 func syncLogger(logger *zap.Logger) error {
 	err := logger.Sync()
 	if err == nil || errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTTY) || errors.Is(err, syscall.EBADF) {

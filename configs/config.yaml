@@ -1,0 +1,17 @@
+agent:
+  system_prompt: You are a helpful assistant.
+  max_steps: 8
+
+model:
+  name: deepseek-v4-pro
+  base_url: "https://api.deepseek.com"
+  timeout: 120s
+  apikey: "{MODEL_API_KEY}"
+subagent:
+  name: deepseek-v4-flash
+  base_url: "https://api.deepseek.com"
+  timeout: 120s
+  apikey: "{SUBMODEL_API_KEY}"
+tracing:
+  enabled: false
+  exporter: stdout

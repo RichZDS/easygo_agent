@@ -1,4 +1,4 @@
-// Package observability 为模板构造日志与 tracing。
+// Package observability 为模板构造日志。
 package observability
 
 import (

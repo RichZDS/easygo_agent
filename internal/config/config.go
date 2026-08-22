@@ -23,19 +23,17 @@ const (
 	DefaultPath = "configs/config.yaml"
 	// APIKeyEnvironmentVariable 是默认的模型凭证环境变量名。
 	APIKeyEnvironmentVariable = "EASYGO_AGENT_API_KEY"
-	defaultSystemPrompt       = "You are a helpful assistant."
-	defaultMaxSteps           = 8
-	defaultTimeout            = "120s"
-	defaultTracingExporter    = "stdout"
+	defaultSystemPrompt = "You are a helpful assistant."
+	defaultMaxSteps     = 8
+	defaultTimeout      = "120s"
 )
 
 var envRefPattern = regexp.MustCompile(`^\{([A-Za-z_][A-Za-z0-9_]*)\}$`)
 
 // Config 包含模板的全部运行时配置。
 type Config struct {
-	Agent   AgentConfig
-	Model   ModelConfig
-	Tracing TracingConfig
+	Agent AgentConfig
+	Model ModelConfig
 }
 
 // AgentConfig 控制 Eino ReAct 行为。
@@ -52,16 +50,9 @@ type ModelConfig struct {
 	APIKey  string
 }
 
-// TracingConfig 控制可选的 OpenTelemetry 导出。
-type TracingConfig struct {
-	Enabled  bool
-	Exporter string
-}
-
 type rawConfig struct {
-	Agent   rawAgentConfig   `yaml:"agent"`
-	Model   rawModelConfig   `yaml:"model"`
-	Tracing rawTracingConfig `yaml:"tracing"`
+	Agent rawAgentConfig `yaml:"agent"`
+	Model rawModelConfig `yaml:"model"`
 }
 
 type rawAgentConfig struct {
@@ -74,11 +65,6 @@ type rawModelConfig struct {
 	BaseURL string `yaml:"base_url"`
 	Timeout string `yaml:"timeout"`
 	APIKey  string `yaml:"apikey"`
-}
-
-type rawTracingConfig struct {
-	Enabled  bool   `yaml:"enabled"`
-	Exporter string `yaml:"exporter"`
 }
 
 // Load 读取一份严格 YAML，并把 apikey 中的 {ENV} 引用解析为环境变量值。
@@ -107,9 +93,6 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 			MaxSteps:     defaultMaxSteps,
 		},
 		Model: rawModelConfig{Timeout: defaultTimeout},
-		Tracing: rawTracingConfig{
-			Exporter: defaultTracingExporter,
-		},
 	}
 	decoder := yaml.NewDecoder(bytes.NewReader(content))
 	// 允许未知字段 true 为不允许，false 允许
@@ -152,10 +135,6 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 			BaseURL: strings.TrimSpace(raw.Model.BaseURL),
 			Timeout: timeout,
 			APIKey:  apiKey,
-		},
-		Tracing: TracingConfig{
-			Enabled:  raw.Tracing.Enabled,
-			Exporter: strings.TrimSpace(raw.Tracing.Exporter),
 		},
 	}
 	if err := validateConfig(cfg); err != nil {
@@ -237,11 +216,6 @@ func validateConfig(cfg Config) error {
 	if cfg.Model.APIKey == "" {
 		err := errors.New("model apikey cannot be empty")
 		logger.Error("validate config failed", zap.String("field", "model.apikey"), zap.Error(err))
-		return err
-	}
-	if cfg.Tracing.Exporter != defaultTracingExporter {
-		err := fmt.Errorf("unsupported tracing exporter %q", cfg.Tracing.Exporter)
-		logger.Error("validate config failed", zap.String("field", "tracing.exporter"), zap.Error(err))
 		return err
 	}
 	return nil

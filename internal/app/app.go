@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"syscall"
-	"time"
 
 	"easygo-agent/internal/chatmodel"
 	"easygo-agent/internal/config"
@@ -40,18 +39,8 @@ func Run(ctx context.Context, configPath string) (resultErr error) {
 		logger.Error("assemble application failed", zap.String("stage", "logger"), zap.Error(wrappedErr))
 		return wrappedErr
 	}
-	var tracing *observability.Tracing
-	// cleanup 在每次组装结束后刷新 tracing 与日志。
+	// cleanup 在每次组装结束后刷新日志。
 	defer func() {
-		if tracing != nil {
-			shutdownContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			shutdownErr := tracing.Shutdown(shutdownContext)
-			cancel()
-			if shutdownErr != nil {
-				logger.Error("assemble application cleanup failed", zap.String("stage", "tracing"), zap.Error(shutdownErr))
-				resultErr = errors.Join(resultErr, shutdownErr)
-			}
-		}
 		if syncErr := syncLogger(); syncErr != nil {
 			resultErr = errors.Join(resultErr, syncErr)
 		}
@@ -65,13 +54,6 @@ func Run(ctx context.Context, configPath string) (resultErr error) {
 		return wrappedErr
 	}
 
-	// 按配置初始化 OpenTelemetry tracing；失败时后续组装全部中止。
-	tracing, err = observability.NewTracing(ctx, cfg.Tracing)
-	if err != nil {
-		wrappedErr := fmt.Errorf("initialize tracing: %w", err)
-		logger.Error("assemble application failed", zap.String("stage", "tracing"), zap.Error(wrappedErr))
-		return wrappedErr
-	}
 	// 集中构造全部内置 Tool，供 ReAct Agent 调用。
 	allTools, err := tools.NewAgentTool().AllTools(ctx)
 	if err != nil {
@@ -86,14 +68,12 @@ func Run(ctx context.Context, configPath string) (resultErr error) {
 		logger.Error("assemble application failed", zap.String("stage", "model"), zap.Error(wrappedErr))
 		return wrappedErr
 	}
-	// 组装 Gateway：把模型、Tool、tracing 接到 Eino ReAct，对 TUI 隐藏流式细节。
+	// 组装 Gateway：把模型、Tool 接到 Eino ReAct，对 TUI 隐藏流式细节。
 	agentGateway, err := gateway.New(
 		ctx,
 		gateway.Config{MaxSteps: cfg.Agent.MaxSteps},
 		model,
 		allTools,
-		tracing.Tracer,
-		tracing.Handler,
 	)
 	if err != nil {
 		wrappedErr := fmt.Errorf("initialize Gateway: %w", err)

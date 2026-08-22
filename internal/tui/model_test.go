@@ -3,70 +3,46 @@ package tui
 import (
 	"context"
 	"errors"
-	"io"
 	"strings"
 	"testing"
 
-	"easygo-agent/internal/gateway"
-	"easygo-agent/internal/logger"
+	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/schema"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"go.uber.org/zap"
 )
 
-type fakeRunner struct {
-	stream gateway.EventStream
-	calls  int
-	ctx    context.Context
+type fakeAgent struct {
+	calls int
 }
 
-// Run 记录一次请求并返回配置好的假流。
-func (runner *fakeRunner) Run(ctx context.Context, _ gateway.Request) (gateway.EventStream, error) {
-	runner.calls++
-	runner.ctx = ctx
-	return runner.stream, nil
+func (agent *fakeAgent) Name(context.Context) string { return "fake" }
+
+func (agent *fakeAgent) Description(context.Context) string { return "fake" }
+
+// Run 记录一次调用并立即关闭迭代器；测试通过 Update 注入事件。
+func (agent *fakeAgent) Run(context.Context, *adk.AgentInput, ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
+	agent.calls++
+	iter, gen := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	gen.Close()
+	return iter
 }
 
-type fakeStream struct {
-	events []gateway.Event
-	index  int
-	closed bool
-}
-
-// Recv 返回确定性事件，随后返回 EOF。
-func (stream *fakeStream) Recv() (gateway.Event, error) {
-	if stream.index == len(stream.events) {
-		err := io.EOF
-		logger.Error("fake stream exhausted", zap.Error(err))
-		return gateway.Event{}, err
-	}
-	event := stream.events[stream.index]
-	stream.index++
-	return event, nil
-}
-
-// Close 记录 TUI 已释放该流。
-func (stream *fakeStream) Close() error {
-	stream.closed = true
-	return nil
-}
-
-// TestCompletedRunAppendsHistory 验证只有权威完成文本会被复用。
+// TestCompletedRunAppendsHistory 验证完整助手文本会写入下一轮历史。
 func TestCompletedRunAppendsHistory(t *testing.T) {
 	t.Parallel()
 
-	stream := &fakeStream{}
-	runner := &fakeRunner{stream: stream}
-	model := New(runner, "system")
+	agent := &fakeAgent{}
+	model := New(agent, "system")
 	model.input.SetValue("hello")
 	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
-	model = applyGatewayEvent(t, model, gateway.Event{Kind: gateway.EventTextDelta, Text: "partial"})
-	model = applyGatewayEvent(t, model, gateway.Event{Kind: gateway.EventCompleted, Text: "final"})
+	model = applyAgentEvent(t, model, adk.EventFromMessage(schema.AssistantMessage("final", nil), nil, schema.Assistant, ""))
+	model = applyAgentEnded(t, model)
 
-	if got := model.history[len(model.history)-1]; got.Role != gateway.RoleAssistant || got.Content != "final" {
+	if got := model.history[len(model.history)-1]; got.Role != schema.Assistant || got.Content != "final" {
 		t.Fatalf("last history message = %#v", got)
 	}
-	if strings.Contains(model.transcript(), "assistant: partial") || !strings.Contains(model.transcript(), "assistant: final") {
+	if !strings.Contains(model.transcript(), "assistant: final") {
 		t.Fatalf("transcript = %q", model.transcript())
 	}
 }
@@ -75,10 +51,10 @@ func TestCompletedRunAppendsHistory(t *testing.T) {
 func TestFailedRunDoesNotAppendPartialHistory(t *testing.T) {
 	t.Parallel()
 
-	model := submittedModel(t, &fakeStream{})
+	model := submittedModel(t)
 	wantHistory := len(model.history)
-	model = applyGatewayEvent(t, model, gateway.Event{Kind: gateway.EventTextDelta, Text: "partial"})
-	model = applyGatewayEvent(t, model, gateway.Event{Kind: gateway.EventFailed, Err: errors.New("model failed")})
+	model = applyAgentEvent(t, model, adk.EventFromMessage(schema.AssistantMessage("partial", nil), nil, schema.Assistant, ""))
+	model = applyAgentEvent(t, model, &adk.AgentEvent{Err: errors.New("model failed")})
 
 	if len(model.history) != wantHistory {
 		t.Fatalf("history length = %d, want %d", len(model.history), wantHistory)
@@ -92,15 +68,14 @@ func TestFailedRunDoesNotAppendPartialHistory(t *testing.T) {
 func TestControlCCancelsWhileRunningAndQuitsWhileIdle(t *testing.T) {
 	t.Parallel()
 
-	stream := &fakeStream{}
-	model := submittedModel(t, stream)
+	model := submittedModel(t)
 	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyCtrlC})
 	select {
 	case <-model.runContext.Done():
 	default:
 		t.Fatal("running Ctrl+C did not cancel the run context")
 	}
-	model = applyGatewayEvent(t, model, gateway.Event{Kind: gateway.EventCanceled})
+	model = applyAgentEnded(t, model)
 	if model.state != stateIdle {
 		t.Fatalf("state = %v, want idle", model.state)
 	}
@@ -119,23 +94,22 @@ func TestControlCCancelsWhileRunningAndQuitsWhileIdle(t *testing.T) {
 func TestDuplicateSubmitIsIgnored(t *testing.T) {
 	t.Parallel()
 
-	runner := &fakeRunner{stream: &fakeStream{}}
-	model := New(runner, "system")
+	agent := &fakeAgent{}
+	model := New(agent, "system")
 	model.input.SetValue("first")
 	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
 	model.input.SetValue("second")
 	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
-	if runner.calls != 1 {
-		t.Fatalf("Runner calls = %d, want 1", runner.calls)
+	if agent.calls != 1 {
+		t.Fatalf("Agent calls = %d, want 1", agent.calls)
 	}
 }
 
 // submittedModel 返回已有一次活动运行的 TUI 模型。
-func submittedModel(t *testing.T, stream gateway.EventStream) *Model {
+func submittedModel(t *testing.T) *Model {
 	t.Helper()
 
-	runner := &fakeRunner{stream: stream}
-	model := New(runner, "system")
+	model := New(&fakeAgent{}, "system")
 	model.input.SetValue("hello")
 	return updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
 }
@@ -152,9 +126,16 @@ func updateModel(t *testing.T, model *Model, message tea.Msg) *Model {
 	return concrete
 }
 
-// applyGatewayEvent 通过 Bubble Tea 更新路径投递一条 Gateway 事件。
-func applyGatewayEvent(t *testing.T, model *Model, event gateway.Event) *Model {
+// applyAgentEvent 通过 Bubble Tea 更新路径投递一条原生 ADK 事件。
+func applyAgentEvent(t *testing.T, model *Model, event *adk.AgentEvent) *Model {
 	t.Helper()
 
-	return updateModel(t, model, gatewayEventMessage{event: event})
+	return updateModel(t, model, agentEventMessage{event: event})
+}
+
+// applyAgentEnded 通过 Bubble Tea 更新路径投递迭代器结束。
+func applyAgentEnded(t *testing.T, model *Model) *Model {
+	t.Helper()
+
+	return updateModel(t, model, agentEventMessage{ended: true})
 }

@@ -5,8 +5,7 @@
 模板只演示以下基础接法：
 
 - Bubble Tea 终端交互；
-- transport-neutral Gateway；
-- Eino 原生 classic ReAct Agent；
+- Eino 原生 Deep Agent；
 - 单个 OpenAI-compatible 模型；
 - Eino 原生 Calculator Tool。
 
@@ -17,12 +16,12 @@
 ## 架构
 
 ```text
-TUI adapter ---> Gateway ---> Eino ReAct
-                   |             |-- OpenAI-compatible model
-future adapter ----+             `-- Calculator Tool
+TUI adapter ---> Eino Deep Agent
+                     |-- OpenAI-compatible model
+                     `-- Calculator Tool
 ```
 
-Gateway 隐藏 Eino message、stream 和 callback 细节。TUI 只依赖稳定的请求与事件；未来项目可以在同一个 Gateway 外增加 HTTP、gRPC 或消息队列 adapter。
+TUI 直接调用 `adk.Agent.Run`，并消费原生 `AgentEvent` 与 `schema.Message` 流。
 
 ## 环境要求
 

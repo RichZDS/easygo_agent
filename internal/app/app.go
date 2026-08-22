@@ -8,11 +8,12 @@ import (
 	"os"
 	"syscall"
 
-	"easygo-agent/internal/chatmodel"
+	deepagent "easygo-agent/internal/agent/deepagent.go"
+	"easygo-agent/internal/agent/chatmodel"
 	"easygo-agent/internal/config"
-	"easygo-agent/internal/gateway"
 	"easygo-agent/internal/logger"
 	"easygo-agent/internal/observability"
+	"easygo-agent/internal/prompt"
 	"easygo-agent/internal/tools"
 	"easygo-agent/internal/tui"
 
@@ -34,7 +35,7 @@ func Run(ctx context.Context, configPath string) (resultErr error) {
 		ctx = context.Background()
 	}
 	// 初始化日志
-	if _, err := observability.NewLogger(); err != nil {
+	if _, err := observability.NewLogger(observability.DefaultPath); err != nil {
 		wrappedErr := fmt.Errorf("initialize logger: %w", err)
 		logger.Error("assemble application failed", zap.String("stage", "logger"), zap.Error(wrappedErr))
 		return wrappedErr
@@ -68,21 +69,16 @@ func Run(ctx context.Context, configPath string) (resultErr error) {
 		logger.Error("assemble application failed", zap.String("stage", "model"), zap.Error(wrappedErr))
 		return wrappedErr
 	}
-	// 组装 Gateway：把模型、Tool 接到 Eino ReAct，对 TUI 隐藏流式细节。
-	agentGateway, err := gateway.New(
-		ctx,
-		gateway.Config{MaxSteps: cfg.Agent.MaxSteps},
-		model,
-		allTools,
-	)
+	// 构造 Eino Deep Agent，再交给 TUI 直接调用。
+	agent, err := deepagent.New(ctx, model, allTools, cfg.Agent)
 	if err != nil {
-		wrappedErr := fmt.Errorf("initialize Gateway: %w", err)
-		logger.Error("assemble application failed", zap.String("stage", "gateway"), zap.Error(wrappedErr))
+		wrappedErr := fmt.Errorf("initialize agent: %w", err)
+		logger.Error("assemble application failed", zap.String("stage", "agent"), zap.Error(wrappedErr))
 		return wrappedErr
 	}
 	// 启动 Bubble Tea TUI，占用备用屏幕；退出后由 ctx 取消。
 	program := tea.NewProgram(
-		tui.New(agentGateway, cfg.Agent.SystemPrompt),
+		tui.New(agent, prompt.SystemPrompt),
 		tea.WithAltScreen(),
 		tea.WithContext(ctx),
 	)
@@ -91,10 +87,6 @@ func Run(ctx context.Context, configPath string) (resultErr error) {
 		wrappedErr := fmt.Errorf("run terminal UI: %w", err)
 		logger.Error("assemble application failed", zap.String("stage", "tui"), zap.Error(wrappedErr))
 		return wrappedErr
-	}
-	if err != nil {
-		logger.Error("application failed", zap.String("stage", "app_run"), zap.Error(err))
-		return err
 	}
 	return nil
 }
@@ -113,10 +105,22 @@ func runTeaProgram(program *tea.Program) (tea.Model, error) {
 // syncLogger 刷新 Zap，并忽略终端场景下的无效 Sync 错误。
 func syncLogger() error {
 	err := logger.Sync()
-	if err == nil || errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTTY) || errors.Is(err, syscall.EBADF) {
+	if isIgnorableSyncError(err) {
 		return nil
 	}
 	wrappedErr := fmt.Errorf("sync logger: %w", err)
 	logger.Error("sync logger failed", zap.Error(wrappedErr))
 	return wrappedErr
+}
+
+// isIgnorableSyncError 判断 Sync 失败是否来自无法 flush 的控制台句柄。
+func isIgnorableSyncError(err error) bool {
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTTY) || errors.Is(err, syscall.EBADF) {
+		return true
+	}
+	// Windows 控制台 stderr/stdout 不能 flush，Zap Sync 会返回 ERROR_INVALID_HANDLE (6)。
+	return errors.Is(err, syscall.Errno(6))
 }

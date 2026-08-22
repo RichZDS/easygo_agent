@@ -14,13 +14,13 @@ func TestErrorWritesToGlobalLogger(t *testing.T) {
 	restore := zap.ReplaceGlobals(zap.New(core))
 	t.Cleanup(restore)
 
-	Error("create Gateway failed", zap.String("field", "max_steps"))
+	Error("create agent failed", zap.String("field", "max_steps"))
 
 	logs := recorded.All()
 	if len(logs) != 1 {
 		t.Fatalf("log count = %d, want 1", len(logs))
 	}
-	if logs[0].Message != "create Gateway failed" {
-		t.Fatalf("message = %q, want %q", logs[0].Message, "create Gateway failed")
+	if logs[0].Message != "create agent failed" {
+		t.Fatalf("message = %q, want %q", logs[0].Message, "create agent failed")
 	}
 }

@@ -23,8 +23,7 @@ const (
 	DefaultPath = "configs/config.yaml"
 	// APIKeyEnvironmentVariable 是默认的模型凭证环境变量名。
 	APIKeyEnvironmentVariable = "EASYGO_AGENT_API_KEY"
-	defaultSystemPrompt = "You are a helpful assistant."
-	defaultMaxSteps     = 8
+	defaultMaxSteps = 8
 	defaultTimeout      = "120s"
 )
 
@@ -38,8 +37,7 @@ type Config struct {
 
 // AgentConfig 控制 Eino ReAct 行为。
 type AgentConfig struct {
-	SystemPrompt string
-	MaxSteps     int
+	MaxSteps int
 }
 
 // ModelConfig 控制单个 OpenAI 兼容模型。
@@ -56,8 +54,7 @@ type rawConfig struct {
 }
 
 type rawAgentConfig struct {
-	SystemPrompt string `yaml:"system_prompt"`
-	MaxSteps     int    `yaml:"max_steps"`
+	MaxSteps int `yaml:"max_steps"`
 }
 
 type rawModelConfig struct {
@@ -89,8 +86,7 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 
 	raw := rawConfig{
 		Agent: rawAgentConfig{
-			SystemPrompt: defaultSystemPrompt,
-			MaxSteps:     defaultMaxSteps,
+			MaxSteps: defaultMaxSteps,
 		},
 		Model: rawModelConfig{Timeout: defaultTimeout},
 	}
@@ -127,8 +123,7 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 
 	cfg := Config{
 		Agent: AgentConfig{
-			SystemPrompt: strings.TrimSpace(raw.Agent.SystemPrompt),
-			MaxSteps:     raw.Agent.MaxSteps,
+			MaxSteps: raw.Agent.MaxSteps,
 		},
 		Model: ModelConfig{
 			Name:    strings.TrimSpace(raw.Model.Name),
@@ -182,11 +177,6 @@ func parseDuration(value string) (time.Duration, error) {
 
 // validateConfig 只校验运行模板所需的字段。
 func validateConfig(cfg Config) error {
-	if cfg.Agent.SystemPrompt == "" {
-		err := errors.New("agent system_prompt cannot be empty")
-		logger.Error("validate config failed", zap.String("field", "agent.system_prompt"), zap.Error(err))
-		return err
-	}
 	if cfg.Agent.MaxSteps <= 0 {
 		err := errors.New("agent max_steps must be greater than zero")
 		logger.Error("validate config failed", zap.String("field", "agent.max_steps"), zap.Error(err))

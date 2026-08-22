@@ -1,0 +1,47 @@
+// Package agent 用一层浅封装构造 Eino Deep Agent。
+package deepagent
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"easygo-agent/internal/config"
+	"easygo-agent/internal/logger"
+
+	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/prebuilt/deep"
+	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/compose"
+	"go.uber.org/zap"
+)
+
+// New 构造可并发调用的 Eino Deep Agent。
+func New(ctx context.Context, chatModel model.ToolCallingChatModel, tools []tool.BaseTool, cfg config.AgentConfig) (adk.Agent, error) {
+	if chatModel == nil {
+		err := errors.New("chat model cannot be nil")
+		logger.Error("create agent failed", zap.String("field", "chat_model"), zap.Error(err))
+		return nil, err
+	}
+	if cfg.MaxSteps <= 0 {
+		err := errors.New("max iteration must be greater than zero")
+		logger.Error("create agent failed", zap.String("field", "max_iteration"), zap.Error(err))
+		return nil, err
+	}
+
+	agent, err := deep.New(ctx, &deep.Config{
+		Name:      "deep-agent",
+		ChatModel: chatModel,
+		ToolsConfig: adk.ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: tools},
+		},
+		MaxIteration: cfg.MaxSteps,
+	})
+	if err != nil {
+		wrappedErr := fmt.Errorf("create Eino Deep Agent: %w", err)
+		logger.Error("create agent failed", zap.Error(wrappedErr))
+		return nil, wrappedErr
+	}
+	return agent, nil
+}

@@ -9,12 +9,12 @@ import (
 	"slices"
 	"strings"
 
-	"easygo-agent/internal/gateway"
 	"easygo-agent/internal/logger"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
 	"go.uber.org/zap"
 )
@@ -27,25 +27,28 @@ const (
 	stateQuitting
 )
 
-type gatewayEventMessage struct {
-	event gateway.Event
-	err   error
+type agentEventMessage struct {
+	event *adk.AgentEvent
+	ended bool
 }
 
-type streamCloseMessage struct {
-	err error
+type messageChunkMessage struct {
+	message *schema.Message
+	err     error
+	eof     bool
 }
 
 // Model 是模板的最小 Bubble Tea 状态机。
 type Model struct {
-	runner     gateway.Runner
+	agent      adk.Agent
 	input      textarea.Model
 	viewport   viewport.Model
 	state      runState
 	history    []*schema.Message
 	lines      []string
 	partial    string
-	active     gateway.EventStream
+	iter       *adk.AsyncIterator[*adk.AgentEvent]
+	msgStream  *schema.StreamReader[*schema.Message]
 	runCancel  context.CancelFunc
 	runContext context.Context
 	status     string
@@ -54,7 +57,7 @@ type Model struct {
 }
 
 // New 构造带有进程内对话历史的空闲 TUI。
-func New(runner gateway.Runner, systemPrompt string) *Model {
+func New(agent adk.Agent, systemPrompt string) *Model {
 	input := textarea.New()
 	input.Placeholder = "Ask the agent..."
 	input.Prompt = "> "
@@ -65,7 +68,7 @@ func New(runner gateway.Runner, systemPrompt string) *Model {
 	input.Focus()
 
 	model := &Model{
-		runner:   runner,
+		agent:    agent,
 		input:    input,
 		viewport: viewport.New(80, 18),
 		state:    stateIdle,
@@ -85,7 +88,7 @@ func (model *Model) Init() tea.Cmd {
 	return textarea.Blink
 }
 
-// Update 在 Bubble Tea 单线程中处理终端输入和 Gateway 事件。
+// Update 在 Bubble Tea 单线程中处理终端输入和 Eino Agent 事件。
 func (model *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch message := message.(type) {
 	case tea.WindowSizeMsg:
@@ -101,15 +104,10 @@ func (model *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return model, nil
 		}
-	case gatewayEventMessage:
-		return model, model.applyGatewayEvent(message)
-	case streamCloseMessage:
-		if message.err != nil {
-			logger.Error("close Gateway stream failed", zap.Error(message.err))
-			model.lines = append(model.lines, "error: failed to close stream")
-			model.refreshViewport()
-		}
-		return model, nil
+	case agentEventMessage:
+		return model, model.applyAgentEvent(message)
+	case messageChunkMessage:
+		return model, model.applyMessageChunk(message)
 	}
 
 	if model.state == stateIdle {
@@ -133,10 +131,10 @@ func (model *Model) handleControlC() (tea.Model, tea.Cmd) {
 	return model, tea.Quit
 }
 
-// submit 基于当前进程内历史启动一次 Gateway 运行。
+// submit 基于当前进程内历史直接启动一次 Eino Agent 运行。
 func (model *Model) submit() tea.Cmd {
 	content := strings.TrimSpace(model.input.Value())
-	if content == "" || model.runner == nil {
+	if content == "" || model.agent == nil {
 		return nil
 	}
 	model.input.Reset()
@@ -146,112 +144,205 @@ func (model *Model) submit() tea.Cmd {
 	model.state = stateRunning
 	model.status = "running · Ctrl+C cancel"
 	model.runContext, model.runCancel = context.WithCancel(context.Background())
-	request := gateway.Request{Messages: slices.Clone(model.history)}
-	stream, err := model.runner.Run(model.runContext, request)
-	if err != nil {
-		logger.Error("start TUI run failed", zap.Error(err))
-		model.lines = append(model.lines, "error: "+err.Error())
-		model.resetRun()
-		model.refreshViewport()
-		return nil
-	}
-	model.active = stream
+	model.iter = model.agent.Run(model.runContext, &adk.AgentInput{
+		Messages:        slices.Clone(model.history),
+		EnableStreaming: true,
+	})
 	model.refreshViewport()
-	return waitForEvent(stream)
+	return model.nextCmd()
 }
 
-// applyGatewayEvent 更新 transcript 状态，并调度下一次流接收。
-func (model *Model) applyGatewayEvent(message gatewayEventMessage) tea.Cmd {
-	if message.err != nil {
-		if errors.Is(message.err, io.EOF) {
-			return nil
-		}
-		logger.Error("receive TUI Gateway event failed", zap.Error(message.err))
-		model.lines = append(model.lines, "error: "+message.err.Error())
-		return model.finishRun()
+// nextCmd 优先消费当前消息流，否则读取下一条 AgentEvent。
+func (model *Model) nextCmd() tea.Cmd {
+	if model.msgStream != nil {
+		return waitForChunk(model.msgStream)
 	}
+	if model.iter != nil {
+		return waitForAgentEvent(model.iter)
+	}
+	return nil
+}
 
+// applyAgentEvent 把一条原生 ADK 事件投影到 transcript。
+func (model *Model) applyAgentEvent(message agentEventMessage) tea.Cmd {
+	if model.canceled() {
+		return model.finishCanceled()
+	}
+	if message.ended {
+		return model.finishCompleted()
+	}
 	event := message.event
-	switch event.Kind {
-	case gateway.EventTextDelta:
-		model.partial += event.Text
+	if event == nil {
+		return model.nextCmd()
+	}
+	if event.Err != nil {
+		if model.canceled() {
+			return model.finishCanceled()
+		}
+		return model.finishFailed(event.Err)
+	}
+	if event.Output == nil || event.Output.MessageOutput == nil {
+		return model.nextCmd()
+	}
+	return model.applyMessageOutput(event.Output.MessageOutput)
+}
+
+// applyMessageOutput 按 Eino 原生 Role 处理助手文本或 Tool 结果。
+func (model *Model) applyMessageOutput(output *adk.MessageVariant) tea.Cmd {
+	if output.IsStreaming && output.MessageStream != nil {
+		output.MessageStream.SetAutomaticClose()
+		if output.Role == schema.Assistant {
+			model.msgStream = output.MessageStream
+			return model.nextCmd()
+		}
+		if output.Role == schema.Tool {
+			model.lines = append(model.lines, fmt.Sprintf("tool: %s completed", output.ToolName))
+			model.refreshViewport()
+		}
+		output.MessageStream.Close()
+		return model.nextCmd()
+	}
+	if output.Role == schema.Tool {
+		model.lines = append(model.lines, fmt.Sprintf("tool: %s completed", output.ToolName))
 		model.refreshViewport()
-		return waitForEvent(model.active)
-	case gateway.EventToolStart:
-		model.lines = append(model.lines, fmt.Sprintf("tool: %s started", event.ToolName))
+		return model.nextCmd()
+	}
+	if output.Role == schema.Assistant && output.Message != nil {
+		model.applyAssistantMessage(output.Message)
 		model.refreshViewport()
-		return waitForEvent(model.active)
-	case gateway.EventToolEnd:
-		if event.Err != nil {
-			model.lines = append(model.lines, fmt.Sprintf("tool: %s failed", event.ToolName))
-		} else {
-			model.lines = append(model.lines, fmt.Sprintf("tool: %s completed", event.ToolName))
+	}
+	return model.nextCmd()
+}
+
+// applyMessageChunk 消费助手消息流的一个分片。
+func (model *Model) applyMessageChunk(message messageChunkMessage) tea.Cmd {
+	if model.canceled() {
+		return model.finishCanceled()
+	}
+	if message.eof {
+		model.closeMessageStream()
+		return model.nextCmd()
+	}
+	if message.err != nil {
+		if model.canceled() {
+			return model.finishCanceled()
 		}
+		wrappedErr := fmt.Errorf("receive Eino message stream: %w", message.err)
+		logger.Error("receive TUI agent stream failed", zap.Error(wrappedErr))
+		return model.finishFailed(wrappedErr)
+	}
+	if message.message != nil {
+		model.applyAssistantMessage(message.message)
 		model.refreshViewport()
-		return waitForEvent(model.active)
-	case gateway.EventCompleted:
-		model.lines = append(model.lines, "assistant: "+event.Text)
-		model.history = append(model.history, schema.AssistantMessage(event.Text, nil))
-		model.partial = ""
-		return model.finishRun()
-	case gateway.EventCanceled:
-		if model.partial != "" {
-			model.lines = append(model.lines, "assistant (canceled): "+model.partial)
+	}
+	return model.nextCmd()
+}
+
+// applyAssistantMessage 累积助手文本，并把 ToolCalls 显示为 Tool 开始。
+func (model *Model) applyAssistantMessage(message *schema.Message) {
+	if message.Content != "" {
+		model.partial += message.Content
+	}
+	for _, call := range message.ToolCalls {
+		name := call.Function.Name
+		if name == "" {
+			name = call.ID
 		}
-		model.partial = ""
-		return model.finishRun()
-	case gateway.EventFailed:
-		if model.partial != "" {
-			model.lines = append(model.lines, "assistant (partial): "+model.partial)
-		}
-		model.partial = ""
-		if event.Err != nil {
-			logger.Error("Gateway run failed", zap.Error(event.Err))
-			model.lines = append(model.lines, "error: "+event.Err.Error())
-		} else {
-			model.lines = append(model.lines, "error: Gateway run failed")
-		}
-		return model.finishRun()
-	default:
-		logger.Error("unknown Gateway event", zap.String("event_kind", string(event.Kind)))
-		return waitForEvent(model.active)
+		model.lines = append(model.lines, fmt.Sprintf("tool: %s started", name))
 	}
 }
 
-// finishRun 回到空闲状态，并异步关闭已完成的流。
+// finishCompleted 把累积的助手文本写入历史后回到空闲。
+func (model *Model) finishCompleted() tea.Cmd {
+	if model.partial != "" {
+		model.lines = append(model.lines, "assistant: "+model.partial)
+		model.history = append(model.history, schema.AssistantMessage(model.partial, nil))
+		model.partial = ""
+	}
+	return model.finishRun()
+}
+
+// finishCanceled 只展示部分输出，不写入下一轮历史。
+func (model *Model) finishCanceled() tea.Cmd {
+	if model.partial != "" {
+		model.lines = append(model.lines, "assistant (canceled): "+model.partial)
+		model.partial = ""
+	}
+	return model.finishRun()
+}
+
+// finishFailed 只展示部分输出和错误，不写入下一轮历史。
+func (model *Model) finishFailed(err error) tea.Cmd {
+	if model.partial != "" {
+		model.lines = append(model.lines, "assistant (partial): "+model.partial)
+		model.partial = ""
+	}
+	if err != nil {
+		logger.Error("agent run failed", zap.Error(err))
+		model.lines = append(model.lines, "error: "+err.Error())
+	} else {
+		model.lines = append(model.lines, "error: agent run failed")
+	}
+	return model.finishRun()
+}
+
+// finishRun 回到空闲状态并释放本次运行资源。
 func (model *Model) finishRun() tea.Cmd {
-	stream := model.active
+	model.closeMessageStream()
 	model.resetRun()
 	model.refreshViewport()
-	if stream == nil {
-		return nil
-	}
-	return closeStream(stream)
+	return nil
 }
 
 // resetRun 清除进行中的运行状态，但不修改对话历史。
 func (model *Model) resetRun() {
 	model.state = stateIdle
 	model.status = "idle · Enter send · Ctrl+C quit"
-	model.active = nil
+	model.iter = nil
+	model.closeMessageStream()
+	if model.runCancel != nil {
+		model.runCancel()
+	}
 	model.runCancel = nil
 	model.runContext = nil
 }
 
-// waitForEvent 创建一次阻塞流接收的 Bubble Tea 命令。
-func waitForEvent(stream gateway.EventStream) tea.Cmd {
-	// receiveEvent 在 Update 方法外执行一次阻塞读取。
+// canceled 报告调用方是否已取消本次运行。
+func (model *Model) canceled() bool {
+	return model.runContext != nil && model.runContext.Err() != nil
+}
+
+// closeMessageStream 关闭尚未读完的助手消息流。
+func (model *Model) closeMessageStream() {
+	if model.msgStream == nil {
+		return
+	}
+	model.msgStream.Close()
+	model.msgStream = nil
+}
+
+// waitForAgentEvent 在 Update 方法外阻塞读取下一条 ADK 事件。
+func waitForAgentEvent(iter *adk.AsyncIterator[*adk.AgentEvent]) tea.Cmd {
 	return func() tea.Msg {
-		event, err := stream.Recv()
-		return gatewayEventMessage{event: event, err: err}
+		event, ok := iter.Next()
+		if !ok {
+			return agentEventMessage{ended: true}
+		}
+		return agentEventMessage{event: event}
 	}
 }
 
-// closeStream 创建释放一个 Gateway 流的 Bubble Tea 命令。
-func closeStream(stream gateway.EventStream) tea.Cmd {
-	// releaseStream 在 Update 方法外关闭流。
+// waitForChunk 在 Update 方法外阻塞读取一个助手流分片。
+func waitForChunk(stream *schema.StreamReader[*schema.Message]) tea.Cmd {
 	return func() tea.Msg {
-		return streamCloseMessage{err: stream.Close()}
+		message, err := stream.Recv()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return messageChunkMessage{eof: true}
+			}
+			return messageChunkMessage{err: err}
+		}
+		return messageChunkMessage{message: message}
 	}
 }
 

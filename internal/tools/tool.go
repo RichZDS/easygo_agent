@@ -17,7 +17,7 @@ func NewAgentTool() *AgentTool {
 	return &AgentTool{}
 }
 
-// AllTools 逐个构造内置 Tool 并收集到切片中，供 Gateway 一次性绑定。
+// AllTools 逐个构造内置 Tool 并收集到切片中，供 Agent 一次性绑定。
 func (t *AgentTool) AllTools(ctx context.Context) ([]tool.BaseTool, error) {
 	var all []tool.BaseTool
 

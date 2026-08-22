@@ -1,5 +1,4 @@
 agent:
-  system_prompt: You are a helpful assistant.
   max_steps: 8
 
 model:

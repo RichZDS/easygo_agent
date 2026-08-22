@@ -1,30 +1,30 @@
 // Package gateway 对外暴露与传输无关的 Agent 执行缝。
 package gateway
 
-import "context"
+import (
+	"context"
 
-// Role 标识一种稳定的对话角色。
-type Role string
+	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/schema"
+)
+
+// Message 直接复用 Eino 原生消息结构，信息流通零转换。
+type Message = schema.Message
+
+// Role 直接复用 Eino 原生角色类型。
+type Role = schema.RoleType
 
 const (
 	// RoleSystem 标识系统指令。
-	RoleSystem Role = "system"
+	RoleSystem = schema.System
 	// RoleUser 标识用户输入。
-	RoleUser Role = "user"
+	RoleUser = schema.User
 	// RoleAssistant 标识已完成的助手输出。
-	RoleAssistant Role = "assistant"
+	RoleAssistant = schema.Assistant
 )
 
-// Message 是模板 Gateway 接受的稳定纯文本消息。
-type Message struct {
-	Role    Role
-	Content string
-}
-
-// Request 包含一次运行所需的当前进程完整对话。
-type Request struct {
-	Messages []Message
-}
+// Request 直接复用 Eino ADK 原生 Agent 输入。
+type Request = adk.AgentInput
 
 // EventKind 标识一种稳定的对外流式事件。
 type EventKind string

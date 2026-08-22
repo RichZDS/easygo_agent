@@ -9,11 +9,11 @@ import (
 
 	"easygo-agent/internal/logger"
 
+	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/prebuilt/deep"
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
-	"github.com/cloudwego/eino/compose"
-	"github.com/cloudwego/eino/flow/agent"
 	"github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
 	callbacktemplate "github.com/cloudwego/eino/utils/callbacks"
@@ -25,7 +25,7 @@ import (
 
 // Gateway 在稳定 Runner 接口后面持有 Eino ReAct 执行。
 type Gateway struct {
-	agent        *react.Agent
+	agent        adk.TypedAgent[*schema.Message]
 	tracer       trace.Tracer
 	traceHandler callbacks.Handler
 }
@@ -56,15 +56,22 @@ func New(
 		traceHandler = callbacks.NewHandlerBuilder().Build()
 	}
 
-	reactAgent, err := react.NewAgent(ctx, &react.AgentConfig{
-		ToolCallingModel: chatModel,
-		ToolsConfig: compose.ToolsNodeConfig{
-			Tools: tools,
-		},
-		MaxStep:       cfg.MaxSteps,
-		GraphName:     "TemplateReActAgent",
-		ModelNodeName: "ChatModel",
-		ToolsNodeName: "Tools",
+	// reactAgent, err := react.NewAgent(ctx, &react.AgentConfig{
+	// 	ToolCallingModel: chatModel,
+	// 	ToolsConfig: compose.ToolsNodeConfig{
+	// 		Tools: tools,
+	// 	},
+	// 	MaxStep:       cfg.MaxSteps,
+	// 	GraphName:     "TemplateReActAgent",
+	// 	ModelNodeName: "ChatModel",
+	// 	ToolsNodeName: "Tools",
+	// })
+
+	agent, err := deep.New(ctx, &deep.Config{
+		Name:         "deep-agent",
+		ChatModel:    chatModel,
+		SubAgents:    []adk.Agent{},
+		MaxIteration: 100,
 	})
 	if err != nil {
 		wrappedErr := fmt.Errorf("create Eino ReAct Agent: %w", err)
@@ -72,7 +79,7 @@ func New(
 		return nil, wrappedErr
 	}
 	return &Gateway{
-		agent:        reactAgent,
+		agent:        agent,
 		tracer:       tracer,
 		traceHandler: traceHandler,
 	}, nil
@@ -80,12 +87,12 @@ func New(
 
 // Run 校验一次请求并启动其独立事件流。
 func (gateway *Gateway) Run(ctx context.Context, request Request) (EventStream, error) {
-	messages, err := gateway.convertMessages(request.Messages)
-	if err != nil {
+	if err := validateMessages(request.Messages); err != nil {
 		wrappedErr := fmt.Errorf("validate Gateway request: %w", err)
 		logger.Error("start Gateway run failed", zap.String("stage", "request"), zap.Error(wrappedErr))
 		return nil, wrappedErr
 	}
+	request.EnableStreaming = true
 
 	runCtx, cancel := context.WithCancel(ctx)
 	runCtx, rootSpan := gateway.tracer.Start(runCtx, "agent.run")
@@ -95,7 +102,7 @@ func (gateway *Gateway) Run(ctx context.Context, request Request) (EventStream, 
 
 	// executeRun 负责 Eino 启动与流式读取，直到资源全部释放。
 	go func() {
-		terminal := gateway.executeRun(runCtx, messages, stream, handlers)
+		terminal := gateway.executeRun(runCtx, &request, stream, handlers)
 		if terminal.Kind == EventFailed {
 			rootSpan.RecordError(terminal.Err)
 			rootSpan.SetStatus(codes.Error, "run failed")
@@ -107,40 +114,76 @@ func (gateway *Gateway) Run(ctx context.Context, request Request) (EventStream, 
 	return stream, nil
 }
 
-// executeRun 异步启动 Eino，以便调用方可在首个模型分片前取消。
-func (gateway *Gateway) executeRun(ctx context.Context, messages []*schema.Message, stream *eventStream, handlers []callbacks.Handler) Event {
-	einoStream, err := gateway.agent.Stream(
-		ctx,
-		messages,
-		agent.WithComposeOptions(compose.WithCallbacks(handlers...)),
-	)
-	if err != nil {
+// executeRun 异步启动 Eino ADK，以便调用方可在首个模型分片前取消。
+func (gateway *Gateway) executeRun(ctx context.Context, input *adk.AgentInput, stream *eventStream, handlers []callbacks.Handler) Event {
+	iter := gateway.agent.Run(ctx, input, adk.WithCallbacks(handlers...))
+	return gateway.consumeRun(ctx, iter, stream)
+}
+
+// consumeRun 将 Eino ADK 事件投影为稳定 Gateway 事件。
+func (gateway *Gateway) consumeRun(ctx context.Context, iter *adk.AsyncIterator[*adk.AgentEvent], stream *eventStream) Event {
+	var content strings.Builder
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			return Event{Kind: EventCompleted, Text: content.String()}
+		}
 		if ctx.Err() != nil {
 			return Event{Kind: EventCanceled}
 		}
-		wrappedErr := fmt.Errorf("start Eino ReAct stream: %w", err)
-		logger.Error("start Gateway run failed", zap.String("stage", "react_stream"), zap.Error(wrappedErr))
-		return Event{Kind: EventFailed, Err: wrappedErr}
+		if event == nil {
+			continue
+		}
+		if event.Err != nil {
+			if ctx.Err() != nil {
+				return Event{Kind: EventCanceled}
+			}
+			wrappedErr := fmt.Errorf("receive Eino ADK stream: %w", event.Err)
+			logger.Error("consume Gateway run failed", zap.String("stage", "stream_receive"), zap.Error(wrappedErr))
+			return Event{Kind: EventFailed, Err: wrappedErr}
+		}
+		if event.Output == nil || event.Output.MessageOutput == nil {
+			continue
+		}
+		if terminal := gateway.consumeMessageOutput(ctx, event.Output.MessageOutput, stream, &content); terminal != nil {
+			return *terminal
+		}
 	}
-	defer einoStream.Close()
-	return gateway.consumeRun(ctx, einoStream, stream)
 }
 
-// consumeRun 将 Eino 消息分片投影为稳定 Gateway 事件。
-func (gateway *Gateway) consumeRun(ctx context.Context, einoStream *schema.StreamReader[*schema.Message], stream *eventStream) Event {
-	var content strings.Builder
+// consumeMessageOutput 只把助手文本投影到 Gateway 流；非助手输出直接丢弃。
+func (gateway *Gateway) consumeMessageOutput(ctx context.Context, output *adk.MessageVariant, stream *eventStream, content *strings.Builder) *Event {
+	if output.IsStreaming && output.MessageStream != nil {
+		output.MessageStream.SetAutomaticClose()
+		if output.Role != schema.Assistant {
+			output.MessageStream.Close()
+			return nil
+		}
+		return gateway.consumeMessageStream(ctx, output.MessageStream, stream, content)
+	}
+	if output.Role != schema.Assistant || output.Message == nil || output.Message.Content == "" {
+		return nil
+	}
+	content.WriteString(output.Message.Content)
+	stream.emit(Event{Kind: EventTextDelta, Text: output.Message.Content})
+	return nil
+}
+
+// consumeMessageStream 将一条助手消息流的分片投影为 text_delta。
+func (gateway *Gateway) consumeMessageStream(ctx context.Context, einoStream *schema.StreamReader[*schema.Message], stream *eventStream, content *strings.Builder) *Event {
+	defer einoStream.Close()
 	for {
 		message, err := einoStream.Recv()
 		if err != nil {
 			if ctx.Err() != nil {
-				return Event{Kind: EventCanceled}
+				return &Event{Kind: EventCanceled}
 			}
 			if errors.Is(err, io.EOF) {
-				return Event{Kind: EventCompleted, Text: content.String()}
+				return nil
 			}
-			wrappedErr := fmt.Errorf("receive Eino ReAct stream: %w", err)
+			wrappedErr := fmt.Errorf("receive Eino ADK stream: %w", err)
 			logger.Error("consume Gateway run failed", zap.String("stage", "stream_receive"), zap.Error(wrappedErr))
-			return Event{Kind: EventFailed, Err: wrappedErr}
+			return &Event{Kind: EventFailed, Err: wrappedErr}
 		}
 		if message == nil || message.Content == "" {
 			continue
@@ -150,35 +193,33 @@ func (gateway *Gateway) consumeRun(ctx context.Context, einoStream *schema.Strea
 	}
 }
 
-// convertMessages 校验稳定角色并把它们转换成 Eino 消息。
-func (gateway *Gateway) convertMessages(messages []Message) ([]*schema.Message, error) {
+// validateMessages 校验 Eino 原生消息，保证 Gateway 只接受完整文本对话。
+func validateMessages(messages []*schema.Message) error {
 	if len(messages) == 0 {
 		err := errors.New("request messages cannot be empty")
-		logger.Error("convert Gateway messages failed", zap.Error(err))
-		return nil, err
+		logger.Error("validate Gateway messages failed", zap.Error(err))
+		return err
 	}
-	converted := make([]*schema.Message, 0, len(messages))
 	for index, message := range messages {
-		content := strings.TrimSpace(message.Content)
-		if content == "" {
+		if message == nil {
+			err := fmt.Errorf("message %d cannot be nil", index)
+			logger.Error("validate Gateway messages failed", zap.Int("message_index", index), zap.Error(err))
+			return err
+		}
+		if strings.TrimSpace(message.Content) == "" {
 			err := fmt.Errorf("message %d content cannot be empty", index)
-			logger.Error("convert Gateway messages failed", zap.Int("message_index", index), zap.Error(err))
-			return nil, err
+			logger.Error("validate Gateway messages failed", zap.Int("message_index", index), zap.Error(err))
+			return err
 		}
 		switch message.Role {
-		case RoleSystem:
-			converted = append(converted, schema.SystemMessage(content))
-		case RoleUser:
-			converted = append(converted, schema.UserMessage(content))
-		case RoleAssistant:
-			converted = append(converted, schema.AssistantMessage(content, nil))
+		case schema.System, schema.User, schema.Assistant:
 		default:
 			err := fmt.Errorf("message %d has unsupported role %q", index, message.Role)
-			logger.Error("convert Gateway messages failed", zap.Int("message_index", index), zap.Error(err))
-			return nil, err
+			logger.Error("validate Gateway messages failed", zap.Int("message_index", index), zap.Error(err))
+			return err
 		}
 	}
-	return converted, nil
+	return nil
 }
 
 // newToolEventHandler 投影 Tool 生命周期 callback，且不携带载荷。

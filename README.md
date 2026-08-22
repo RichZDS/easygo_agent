@@ -8,8 +8,7 @@
 - transport-neutral Gateway；
 - Eino 原生 classic ReAct Agent；
 - 单个 OpenAI-compatible 模型；
-- Eino 原生 Calculator Tool；
-- 可选 OpenTelemetry stdout tracing。
+- Eino 原生 Calculator Tool。
 
 ## 非目标
 
@@ -21,8 +20,6 @@
 TUI adapter ---> Gateway ---> Eino ReAct
                    |             |-- OpenAI-compatible model
 future adapter ----+             `-- Calculator Tool
-                   |
-                   `-----------> OpenTelemetry callbacks
 ```
 
 Gateway 隐藏 Eino message、stream 和 callback 细节。TUI 只依赖稳定的请求与事件；未来项目可以在同一个 Gateway 外增加 HTTP、gRPC 或消息队列 adapter。
@@ -47,10 +44,6 @@ model:
   base_url: ""
   timeout: 120s
   apikey: "{EASYGO_AGENT_API_KEY}"
-
-tracing:
-  enabled: false
-  exporter: stdout
 ```
 
 API Key 在 YAML 中通过 `{ENV}` 引用环境变量；环境变量可从项目根目录 `.env` 加载：
@@ -89,18 +82,6 @@ operation = add | subtract | multiply | divide
 ```
 
 它不访问网络、文件系统或数据库，用于展示 Tool schema、ReAct 调用、流式事件和确定性测试。
-
-## Tracing
-
-将 `configs/config.yaml` 改为：
-
-```yaml
-tracing:
-  enabled: true
-  exporter: stdout
-```
-
-程序会输出 `agent.run`、模型和 Tool spans。默认不记录 API Key、prompt、response、Tool 参数或 Tool 输出。衍生项目可以在应用装配层把 stdout exporter 换成 OTLP。
 
 ## 验证
 

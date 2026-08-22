@@ -12,6 +12,3 @@ subagent:
   base_url: "https://api.deepseek.com"
   timeout: 120s
   apikey: "{SUBMODEL_API_KEY}"
-tracing:
-  enabled: false
-  exporter: stdout

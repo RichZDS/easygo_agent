@@ -17,17 +17,12 @@ import (
 	"github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
 	callbacktemplate "github.com/cloudwego/eino/utils/callbacks"
-	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
-	"go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/zap"
 )
 
 // Gateway 在稳定 Runner 接口后面持有 Eino ReAct 执行。
 type Gateway struct {
-	agent        adk.TypedAgent[*schema.Message]
-	tracer       trace.Tracer
-	traceHandler callbacks.Handler
+	agent adk.TypedAgent[*schema.Message]
 }
 
 // New 构造一个并发安全的 Eino ReAct Gateway。
@@ -36,8 +31,6 @@ func New(
 	cfg Config,
 	chatModel model.ToolCallingChatModel,
 	tools []tool.BaseTool,
-	tracer trace.Tracer,
-	traceHandler callbacks.Handler,
 ) (*Gateway, error) {
 	if cfg.MaxSteps <= 0 {
 		err := errors.New("Gateway max steps must be greater than zero")
@@ -48,12 +41,6 @@ func New(
 		err := errors.New("Gateway chat model cannot be nil")
 		logger.Error("create Gateway failed", zap.String("field", "chat_model"), zap.Error(err))
 		return nil, err
-	}
-	if tracer == nil {
-		tracer = noop.NewTracerProvider().Tracer("easygo-agent")
-	}
-	if traceHandler == nil {
-		traceHandler = callbacks.NewHandlerBuilder().Build()
 	}
 
 	// reactAgent, err := react.NewAgent(ctx, &react.AgentConfig{
@@ -78,11 +65,7 @@ func New(
 		logger.Error("create Gateway failed", zap.Error(wrappedErr))
 		return nil, wrappedErr
 	}
-	return &Gateway{
-		agent:        agent,
-		tracer:       tracer,
-		traceHandler: traceHandler,
-	}, nil
+	return &Gateway{agent: agent}, nil
 }
 
 // Run 校验一次请求并启动其独立事件流。
@@ -95,19 +78,12 @@ func (gateway *Gateway) Run(ctx context.Context, request Request) (EventStream, 
 	request.EnableStreaming = true
 
 	runCtx, cancel := context.WithCancel(ctx)
-	runCtx, rootSpan := gateway.tracer.Start(runCtx, "agent.run")
 	stream := newEventStream(cancel)
 	toolHandler := gateway.newToolEventHandler(stream)
-	handlers := []callbacks.Handler{toolHandler, gateway.traceHandler}
 
 	// executeRun 负责 Eino 启动与流式读取，直到资源全部释放。
 	go func() {
-		terminal := gateway.executeRun(runCtx, &request, stream, handlers)
-		if terminal.Kind == EventFailed {
-			rootSpan.RecordError(terminal.Err)
-			rootSpan.SetStatus(codes.Error, "run failed")
-		}
-		rootSpan.End()
+		terminal := gateway.executeRun(runCtx, &request, stream, []callbacks.Handler{toolHandler})
 		cancel()
 		stream.finish(terminal)
 	}()

@@ -23,24 +23,14 @@ import (
 
 type programRunner func(*tea.Program) (tea.Model, error)
 
-// Run 加载配置并运行终端应用。
-func Run(ctx context.Context, configPath string) error {
-	// 运行应用
-	err := run(ctx, configPath, os.LookupEnv, runTeaProgram)
-	if err != nil {
-		logger.Error("application failed", zap.String("stage", "app_run"), zap.Error(err))
-		return err
-	}
-	return nil
-}
+var (
+	lookupEnv                = os.LookupEnv
+	runProgram programRunner = runTeaProgram
+)
 
-// run 组装依赖；测试可注入环境查找与终端执行。
-func run(
-	ctx context.Context,
-	configPath string,
-	lookupEnv func(string) (string, bool),
-	runProgram programRunner, // Bubble Tea
-) (resultErr error) {
+// Run 加载配置并运行终端应用。
+func Run(ctx context.Context, configPath string) (resultErr error) {
+	// 运行应用
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -121,6 +111,10 @@ func run(
 		wrappedErr := fmt.Errorf("run terminal UI: %w", err)
 		logger.Error("assemble application failed", zap.String("stage", "tui"), zap.Error(wrappedErr))
 		return wrappedErr
+	}
+	if err != nil {
+		logger.Error("application failed", zap.String("stage", "app_run"), zap.Error(err))
+		return err
 	}
 	return nil
 }

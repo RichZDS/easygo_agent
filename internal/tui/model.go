@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"easygo-agent/internal/gateway"
@@ -14,6 +15,7 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/cloudwego/eino/schema"
 	"go.uber.org/zap"
 )
 
@@ -40,7 +42,7 @@ type Model struct {
 	input      textarea.Model
 	viewport   viewport.Model
 	state      runState
-	history    []gateway.Message
+	history    []*schema.Message
 	lines      []string
 	partial    string
 	active     gateway.EventStream
@@ -72,7 +74,7 @@ func New(runner gateway.Runner, systemPrompt string) *Model {
 		height:   24,
 	}
 	if prompt := strings.TrimSpace(systemPrompt); prompt != "" {
-		model.history = append(model.history, gateway.Message{Role: gateway.RoleSystem, Content: prompt})
+		model.history = append(model.history, schema.SystemMessage(prompt))
 	}
 	model.refreshViewport()
 	return model
@@ -139,12 +141,12 @@ func (model *Model) submit() tea.Cmd {
 	}
 	model.input.Reset()
 	model.lines = append(model.lines, "you: "+content)
-	model.history = append(model.history, gateway.Message{Role: gateway.RoleUser, Content: content})
+	model.history = append(model.history, schema.UserMessage(content))
 	model.partial = ""
 	model.state = stateRunning
 	model.status = "running · Ctrl+C cancel"
 	model.runContext, model.runCancel = context.WithCancel(context.Background())
-	request := gateway.Request{Messages: append([]gateway.Message(nil), model.history...)}
+	request := gateway.Request{Messages: slices.Clone(model.history)}
 	stream, err := model.runner.Run(model.runContext, request)
 	if err != nil {
 		logger.Error("start TUI run failed", zap.Error(err))
@@ -189,7 +191,7 @@ func (model *Model) applyGatewayEvent(message gatewayEventMessage) tea.Cmd {
 		return waitForEvent(model.active)
 	case gateway.EventCompleted:
 		model.lines = append(model.lines, "assistant: "+event.Text)
-		model.history = append(model.history, gateway.Message{Role: gateway.RoleAssistant, Content: event.Text})
+		model.history = append(model.history, schema.AssistantMessage(event.Text, nil))
 		model.partial = ""
 		return model.finishRun()
 	case gateway.EventCanceled:

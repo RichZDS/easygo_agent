@@ -1,65 +1,81 @@
 package tui
 
 import (
-	"context"
 	"errors"
 	"strings"
 	"testing"
 
-	"github.com/cloudwego/eino/adk"
-	"github.com/cloudwego/eino/schema"
+	agentruntime "easygo-agent/internal/agent/runtime"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-type fakeAgent struct {
-	calls int
+type fakeConversation struct {
+	calls  int
+	inputs []string
+	run    *fakeRun
+	err    error
 }
 
-func (agent *fakeAgent) Name(context.Context) string { return "fake" }
-
-func (agent *fakeAgent) Description(context.Context) string { return "fake" }
-
-// Run 记录一次调用并立即关闭迭代器；测试通过 Update 注入事件。
-func (agent *fakeAgent) Run(context.Context, *adk.TypedAgentInput[*schema.AgenticMessage], ...adk.AgentRunOption) *adk.AsyncIterator[*adk.TypedAgentEvent[*schema.AgenticMessage]] {
-	agent.calls++
-	iter, gen := adk.NewAsyncIteratorPair[*adk.TypedAgentEvent[*schema.AgenticMessage]]()
-	gen.Close()
-	return iter
-}
-
-// TestCompletedRunAppendsHistory 验证完整助手文本会写入下一轮历史。
-func TestCompletedRunAppendsHistory(t *testing.T) {
-	t.Parallel()
-
-	agent := &fakeAgent{}
-	model := New(agent, "system")
-	model.input.SetValue("hello")
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
-	model = applyAgentEvent(t, model, adk.EventFromAgenticMessage(assistantAgenticMessage("final"), nil, schema.AgenticRoleTypeAssistant))
-	model = applyAgentEnded(t, model)
-
-	if got := model.history[len(model.history)-1]; got.Role != schema.AgenticRoleTypeAssistant || assistantText(got) != "final" {
-		t.Fatalf("last history message = %#v", got)
+func (conversation *fakeConversation) Start(input string) (agentruntime.Run, error) {
+	conversation.calls++
+	conversation.inputs = append(conversation.inputs, input)
+	if conversation.err != nil {
+		return nil, conversation.err
 	}
-	if !strings.Contains(model.transcript(), "assistant: final") {
-		t.Fatalf("transcript = %q", model.transcript())
+	if conversation.run == nil {
+		conversation.run = &fakeRun{}
 	}
+	return conversation.run, nil
 }
 
-// TestFailedRunDoesNotAppendPartialHistory 验证失败时的部分输出只用于展示。
-func TestFailedRunDoesNotAppendPartialHistory(t *testing.T) {
+type fakeRun struct {
+	events   []agentruntime.Event
+	next     int
+	canceled bool
+}
+
+func (run *fakeRun) Next() agentruntime.Event {
+	if run.next >= len(run.events) {
+		return agentruntime.Event{Kind: agentruntime.EventCompleted}
+	}
+	event := run.events[run.next]
+	run.next++
+	return event
+}
+
+func (run *fakeRun) Cancel() {
+	run.canceled = true
+}
+
+// TestCompletedRunAppearsInTranscript 验证完整助手文本会固定到 transcript。
+func TestCompletedRunAppearsInTranscript(t *testing.T) {
 	t.Parallel()
 
 	model := submittedModel(t)
-	wantHistory := len(model.history)
-	model = applyAgentEvent(t, model, adk.EventFromAgenticMessage(assistantAgenticMessage("partial"), nil, schema.AgenticRoleTypeAssistant))
-	model = applyAgentEvent(t, model, &adk.TypedAgentEvent[*schema.AgenticMessage]{Err: errors.New("model failed")})
+	model = applyRunEvent(t, model, agentruntime.Event{Kind: agentruntime.EventTextDelta, Text: "fin"})
+	model = applyRunEvent(t, model, agentruntime.Event{Kind: agentruntime.EventCompleted, Text: "final"})
 
-	if len(model.history) != wantHistory {
-		t.Fatalf("history length = %d, want %d", len(model.history), wantHistory)
+	if !strings.Contains(model.transcript(), "assistant: final") {
+		t.Fatalf("transcript = %q", model.transcript())
 	}
-	if !strings.Contains(model.transcript(), "partial") || !strings.Contains(model.transcript(), "model failed") {
+	if model.state != stateIdle {
+		t.Fatalf("state = %v, want idle", model.state)
+	}
+}
+
+// TestFailedRunKeepsPartialOutput 验证失败时的部分输出只用于展示。
+func TestFailedRunKeepsPartialOutput(t *testing.T) {
+	t.Parallel()
+
+	model := submittedModel(t)
+	model = applyRunEvent(t, model, agentruntime.Event{
+		Kind: agentruntime.EventFailed,
+		Text: "partial",
+		Err:  errors.New("model failed"),
+	})
+
+	if !strings.Contains(model.transcript(), "assistant (partial): partial") || !strings.Contains(model.transcript(), "model failed") {
 		t.Fatalf("transcript = %q", model.transcript())
 	}
 }
@@ -68,14 +84,13 @@ func TestFailedRunDoesNotAppendPartialHistory(t *testing.T) {
 func TestControlCCancelsWhileRunningAndQuitsWhileIdle(t *testing.T) {
 	t.Parallel()
 
-	model := submittedModel(t)
+	run := &fakeRun{}
+	model := submittedModelWith(t, &fakeConversation{run: run})
 	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyCtrlC})
-	select {
-	case <-model.runContext.Done():
-	default:
-		t.Fatal("running Ctrl+C did not cancel the run context")
+	if !run.canceled {
+		t.Fatal("running Ctrl+C did not cancel the active run")
 	}
-	model = applyAgentEnded(t, model)
+	model = applyRunEvent(t, model, agentruntime.Event{Kind: agentruntime.EventCanceled})
 	if model.state != stateIdle {
 		t.Fatalf("state = %v, want idle", model.state)
 	}
@@ -90,38 +105,28 @@ func TestControlCCancelsWhileRunningAndQuitsWhileIdle(t *testing.T) {
 	}
 }
 
-// TestDuplicateSubmitIsIgnored 验证同一时刻只有一条活动流。
+// TestDuplicateSubmitIsIgnored 验证 TUI 在运行中不会发起第二次会话运行。
 func TestDuplicateSubmitIsIgnored(t *testing.T) {
 	t.Parallel()
 
-	agent := &fakeAgent{}
-	model := New(agent, "system")
+	conversation := &fakeConversation{}
+	model := New(conversation)
 	model.input.SetValue("first")
 	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
 	model.input.SetValue("second")
 	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
-	if agent.calls != 1 {
-		t.Fatalf("Agent calls = %d, want 1", agent.calls)
+	if conversation.calls != 1 {
+		t.Fatalf("Start calls = %d, want 1", conversation.calls)
 	}
 }
 
-// TestAgenticToolBlocksAppearInTranscript 验证 Tool 调用与结果走 ContentBlock。
-func TestAgenticToolBlocksAppearInTranscript(t *testing.T) {
+// TestToolEventsAppearInTranscript 验证 Tool 语义事件只负责展示。
+func TestToolEventsAppearInTranscript(t *testing.T) {
 	t.Parallel()
 
 	model := submittedModel(t)
-	model = applyAgentEvent(t, model, adk.EventFromAgenticMessage(&schema.AgenticMessage{
-		Role: schema.AgenticRoleTypeAssistant,
-		ContentBlocks: []*schema.ContentBlock{
-			schema.NewContentBlock(&schema.FunctionToolCall{Name: "calculator", CallID: "call-1"}),
-		},
-	}, nil, schema.AgenticRoleTypeAssistant))
-	model = applyAgentEvent(t, model, adk.EventFromAgenticMessage(&schema.AgenticMessage{
-		Role: schema.AgenticRoleTypeUser,
-		ContentBlocks: []*schema.ContentBlock{
-			schema.NewContentBlock(&schema.FunctionToolResult{Name: "calculator", CallID: "call-1"}),
-		},
-	}, nil, schema.AgenticRoleTypeUser))
+	model = applyRunEvent(t, model, agentruntime.Event{Kind: agentruntime.EventToolStarted, Tool: "calculator"})
+	model = applyRunEvent(t, model, agentruntime.Event{Kind: agentruntime.EventToolFinished, Tool: "calculator"})
 
 	if !strings.Contains(model.transcript(), "tool: calculator started") {
 		t.Fatalf("transcript missing tool start: %q", model.transcript())
@@ -131,19 +136,32 @@ func TestAgenticToolBlocksAppearInTranscript(t *testing.T) {
 	}
 }
 
-// submittedModel 返回已有一次活动运行的 TUI 模型。
+// TestStartFailureIsRendered 验证会话模块启动失败时 TUI 回到可输入状态。
+func TestStartFailureIsRendered(t *testing.T) {
+	t.Parallel()
+
+	model := New(&fakeConversation{err: errors.New("cannot start")})
+	model.input.SetValue("hello")
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+	if model.state != stateIdle || !strings.Contains(model.transcript(), "cannot start") {
+		t.Fatalf("state = %v, transcript = %q", model.state, model.transcript())
+	}
+}
+
 func submittedModel(t *testing.T) *Model {
 	t.Helper()
+	return submittedModelWith(t, &fakeConversation{})
+}
 
-	model := New(&fakeAgent{}, "system")
+func submittedModelWith(t *testing.T, conversation *fakeConversation) *Model {
+	t.Helper()
+	model := New(conversation)
 	model.input.SetValue("hello")
 	return updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
 }
 
-// updateModel 应用一条 Bubble Tea 消息并返回具体模型。
 func updateModel(t *testing.T, model *Model, message tea.Msg) *Model {
 	t.Helper()
-
 	updated, _ := model.Update(message)
 	concrete, ok := updated.(*Model)
 	if !ok {
@@ -152,16 +170,7 @@ func updateModel(t *testing.T, model *Model, message tea.Msg) *Model {
 	return concrete
 }
 
-// applyAgentEvent 通过 Bubble Tea 更新路径投递一条原生 ADK 事件。
-func applyAgentEvent(t *testing.T, model *Model, event *adk.TypedAgentEvent[*schema.AgenticMessage]) *Model {
+func applyRunEvent(t *testing.T, model *Model, event agentruntime.Event) *Model {
 	t.Helper()
-
-	return updateModel(t, model, agentEventMessage{event: event})
-}
-
-// applyAgentEnded 通过 Bubble Tea 更新路径投递迭代器结束。
-func applyAgentEnded(t *testing.T, model *Model) *Model {
-	t.Helper()
-
-	return updateModel(t, model, agentEventMessage{ended: true})
+	return updateModel(t, model, runEventMessage{event: event})
 }

@@ -10,6 +10,7 @@ import (
 
 	"easygo-agent/internal/agent/chatmodel"
 	deepagent "easygo-agent/internal/agent/deepagent.go"
+	agentruntime "easygo-agent/internal/agent/runtime"
 	"easygo-agent/internal/config"
 	"easygo-agent/internal/logger"
 	"easygo-agent/internal/observability"
@@ -69,16 +70,17 @@ func Run(ctx context.Context, configPath string) (resultErr error) {
 		logger.Error("assemble application failed", zap.String("stage", "model"), zap.Error(wrappedErr))
 		return wrappedErr
 	}
-	// 构造 Eino Deep Agent，再交给 TUI 直接调用。
+	// 构造 Eino Deep Agent，并由独立会话模块管理运行、流和对话历史。
 	agent, err := deepagent.New(ctx, model, allTools, cfg.Agent)
 	if err != nil {
 		wrappedErr := fmt.Errorf("initialize agent: %w", err)
 		logger.Error("assemble application failed", zap.String("stage", "agent"), zap.Error(wrappedErr))
 		return wrappedErr
 	}
+	conversation := agentruntime.New(ctx, agent, prompt.SystemPrompt)
 	// 启动 Bubble Tea TUI，占用备用屏幕；退出后由 ctx 取消。
 	program := tea.NewProgram(
-		tui.New(agent, prompt.SystemPrompt),
+		tui.New(conversation),
 		tea.WithAltScreen(),
 		tea.WithContext(ctx),
 	)

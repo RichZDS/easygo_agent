@@ -16,12 +16,12 @@
 ## 架构
 
 ```text
-TUI adapter ---> Eino Deep Agent
-                     |-- OpenAI-compatible model
-                     `-- Calculator Tool
+TUI adapter ---> Agent Runtime ---> Eino Deep Agent
+                                      |-- OpenAI-compatible model
+                                      `-- Calculator Tool
 ```
 
-TUI 直接调用 `adk.TypedAgent[*schema.AgenticMessage].Run`，并消费原生 `TypedAgentEvent` 与 `schema.AgenticMessage` 流。
+`internal/tui` 只处理终端输入、状态和 transcript 展示。`internal/agent/runtime` 持有对话历史与运行生命周期，把 Eino 原生 `TypedAgentEvent` 和 `schema.AgenticMessage` 流投影成文本、Tool 状态和运行终态事件。
 
 ## 环境要求
 

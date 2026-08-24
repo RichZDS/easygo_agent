@@ -14,11 +14,12 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/schema"
 	"go.uber.org/zap"
 )
 
-// New 构造可并发调用的 Eino Deep Agent。
-func New(ctx context.Context, chatModel model.ToolCallingChatModel, tools []tool.BaseTool, cfg config.AgentConfig) (adk.Agent, error) {
+// New 构造可并发调用的 Eino Deep Agent，消息类型为 *schema.AgenticMessage。
+func New(ctx context.Context, chatModel model.AgenticModel, tools []tool.BaseTool, cfg config.AgentConfig) (adk.TypedAgent[*schema.AgenticMessage], error) {
 	if chatModel == nil {
 		err := errors.New("chat model cannot be nil")
 		logger.Error("create agent failed", zap.String("field", "chat_model"), zap.Error(err))
@@ -30,7 +31,7 @@ func New(ctx context.Context, chatModel model.ToolCallingChatModel, tools []tool
 		return nil, err
 	}
 
-	agent, err := deep.New(ctx, &deep.Config{
+	agent, err := deep.NewTyped(ctx, &deep.TypedConfig[*schema.AgenticMessage]{
 		Name:      "deep-agent",
 		ChatModel: chatModel,
 		ToolsConfig: adk.ToolsConfig{

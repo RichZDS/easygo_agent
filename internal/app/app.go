@@ -8,8 +8,8 @@ import (
 	"os"
 	"syscall"
 
-	deepagent "easygo-agent/internal/agent/deepagent.go"
 	"easygo-agent/internal/agent/chatmodel"
+	deepagent "easygo-agent/internal/agent/deepagent.go"
 	"easygo-agent/internal/config"
 	"easygo-agent/internal/logger"
 	"easygo-agent/internal/observability"

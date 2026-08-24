@@ -21,7 +21,7 @@ TUI adapter ---> Eino Deep Agent
                      `-- Calculator Tool
 ```
 
-TUI 直接调用 `adk.Agent.Run`，并消费原生 `AgentEvent` 与 `schema.Message` 流。
+TUI 直接调用 `adk.TypedAgent[*schema.AgenticMessage].Run`，并消费原生 `TypedAgentEvent` 与 `schema.AgenticMessage` 流。
 
 ## 环境要求
 

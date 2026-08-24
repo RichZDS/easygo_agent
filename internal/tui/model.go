@@ -19,6 +19,14 @@ import (
 	"go.uber.org/zap"
 )
 
+// 下列别名只缩短 TypedXxx[*schema.AgenticMessage] 的写法，语义与右侧 Eino 类型完全相同。
+type (
+	agenticAgent   = adk.TypedAgent[*schema.AgenticMessage]          // 以 AgenticMessage 为载体的 Agent
+	agenticEvent   = adk.TypedAgentEvent[*schema.AgenticMessage]     // Run 产出的单条 Agent 事件
+	agenticInput   = adk.TypedAgentInput[*schema.AgenticMessage]     // 一次 Run 的输入（历史消息 + 是否流式）
+	agenticVariant = adk.TypedMessageVariant[*schema.AgenticMessage] // 事件里的完整消息或消息流
+)
+
 type runState uint8
 
 const (
@@ -28,36 +36,38 @@ const (
 )
 
 type agentEventMessage struct {
-	event *adk.AgentEvent
+	event *agenticEvent
 	ended bool
 }
 
 type messageChunkMessage struct {
-	message *schema.Message
+	message *schema.AgenticMessage
 	err     error
 	eof     bool
 }
 
 // Model 是模板的最小 Bubble Tea 状态机。
 type Model struct {
-	agent      adk.Agent
-	input      textarea.Model
-	viewport   viewport.Model
-	state      runState
-	history    []*schema.Message
-	lines      []string
-	partial    string
-	iter       *adk.AsyncIterator[*adk.AgentEvent]
-	msgStream  *schema.StreamReader[*schema.Message]
-	runCancel  context.CancelFunc
-	runContext context.Context
-	status     string
-	width      int
-	height     int
+	agent         agenticAgent
+	input         textarea.Model
+	viewport      viewport.Model
+	state         runState
+	history       []*schema.AgenticMessage
+	lines         []string
+	partial       string
+	iter          *adk.AsyncIterator[*agenticEvent]            // 当前 Run 产出的 ADK 事件迭代器
+	msgStream     *schema.StreamReader[*schema.AgenticMessage] // AgenticMessage 流；有值时优先于 iter 消费
+	startedTools  map[string]struct{}
+	finishedTools map[string]struct{}
+	runCancel     context.CancelFunc
+	runContext    context.Context
+	status        string
+	width         int
+	height        int
 }
 
 // New 构造带有进程内对话历史的空闲 TUI。
-func New(agent adk.Agent, systemPrompt string) *Model {
+func New(agent agenticAgent, systemPrompt string) *Model {
 	input := textarea.New()
 	input.Placeholder = "Ask the agent..."
 	input.Prompt = "> "
@@ -77,7 +87,7 @@ func New(agent adk.Agent, systemPrompt string) *Model {
 		height:   24,
 	}
 	if prompt := strings.TrimSpace(systemPrompt); prompt != "" {
-		model.history = append(model.history, schema.SystemMessage(prompt))
+		model.history = append(model.history, schema.SystemAgenticMessage(prompt))
 	}
 	model.refreshViewport()
 	return model
@@ -104,8 +114,10 @@ func (model *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return model, nil
 		}
+		// ADK 迭代器产出的 AgentEvent：投影到 transcript，并继续拉下一条。
 	case agentEventMessage:
 		return model, model.applyAgentEvent(message)
+		// 助手消息流的一个分片：累积文本后继续 Recv，直到 EOF。
 	case messageChunkMessage:
 		return model, model.applyMessageChunk(message)
 	}
@@ -139,12 +151,14 @@ func (model *Model) submit() tea.Cmd {
 	}
 	model.input.Reset()
 	model.lines = append(model.lines, "you: "+content)
-	model.history = append(model.history, schema.UserMessage(content))
+	model.history = append(model.history, schema.UserAgenticMessage(content))
 	model.partial = ""
+	model.startedTools = nil
+	model.finishedTools = nil
 	model.state = stateRunning
 	model.status = "running · Ctrl+C cancel"
 	model.runContext, model.runCancel = context.WithCancel(context.Background())
-	model.iter = model.agent.Run(model.runContext, &adk.AgentInput{
+	model.iter = model.agent.Run(model.runContext, &agenticInput{
 		Messages:        slices.Clone(model.history),
 		EnableStreaming: true,
 	})
@@ -187,34 +201,21 @@ func (model *Model) applyAgentEvent(message agentEventMessage) tea.Cmd {
 	return model.applyMessageOutput(event.Output.MessageOutput)
 }
 
-// applyMessageOutput 按 Eino 原生 Role 处理助手文本或 Tool 结果。
-func (model *Model) applyMessageOutput(output *adk.MessageVariant) tea.Cmd {
+// applyMessageOutput 按 AgenticMessage 的 ContentBlock 处理助手文本或 Tool 结果。
+func (model *Model) applyMessageOutput(output *agenticVariant) tea.Cmd {
 	if output.IsStreaming && output.MessageStream != nil {
 		output.MessageStream.SetAutomaticClose()
-		if output.Role == schema.Assistant {
-			model.msgStream = output.MessageStream
-			return model.nextCmd()
-		}
-		if output.Role == schema.Tool {
-			model.lines = append(model.lines, fmt.Sprintf("tool: %s completed", output.ToolName))
-			model.refreshViewport()
-		}
-		output.MessageStream.Close()
+		model.msgStream = output.MessageStream
 		return model.nextCmd()
 	}
-	if output.Role == schema.Tool {
-		model.lines = append(model.lines, fmt.Sprintf("tool: %s completed", output.ToolName))
-		model.refreshViewport()
-		return model.nextCmd()
-	}
-	if output.Role == schema.Assistant && output.Message != nil {
-		model.applyAssistantMessage(output.Message)
+	if output.Message != nil {
+		model.applyAgenticMessage(output.Message)
 		model.refreshViewport()
 	}
 	return model.nextCmd()
 }
 
-// applyMessageChunk 消费助手消息流的一个分片。
+// applyMessageChunk 消费 AgenticMessage 流的一个分片。
 func (model *Model) applyMessageChunk(message messageChunkMessage) tea.Cmd {
 	if model.canceled() {
 		return model.finishCanceled()
@@ -232,31 +233,69 @@ func (model *Model) applyMessageChunk(message messageChunkMessage) tea.Cmd {
 		return model.finishFailed(wrappedErr)
 	}
 	if message.message != nil {
-		model.applyAssistantMessage(message.message)
+		model.applyAgenticMessage(message.message)
 		model.refreshViewport()
 	}
 	return model.nextCmd()
 }
 
-// applyAssistantMessage 累积助手文本，并把 ToolCalls 显示为 Tool 开始。
-func (model *Model) applyAssistantMessage(message *schema.Message) {
-	if message.Content != "" {
-		model.partial += message.Content
+// applyAgenticMessage 累积助手文本，并把 Tool 调用/结果投影到 transcript。
+func (model *Model) applyAgenticMessage(message *schema.AgenticMessage) {
+	if message == nil {
+		return
 	}
-	for _, call := range message.ToolCalls {
-		name := call.Function.Name
-		if name == "" {
-			name = call.ID
+	for _, block := range message.ContentBlocks {
+		if block == nil {
+			continue
 		}
-		model.lines = append(model.lines, fmt.Sprintf("tool: %s started", name))
+		if block.AssistantGenText != nil && block.AssistantGenText.Text != "" {
+			model.partial += block.AssistantGenText.Text
+		}
+		if block.FunctionToolCall != nil {
+			model.markToolLine("started", block.FunctionToolCall.Name, block.FunctionToolCall.CallID)
+		}
+		if block.FunctionToolResult != nil {
+			model.markToolLine("completed", block.FunctionToolResult.Name, block.FunctionToolResult.CallID)
+		}
 	}
+}
+
+// markToolLine 按 CallID 去重后追加 Tool 开始/完成行。
+func (model *Model) markToolLine(kind, name, callID string) {
+	key := callID
+	if key == "" {
+		key = name
+	}
+	if key == "" {
+		return
+	}
+	seen := model.startedTools
+	if kind == "completed" {
+		seen = model.finishedTools
+	}
+	if seen == nil {
+		seen = map[string]struct{}{}
+		if kind == "completed" {
+			model.finishedTools = seen
+		} else {
+			model.startedTools = seen
+		}
+	}
+	if _, ok := seen[key]; ok {
+		return
+	}
+	seen[key] = struct{}{}
+	if name == "" {
+		name = key
+	}
+	model.lines = append(model.lines, fmt.Sprintf("tool: %s %s", name, kind))
 }
 
 // finishCompleted 把累积的助手文本写入历史后回到空闲。
 func (model *Model) finishCompleted() tea.Cmd {
 	if model.partial != "" {
 		model.lines = append(model.lines, "assistant: "+model.partial)
-		model.history = append(model.history, schema.AssistantMessage(model.partial, nil))
+		model.history = append(model.history, assistantAgenticMessage(model.partial))
 		model.partial = ""
 	}
 	return model.finishRun()
@@ -300,6 +339,8 @@ func (model *Model) resetRun() {
 	model.status = "idle · Enter send · Ctrl+C quit"
 	model.iter = nil
 	model.closeMessageStream()
+	model.startedTools = nil
+	model.finishedTools = nil
 	if model.runCancel != nil {
 		model.runCancel()
 	}
@@ -322,7 +363,7 @@ func (model *Model) closeMessageStream() {
 }
 
 // waitForAgentEvent 在 Update 方法外阻塞读取下一条 ADK 事件。
-func waitForAgentEvent(iter *adk.AsyncIterator[*adk.AgentEvent]) tea.Cmd {
+func waitForAgentEvent(iter *adk.AsyncIterator[*agenticEvent]) tea.Cmd {
 	return func() tea.Msg {
 		event, ok := iter.Next()
 		if !ok {
@@ -332,8 +373,8 @@ func waitForAgentEvent(iter *adk.AsyncIterator[*adk.AgentEvent]) tea.Cmd {
 	}
 }
 
-// waitForChunk 在 Update 方法外阻塞读取一个助手流分片。
-func waitForChunk(stream *schema.StreamReader[*schema.Message]) tea.Cmd {
+// waitForChunk 在 Update 方法外阻塞读取一个 AgenticMessage 流分片。
+func waitForChunk(stream *schema.StreamReader[*schema.AgenticMessage]) tea.Cmd {
 	return func() tea.Msg {
 		message, err := stream.Recv()
 		if err != nil {
@@ -369,4 +410,28 @@ func (model *Model) resize(width int, height int) {
 	model.viewport.Height = max(model.height-9, 3)
 	model.input.SetWidth(max(model.width-6, 14))
 	model.refreshViewport()
+}
+
+// assistantAgenticMessage 构造仅含助手文本的 AgenticMessage，写入下一轮历史。
+func assistantAgenticMessage(text string) *schema.AgenticMessage {
+	return &schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeAssistant,
+		ContentBlocks: []*schema.ContentBlock{
+			schema.NewContentBlock(&schema.AssistantGenText{Text: text}),
+		},
+	}
+}
+
+// assistantText 提取 AgenticMessage 中的助手生成文本。
+func assistantText(message *schema.AgenticMessage) string {
+	if message == nil {
+		return ""
+	}
+	var builder strings.Builder
+	for _, block := range message.ContentBlocks {
+		if block != nil && block.AssistantGenText != nil {
+			builder.WriteString(block.AssistantGenText.Text)
+		}
+	}
+	return builder.String()
 }

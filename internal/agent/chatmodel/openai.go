@@ -1,4 +1,4 @@
-// Package chatmodel 构造模板使用的单个 Eino 聊天模型。
+// Package chatmodel 构造模板使用的单个 Eino Agentic 聊天模型。
 package chatmodel
 
 import (
@@ -9,16 +9,16 @@ import (
 	"easygo-agent/internal/config"
 	"easygo-agent/internal/logger"
 
-	openaiadapter "github.com/cloudwego/eino-ext/components/model/openai"
+	agenticopenai "github.com/cloudwego/eino-ext/components/model/agenticopenai"
 	"github.com/cloudwego/eino/components/model"
 	"go.uber.org/zap"
 )
 
-// New 构造 OpenAI 兼容的 Eino ToolCallingChatModel。
-func New(ctx context.Context, cfg config.ModelConfig) (model.ToolCallingChatModel, error) {
-	chatModel, err := openaiadapter.NewChatModel(ctx, toOpenAIConfig(cfg))
+// New 构造 OpenAI 兼容的 Eino AgenticModel，消息载体为 *schema.AgenticMessage。
+func New(ctx context.Context, cfg config.ModelConfig) (model.AgenticModel, error) {
+	chatModel, err := agenticopenai.NewChatModel(ctx, toOpenAIConfig(cfg))
 	if err != nil {
-		wrappedErr := fmt.Errorf("create OpenAI-compatible chat model: %w", err)
+		wrappedErr := fmt.Errorf("create OpenAI-compatible agentic chat model: %w", err)
 		logger.Error("create chat model failed",
 			zap.String("model", cfg.Name),
 			zap.String("base_url_host", safeBaseURLHost(cfg.BaseURL)),
@@ -30,8 +30,8 @@ func New(ctx context.Context, cfg config.ModelConfig) (model.ToolCallingChatMode
 }
 
 // toOpenAIConfig 映射运行字段，不附加身份或授权策略。
-func toOpenAIConfig(cfg config.ModelConfig) *openaiadapter.ChatModelConfig {
-	return &openaiadapter.ChatModelConfig{
+func toOpenAIConfig(cfg config.ModelConfig) *agenticopenai.ChatConfig {
+	return &agenticopenai.ChatConfig{
 		APIKey:  cfg.APIKey,
 		BaseURL: cfg.BaseURL,
 		Model:   cfg.Name,

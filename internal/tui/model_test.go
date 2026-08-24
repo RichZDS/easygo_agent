@@ -21,9 +21,9 @@ func (agent *fakeAgent) Name(context.Context) string { return "fake" }
 func (agent *fakeAgent) Description(context.Context) string { return "fake" }
 
 // Run 记录一次调用并立即关闭迭代器；测试通过 Update 注入事件。
-func (agent *fakeAgent) Run(context.Context, *adk.AgentInput, ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
+func (agent *fakeAgent) Run(context.Context, *adk.TypedAgentInput[*schema.AgenticMessage], ...adk.AgentRunOption) *adk.AsyncIterator[*adk.TypedAgentEvent[*schema.AgenticMessage]] {
 	agent.calls++
-	iter, gen := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	iter, gen := adk.NewAsyncIteratorPair[*adk.TypedAgentEvent[*schema.AgenticMessage]]()
 	gen.Close()
 	return iter
 }
@@ -36,10 +36,10 @@ func TestCompletedRunAppendsHistory(t *testing.T) {
 	model := New(agent, "system")
 	model.input.SetValue("hello")
 	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
-	model = applyAgentEvent(t, model, adk.EventFromMessage(schema.AssistantMessage("final", nil), nil, schema.Assistant, ""))
+	model = applyAgentEvent(t, model, adk.EventFromAgenticMessage(assistantAgenticMessage("final"), nil, schema.AgenticRoleTypeAssistant))
 	model = applyAgentEnded(t, model)
 
-	if got := model.history[len(model.history)-1]; got.Role != schema.Assistant || got.Content != "final" {
+	if got := model.history[len(model.history)-1]; got.Role != schema.AgenticRoleTypeAssistant || assistantText(got) != "final" {
 		t.Fatalf("last history message = %#v", got)
 	}
 	if !strings.Contains(model.transcript(), "assistant: final") {
@@ -53,8 +53,8 @@ func TestFailedRunDoesNotAppendPartialHistory(t *testing.T) {
 
 	model := submittedModel(t)
 	wantHistory := len(model.history)
-	model = applyAgentEvent(t, model, adk.EventFromMessage(schema.AssistantMessage("partial", nil), nil, schema.Assistant, ""))
-	model = applyAgentEvent(t, model, &adk.AgentEvent{Err: errors.New("model failed")})
+	model = applyAgentEvent(t, model, adk.EventFromAgenticMessage(assistantAgenticMessage("partial"), nil, schema.AgenticRoleTypeAssistant))
+	model = applyAgentEvent(t, model, &adk.TypedAgentEvent[*schema.AgenticMessage]{Err: errors.New("model failed")})
 
 	if len(model.history) != wantHistory {
 		t.Fatalf("history length = %d, want %d", len(model.history), wantHistory)
@@ -105,6 +105,32 @@ func TestDuplicateSubmitIsIgnored(t *testing.T) {
 	}
 }
 
+// TestAgenticToolBlocksAppearInTranscript 验证 Tool 调用与结果走 ContentBlock。
+func TestAgenticToolBlocksAppearInTranscript(t *testing.T) {
+	t.Parallel()
+
+	model := submittedModel(t)
+	model = applyAgentEvent(t, model, adk.EventFromAgenticMessage(&schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeAssistant,
+		ContentBlocks: []*schema.ContentBlock{
+			schema.NewContentBlock(&schema.FunctionToolCall{Name: "calculator", CallID: "call-1"}),
+		},
+	}, nil, schema.AgenticRoleTypeAssistant))
+	model = applyAgentEvent(t, model, adk.EventFromAgenticMessage(&schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeUser,
+		ContentBlocks: []*schema.ContentBlock{
+			schema.NewContentBlock(&schema.FunctionToolResult{Name: "calculator", CallID: "call-1"}),
+		},
+	}, nil, schema.AgenticRoleTypeUser))
+
+	if !strings.Contains(model.transcript(), "tool: calculator started") {
+		t.Fatalf("transcript missing tool start: %q", model.transcript())
+	}
+	if !strings.Contains(model.transcript(), "tool: calculator completed") {
+		t.Fatalf("transcript missing tool completion: %q", model.transcript())
+	}
+}
+
 // submittedModel 返回已有一次活动运行的 TUI 模型。
 func submittedModel(t *testing.T) *Model {
 	t.Helper()
@@ -127,7 +153,7 @@ func updateModel(t *testing.T, model *Model, message tea.Msg) *Model {
 }
 
 // applyAgentEvent 通过 Bubble Tea 更新路径投递一条原生 ADK 事件。
-func applyAgentEvent(t *testing.T, model *Model, event *adk.AgentEvent) *Model {
+func applyAgentEvent(t *testing.T, model *Model, event *adk.TypedAgentEvent[*schema.AgenticMessage]) *Model {
 	t.Helper()
 
 	return updateModel(t, model, agentEventMessage{event: event})

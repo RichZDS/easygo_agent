@@ -36,7 +36,7 @@ func Run(ctx context.Context, configPath string) (resultErr error) {
 		ctx = context.Background()
 	}
 	// 初始化日志
-	if _, err := observability.NewLogger(observability.DefaultPath); err != nil {
+	if _, err := observability.NewLogger(observability.DefaultPath()); err != nil {
 		wrappedErr := fmt.Errorf("initialize logger: %w", err)
 		logger.Error("assemble application failed", zap.String("stage", "logger"), zap.Error(wrappedErr))
 		return wrappedErr

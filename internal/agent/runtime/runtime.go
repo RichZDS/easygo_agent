@@ -1,5 +1,4 @@
-// Package agentruntime owns one conversational Agent session and projects Eino
-// output into a small, framework-independent event stream.
+// Package agentruntime 持有一次对话会话，并把 Eino 输出投影为与框架无关的语义事件流。
 package agentruntime
 
 import (
@@ -33,31 +32,45 @@ var (
 type EventKind string
 
 const (
-	EventTextDelta    EventKind = "text_delta"
-	EventToolStarted  EventKind = "tool_started"
+	// EventTextDelta 表示助手文本增量。
+	EventTextDelta EventKind = "text_delta"
+	// EventToolStarted 表示工具调用开始。
+	EventToolStarted EventKind = "tool_started"
+	// EventToolFinished 表示工具调用结束。
 	EventToolFinished EventKind = "tool_finished"
-	EventCompleted    EventKind = "completed"
-	EventCanceled     EventKind = "canceled"
-	EventFailed       EventKind = "failed"
+	// EventCompleted 表示运行成功结束。
+	EventCompleted EventKind = "completed"
+	// EventCanceled 表示运行被取消。
+	EventCanceled EventKind = "canceled"
+	// EventFailed 表示运行因错误失败。
+	EventFailed EventKind = "failed"
 )
 
 // Event 是 Agent 运行投影出的语义事件。终态事件的 Text 是本次运行的完整助手文本。
 type Event struct {
+	// Kind 标识事件类型。
 	Kind EventKind
+	// Text 是文本增量；终态事件则为本次运行的完整助手文本。
 	Text string
+	// Tool 是工具名称，仅工具生命周期事件填充。
 	Tool string
-	Err  error
+	// Err 仅 Failed 终态携带错误。
+	Err error
 }
 
 // Conversation 持有对话历史，并保证同一时刻最多运行一个请求。
 type Conversation interface {
+	// Start 把用户输入加入历史，并启动一条启用流式输出的运行。
 	Start(input string) (Run, error)
 }
 
-// Run 是一条正在进行的 Agent 运行。Next 阻塞到下一条事件，Cancel 可并发调用。
-// Next 恰好返回一个 Completed、Canceled 或 Failed 终态事件。
+// Run 是一条正在进行的 Agent 运行。
+// Next 阻塞到下一条事件；Cancel 可与 Next 并发调用。
+// 一次运行恰好返回一个 Completed、Canceled 或 Failed 终态事件。
 type Run interface {
+	// Next 阻塞直到下一条语义事件可用。调用方应循环读取直到收到终态事件。
 	Next() Event
+	// Cancel 请求取消运行；终态仍由随后的 Next 返回。
 	Cancel()
 }
 
@@ -86,16 +99,19 @@ func New(parent context.Context, agent adk.TypedAgent[*schema.AgenticMessage], s
 func (session *Session) Start(input string) (Run, error) {
 	content := strings.TrimSpace(input)
 	if content == "" {
+		logger.Error("start agent run failed", zap.Error(ErrEmptyInput))
 		return nil, ErrEmptyInput
 	}
 
 	session.mu.Lock()
 	if session.agent == nil {
 		session.mu.Unlock()
+		logger.Error("start agent run failed", zap.Error(ErrAgentUnavailable))
 		return nil, ErrAgentUnavailable
 	}
 	if session.active {
 		session.mu.Unlock()
+		logger.Error("start agent run failed", zap.Error(ErrRunInProgress))
 		return nil, ErrRunInProgress
 	}
 	session.active = true
@@ -103,6 +119,12 @@ func (session *Session) Start(input string) (Run, error) {
 	parent := session.parent
 	agent := session.agent
 	session.mu.Unlock()
+
+	logger.Debug("agent run starting",
+		zap.String("input", content),
+		zap.Int("history_len", len(history)),
+		zap.Any("history", history),
+	)
 
 	runContext, cancel := context.WithCancel(parent)
 	iterator := agent.Run(runContext, &adk.TypedAgentInput[*schema.AgenticMessage]{
@@ -112,6 +134,7 @@ func (session *Session) Start(input string) (Run, error) {
 	if iterator == nil {
 		cancel()
 		session.release()
+		logger.Error("start agent run failed", zap.Error(ErrAgentUnavailable), zap.Any("history", history))
 		return nil, ErrAgentUnavailable
 	}
 
@@ -146,18 +169,20 @@ func (session *Session) release() {
 	session.mu.Unlock()
 }
 
+// agentRun 把 Eino 迭代器与消息流投影为语义事件，并实现 Run。
 type agentRun struct {
-	nextMu        sync.Mutex
-	context       context.Context
-	cancel        context.CancelFunc
-	iterator      *adk.AsyncIterator[*adk.TypedAgentEvent[*schema.AgenticMessage]]
-	messageStream *schema.StreamReader[*schema.AgenticMessage]
-	session       *Session
-	pending       []Event
-	text          strings.Builder
-	startedTools  map[string]struct{}
-	finishedTools map[string]struct{}
-	finished      bool
+	nextMu        sync.Mutex                                                       // 保证 Next 串行消费
+	context       context.Context                                                  // 本次运行的可取消 context
+	cancel        context.CancelFunc                                               // 取消本次运行
+	iterator      *adk.AsyncIterator[*adk.TypedAgentEvent[*schema.AgenticMessage]] // Eino 运行事件迭代器
+	messageStream *schema.StreamReader[*schema.AgenticMessage]                     // 当前正在消费的流式消息；非流式事件为 nil
+	session       *Session                                                         // 所属会话，用于提交或丢弃历史
+	pending       []Event                                                          // 已投影但尚未被 Next 取出的事件
+	text          strings.Builder                                                  // 本次运行累计的完整助手文本
+	startedTools  map[string]struct{}                                              // 已发出 EventToolStarted 的 CallID
+	finishedTools map[string]struct{}                                              // 已发出 EventToolFinished 的 CallID
+	finished      bool                                                             // 是否已返回终态事件
+	streamLog     streamChunkLog                                                   // 当前消息流的 chunk，结束后再聚合打印
 }
 
 // Cancel 请求取消运行。终态仍由下一次 Next 返回。
@@ -169,7 +194,13 @@ func (run *agentRun) Cancel() {
 func (run *agentRun) Next() Event {
 	run.nextMu.Lock()
 	defer run.nextMu.Unlock()
+	event := run.next()
+	debugSemanticEvent(event)
+	return event
+}
 
+// next 在持锁前提下消费 Eino 输出并返回下一条语义事件。
+func (run *agentRun) next() Event {
 	if run.finished {
 		return Event{Kind: EventFailed, Text: run.text.String(), Err: ErrRunFinished}
 	}
@@ -189,14 +220,17 @@ func (run *agentRun) Next() Event {
 
 		event, ok := run.iterator.Next()
 		if !ok {
+			logger.Debug("eino iterator exhausted")
 			return run.finish(EventCompleted, nil)
 		}
 		if run.context.Err() != nil {
 			return run.finish(EventCanceled, nil)
 		}
 		if event == nil {
+			logger.Debug("eino agent event is nil")
 			continue
 		}
+		debugEinoEvent(event)
 		if event.Err != nil {
 			wrappedErr := fmt.Errorf("receive Eino agent event: %w", event.Err)
 			logger.Error("agent run failed", zap.Error(wrappedErr))
@@ -213,6 +247,7 @@ func (run *agentRun) Next() Event {
 			continue
 		}
 		if output.Message != nil {
+			debugAgenticMessage(output.Message)
 			run.projectMessage(output.Message)
 		}
 	}
@@ -236,6 +271,7 @@ func (run *agentRun) receiveMessageChunk() *Event {
 		return &event
 	}
 	if message != nil {
+		run.streamLog.append(message)
 		run.projectMessage(message)
 	}
 	return nil
@@ -284,6 +320,7 @@ func (run *agentRun) projectTool(kind EventKind, name, callID string) {
 	run.pending = append(run.pending, Event{Kind: kind, Tool: name})
 }
 
+// popPending 取出最早一条已投影、尚未交付的事件。
 func (run *agentRun) popPending() (Event, bool) {
 	if len(run.pending) == 0 {
 		return Event{}, false
@@ -308,7 +345,9 @@ func (run *agentRun) finish(kind EventKind, err error) Event {
 	return Event{Kind: kind, Text: text, Err: err}
 }
 
+// closeMessageStream 关闭当前消息流，并把已收集的 Streaming chunk 聚合后打印。
 func (run *agentRun) closeMessageStream() {
+	run.streamLog.flush()
 	if run.messageStream == nil {
 		return
 	}
@@ -316,6 +355,7 @@ func (run *agentRun) closeMessageStream() {
 	run.messageStream = nil
 }
 
+// assistantMessage 用完整助手文本构造一条写入历史的 AgenticMessage。
 func assistantMessage(text string) *schema.AgenticMessage {
 	return &schema.AgenticMessage{
 		Role: schema.AgenticRoleTypeAssistant,
@@ -325,6 +365,7 @@ func assistantMessage(text string) *schema.AgenticMessage {
 	}
 }
 
+// 编译期断言 Session 与 agentRun 分别实现 Conversation 与 Run。
 var (
 	_ Conversation = (*Session)(nil)
 	_ Run          = (*agentRun)(nil)

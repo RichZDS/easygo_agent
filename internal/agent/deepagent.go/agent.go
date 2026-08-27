@@ -35,9 +35,15 @@ func New(ctx context.Context, chatModel model.AgenticModel, tools []tool.BaseToo
 		Name:      "deep-agent",
 		ChatModel: chatModel,
 		ToolsConfig: adk.ToolsConfig{
-			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: tools},
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools:               tools,
+				UnknownToolsHandler: unknownToolResult,
+			},
 		},
 		MaxIteration: cfg.MaxSteps,
+		Handlers: []adk.TypedChatModelAgentMiddleware[*schema.AgenticMessage]{
+			newSafeToolMiddleware(),
+		},
 	})
 	if err != nil {
 		wrappedErr := fmt.Errorf("create Eino Deep Agent: %w", err)

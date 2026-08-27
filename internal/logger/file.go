@@ -1,5 +1,4 @@
-// Package observability 为模板构造日志。
-package observability
+package logger
 
 import (
 	"errors"
@@ -8,8 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"easygo-agent/internal/logger"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -30,24 +27,24 @@ func DefaultPath() string {
 
 var closeSink func()
 
-// NewLogger 构造写入指定文件的 Zap logger，级别为 Debug。
-func NewLogger(path string) (*zap.Logger, error) {
+// New 构造写入指定文件的 Zap logger，级别为 Debug，并替换进程全局 logger。
+func New(path string) (*zap.Logger, error) {
 	closeOpenSink()
 	if strings.TrimSpace(path) == "" {
 		err := errors.New("log path cannot be empty")
-		logger.Error("create logger failed", zap.Error(err))
+		Error("create logger failed", zap.Error(err))
 		return nil, err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		wrappedErr := fmt.Errorf("create log directory: %w", err)
-		logger.Error("create logger failed", zap.Error(wrappedErr))
+		Error("create logger failed", zap.Error(wrappedErr))
 		return nil, wrappedErr
 	}
 
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		wrappedErr := fmt.Errorf("open log file: %w", err)
-		logger.Error("create logger failed", zap.Error(wrappedErr))
+		Error("create logger failed", zap.Error(wrappedErr))
 		return nil, wrappedErr
 	}
 
@@ -57,6 +54,7 @@ func NewLogger(path string) (*zap.Logger, error) {
 		zap.NewAtomicLevelAt(zap.DebugLevel),
 	)
 	produced := zap.New(core, zap.AddCaller(), zap.AddStacktrace(zap.ErrorLevel))
+	// syncAndClose 刷新并关闭当前日志文件。
 	closeSink = func() {
 		_ = produced.Sync()
 		_ = file.Close()
@@ -65,6 +63,7 @@ func NewLogger(path string) (*zap.Logger, error) {
 	return produced, nil
 }
 
+// closeOpenSink 关闭上一次 New 打开的文件 sink。
 func closeOpenSink() {
 	if closeSink == nil {
 		return

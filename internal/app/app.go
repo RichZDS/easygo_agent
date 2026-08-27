@@ -13,7 +13,6 @@ import (
 	agentruntime "easygo-agent/internal/agent/runtime"
 	"easygo-agent/internal/config"
 	"easygo-agent/internal/logger"
-	"easygo-agent/internal/observability"
 	"easygo-agent/internal/prompt"
 	"easygo-agent/internal/tools"
 	"easygo-agent/internal/tui"
@@ -36,7 +35,7 @@ func Run(ctx context.Context, configPath string) (resultErr error) {
 		ctx = context.Background()
 	}
 	// 初始化日志
-	if _, err := observability.NewLogger(observability.DefaultPath()); err != nil {
+	if _, err := logger.New(logger.DefaultPath()); err != nil {
 		wrappedErr := fmt.Errorf("initialize logger: %w", err)
 		logger.Error("assemble application failed", zap.String("stage", "logger"), zap.Error(wrappedErr))
 		return wrappedErr

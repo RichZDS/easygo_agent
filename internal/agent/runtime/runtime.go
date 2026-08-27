@@ -34,9 +34,11 @@ type EventKind string
 const (
 	// EventTextDelta 表示助手文本增量。
 	EventTextDelta EventKind = "text_delta"
-	// EventToolStarted 表示工具调用开始。
+	// EventReasoningDelta 表示 reasoning 文本增量。
+	EventReasoningDelta EventKind = "reasoning_delta"
+	// EventToolStarted 表示工具调用开始，携带完整 name、call_id 与 arguments。
 	EventToolStarted EventKind = "tool_started"
-	// EventToolFinished 表示工具调用结束。
+	// EventToolFinished 表示工具调用结束，携带完整 name、call_id 与 result。
 	EventToolFinished EventKind = "tool_finished"
 	// EventCompleted 表示运行成功结束。
 	EventCompleted EventKind = "completed"
@@ -50,10 +52,16 @@ const (
 type Event struct {
 	// Kind 标识事件类型。
 	Kind EventKind
-	// Text 是文本增量；终态事件则为本次运行的完整助手文本。
+	// Text 是文本或 reasoning 增量；终态事件则为本次运行的完整助手文本。
 	Text string
 	// Tool 是工具名称，仅工具生命周期事件填充。
 	Tool string
+	// CallID 是工具调用 ID。
+	CallID string
+	// Arguments 是工具调用的完整参数。
+	Arguments string
+	// Result 是工具返回的完整结果。
+	Result string
 	// Err 仅 Failed 终态携带错误。
 	Err error
 }
@@ -182,7 +190,15 @@ type agentRun struct {
 	startedTools  map[string]struct{}                                              // 已发出 EventToolStarted 的 CallID
 	finishedTools map[string]struct{}                                              // 已发出 EventToolFinished 的 CallID
 	finished      bool                                                             // 是否已返回终态事件
-	streamLog     streamChunkLog                                                   // 当前消息流的 chunk，结束后再聚合打印
+	streamLog     logger.StreamChunkLog                                            // 当前消息流的 chunk，结束后再聚合打印
+	toolDraft     toolCallDraft                                                    // 正在聚合的流式 tool call
+}
+
+// toolCallDraft 在内存中拼接流式 FunctionToolCall 的 name、call_id 与 arguments。
+type toolCallDraft struct {
+	name      string
+	callID    string
+	arguments strings.Builder
 }
 
 // Cancel 请求取消运行。终态仍由下一次 Next 返回。
@@ -201,6 +217,9 @@ func (run *agentRun) Next() Event {
 
 // next 在持锁前提下消费 Eino 输出并返回下一条语义事件。
 func (run *agentRun) next() Event {
+	if event, ok := run.popPending(); ok {
+		return event
+	}
 	if run.finished {
 		return Event{Kind: EventFailed, Text: run.text.String(), Err: ErrRunFinished}
 	}
@@ -230,7 +249,7 @@ func (run *agentRun) next() Event {
 			logger.Debug("eino agent event is nil")
 			continue
 		}
-		debugEinoEvent(event)
+		logger.DebugEinoEvent(event)
 		if event.Err != nil {
 			wrappedErr := fmt.Errorf("receive Eino agent event: %w", event.Err)
 			logger.Error("agent run failed", zap.Error(wrappedErr))
@@ -247,8 +266,9 @@ func (run *agentRun) next() Event {
 			continue
 		}
 		if output.Message != nil {
-			debugAgenticMessage(output.Message)
+			logger.DebugAgenticMessage(output.Message)
 			run.projectMessage(output.Message)
+			run.flushToolDraft()
 		}
 	}
 }
@@ -271,17 +291,20 @@ func (run *agentRun) receiveMessageChunk() *Event {
 		return &event
 	}
 	if message != nil {
-		run.streamLog.append(message)
+		run.streamLog.Append(message)
 		run.projectMessage(message)
 	}
 	return nil
 }
 
-// projectMessage 把 AgenticMessage 内容块转成文本与 Tool 生命周期事件。
+// projectMessage 把 AgenticMessage 内容块转成文本、reasoning 与 Tool 生命周期事件。
 func (run *agentRun) projectMessage(message *schema.AgenticMessage) {
 	for _, block := range message.ContentBlocks {
 		if block == nil {
 			continue
+		}
+		if block.Reasoning != nil && block.Reasoning.Text != "" {
+			run.pending = append(run.pending, Event{Kind: EventReasoningDelta, Text: block.Reasoning.Text})
 		}
 		if block.AssistantGenText != nil && block.AssistantGenText.Text != "" {
 			text := block.AssistantGenText.Text
@@ -289,16 +312,56 @@ func (run *agentRun) projectMessage(message *schema.AgenticMessage) {
 			run.pending = append(run.pending, Event{Kind: EventTextDelta, Text: text})
 		}
 		if block.FunctionToolCall != nil {
-			run.projectTool(EventToolStarted, block.FunctionToolCall.Name, block.FunctionToolCall.CallID)
+			run.projectToolCall(block.FunctionToolCall)
 		}
 		if block.FunctionToolResult != nil {
-			run.projectTool(EventToolFinished, block.FunctionToolResult.Name, block.FunctionToolResult.CallID)
+			run.flushToolDraft()
+			run.projectToolResult(block.FunctionToolResult)
 		}
 	}
 }
 
-// projectTool 按 CallID 去重，避免流式 ContentBlock 重复展示 Tool 状态。
-func (run *agentRun) projectTool(kind EventKind, name, callID string) {
+// projectToolCall 把流式 tool call chunk 拼进草稿，完整参数在 flush 时发出。
+func (run *agentRun) projectToolCall(call *schema.FunctionToolCall) {
+	if call == nil {
+		return
+	}
+	if call.CallID != "" && run.toolDraft.callID != "" && call.CallID != run.toolDraft.callID {
+		run.flushToolDraft()
+	}
+	if call.CallID != "" {
+		run.toolDraft.callID = call.CallID
+	}
+	if call.Name != "" {
+		run.toolDraft.name = call.Name
+	}
+	if call.Arguments != "" {
+		run.toolDraft.arguments.WriteString(call.Arguments)
+	}
+}
+
+// flushToolDraft 把已聚合的 tool call 作为一条 EventToolStarted 发出。
+func (run *agentRun) flushToolDraft() {
+	if run.toolDraft.name == "" && run.toolDraft.callID == "" && run.toolDraft.arguments.Len() == 0 {
+		return
+	}
+	name := run.toolDraft.name
+	callID := run.toolDraft.callID
+	arguments := run.toolDraft.arguments.String()
+	run.toolDraft = toolCallDraft{}
+	run.emitToolEvent(EventToolStarted, name, callID, arguments, "")
+}
+
+// projectToolResult 把完整 tool result 作为一条 EventToolFinished 发出。
+func (run *agentRun) projectToolResult(result *schema.FunctionToolResult) {
+	if result == nil {
+		return
+	}
+	run.emitToolEvent(EventToolFinished, result.Name, result.CallID, "", toolResultText(result))
+}
+
+// emitToolEvent 按 CallID 去重后追加一条工具生命周期事件。
+func (run *agentRun) emitToolEvent(kind EventKind, name, callID, arguments, result string) {
 	key := callID
 	if key == "" {
 		key = name
@@ -317,7 +380,34 @@ func (run *agentRun) projectTool(kind EventKind, name, callID string) {
 	if name == "" {
 		name = key
 	}
-	run.pending = append(run.pending, Event{Kind: kind, Tool: name})
+	run.pending = append(run.pending, Event{
+		Kind:      kind,
+		Tool:      name,
+		CallID:    callID,
+		Arguments: arguments,
+		Result:    result,
+	})
+}
+
+// toolResultText 提取 FunctionToolResult 中可供展示的完整结果文本。
+func toolResultText(result *schema.FunctionToolResult) string {
+	if result == nil {
+		return ""
+	}
+	parts := make([]string, 0, len(result.Content))
+	for _, block := range result.Content {
+		if block == nil {
+			continue
+		}
+		if block.Text != nil && block.Text.Text != "" {
+			parts = append(parts, block.Text.Text)
+			continue
+		}
+		if text := strings.TrimSpace(block.String()); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 // popPending 取出最早一条已投影、尚未交付的事件。
@@ -331,7 +421,7 @@ func (run *agentRun) popPending() (Event, bool) {
 	return event, true
 }
 
-// finish 释放本次运行资源，并恰好生成一个终态事件。
+// finish 释放本次运行资源，先交付尚未发出的 tool 事件，再返回终态事件。
 func (run *agentRun) finish(kind EventKind, err error) Event {
 	run.finished = true
 	run.closeMessageStream()
@@ -342,12 +432,18 @@ func (run *agentRun) finish(kind EventKind, err error) Event {
 	} else {
 		run.session.release()
 	}
-	return Event{Kind: kind, Text: text, Err: err}
+	terminal := Event{Kind: kind, Text: text, Err: err}
+	if event, ok := run.popPending(); ok {
+		run.pending = append(run.pending, terminal)
+		return event
+	}
+	return terminal
 }
 
-// closeMessageStream 关闭当前消息流，并把已收集的 Streaming chunk 聚合后打印。
+// closeMessageStream 关闭当前消息流，发出已聚合的 tool call，并打印完整 AgenticMessage。
 func (run *agentRun) closeMessageStream() {
-	run.streamLog.flush()
+	run.flushToolDraft()
+	run.streamLog.Flush()
 	if run.messageStream == nil {
 		return
 	}

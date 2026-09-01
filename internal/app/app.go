@@ -76,6 +76,7 @@ func Run(ctx context.Context, configPath string) (resultErr error) {
 		logger.Error("assemble application failed", zap.String("stage", "agent"), zap.Error(wrappedErr))
 		return wrappedErr
 	}
+	// 构造会话模块，管理运行、流和对话历史。
 	conversation := agentruntime.New(ctx, agent, prompt.SystemPrompt)
 	// 启动 Bubble Tea TUI，占用备用屏幕；退出后由 ctx 取消。
 	program := tea.NewProgram(

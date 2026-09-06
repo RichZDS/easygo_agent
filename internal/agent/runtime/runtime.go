@@ -9,7 +9,9 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
+	"easygo-agent/internal/conversation"
 	"easygo-agent/internal/logger"
 
 	"github.com/cloudwego/eino/adk"
@@ -24,6 +26,7 @@ var (
 	ErrRunInProgress = errors.New("agent run already in progress")
 	// ErrAgentUnavailable 表示会话没有可调用的 Agent。
 	ErrAgentUnavailable = errors.New("agent is unavailable")
+	ErrStoreUnavailable = errors.New("conversation store is unavailable")
 	// ErrRunFinished 表示调用方在终态事件之后再次读取运行。
 	ErrRunFinished = errors.New("agent run already finished")
 )
@@ -43,7 +46,9 @@ const (
 	// EventCanceled 表示运行被取消。
 	EventCanceled EventKind = "canceled"
 	// EventFailed 表示运行因错误失败。
-	EventFailed EventKind = "failed"
+	EventFailed      EventKind = "failed"
+	EventCompressing EventKind = "compressing"
+	EventCompressed  EventKind = "compressed"
 )
 
 // Event 是 Agent 运行投影出的语义事件。终态事件的 Text 是本次运行的完整助手文本。
@@ -74,29 +79,30 @@ type Run interface {
 	Cancel()
 }
 
-// Session 是基于 Eino TypedAgent 的进程内对话会话。
+// Session binds an Eino Agent to a user-scoped Store; it owns no second history cache.
 type Session struct {
-	mu      sync.Mutex                             // 保护 history 与 active
-	parent  context.Context                        // 每次 Run 的父 context；取消后后续运行一并停止
-	agent   adk.TypedAgent[*schema.AgenticMessage] // 实际执行推理的 Eino Agent
-	history []*schema.AgenticMessage               // 系统提示词、用户输入、完整助手回复；失败/取消的部分输出不写入
-	active  bool                                   // 是否已有一次尚未结束的运行
+	mu       sync.Mutex                             // 保护 active
+	parent   context.Context                        // 每次 Run 的父 context；取消后后续运行一并停止
+	agent    adk.TypedAgent[*schema.AgenticMessage] // 实际执行推理的 Eino Agent
+	active   bool                                   // 是否已有一次尚未结束的运行
+	store    conversation.Store
+	username string
+	id       string
 }
 
-// New 构造一个会话。系统提示词与完整助手回复由 Session 维护，不暴露给 TUI。
-func New(parent context.Context, agent adk.TypedAgent[*schema.AgenticMessage], systemPrompt string) *Session {
-	if parent == nil {
-		parent = context.Background()
-	}
-	session := &Session{parent: parent, agent: agent}
-	if prompt := strings.TrimSpace(systemPrompt); prompt != "" {
-		session.history = append(session.history, schema.SystemAgenticMessage(prompt))
-	}
-	return session
+// NewStored binds a runtime to a durable, user-scoped conversation.
+func NewStored(parent context.Context, agent adk.TypedAgent[*schema.AgenticMessage], store conversation.Store, username, id string) *Session {
+	return &Session{parent: parent, agent: agent, store: store, username: username, id: id}
 }
 
 // Start 把用户输入加入历史，并启动一条启用流式输出的 Eino 运行。
 func (session *Session) Start(input string) (Run, error) {
+	return session.StartContext(session.parent, input)
+}
+
+// StartContext only reserves this runtime. I/O and inference happen in Next,
+// so the CLI remains responsive and Cancel also works during history loading.
+func (session *Session) StartContext(parent context.Context, input string) (Run, error) {
 	content := strings.TrimSpace(input)
 	if content == "" {
 		logger.Error("start agent run failed", zap.Error(ErrEmptyInput))
@@ -104,6 +110,10 @@ func (session *Session) Start(input string) (Run, error) {
 	}
 
 	session.mu.Lock()
+	if session.store == nil {
+		session.mu.Unlock()
+		return nil, ErrStoreUnavailable
+	}
 	if session.agent == nil {
 		session.mu.Unlock()
 		logger.Error("start agent run failed", zap.Error(ErrAgentUnavailable))
@@ -115,54 +125,23 @@ func (session *Session) Start(input string) (Run, error) {
 		return nil, ErrRunInProgress
 	}
 	session.active = true
-	history := append(slices.Clone(session.history), schema.UserAgenticMessage(content))
-	parent := session.parent
-	agent := session.agent
 	session.mu.Unlock()
-
-	logger.Debug("agent run starting",
-		zap.String("input", content),
-		zap.Int("history_len", len(history)),
-		zap.Any("history", history),
-	)
-
-	runContext, cancel := context.WithCancel(parent)
-	iterator := agent.Run(runContext, &adk.TypedAgentInput[*schema.AgenticMessage]{
-		Messages:        slices.Clone(history),
-		EnableStreaming: true,
-	})
-	if iterator == nil {
-		cancel()
-		session.release()
-		logger.Error("start agent run failed", zap.Error(ErrAgentUnavailable), zap.Any("history", history))
-		return nil, ErrAgentUnavailable
+	if parent == nil {
+		parent = context.Background()
 	}
-
-	session.mu.Lock()
-	session.history = history
-	session.mu.Unlock()
-
+	runContext, cancel := context.WithCancel(parent)
 	return &agentRun{
 		context:       runContext,
 		cancel:        cancel,
-		iterator:      iterator,
+		input:         content,
+		capture:       &stateCapture{},
 		session:       session,
 		startedTools:  make(map[string]struct{}),
 		finishedTools: make(map[string]struct{}),
 	}, nil
 }
 
-// complete 只在成功终态把完整助手文本写入下一轮历史。
-func (session *Session) complete(text string) {
-	session.mu.Lock()
-	defer session.mu.Unlock()
-	if text != "" {
-		session.history = append(session.history, assistantMessage(text))
-	}
-	session.active = false
-}
-
-// release 结束失败或取消的运行，不把部分助手文本写入历史。
+// release releases the local run reservation after persistence has finished.
 func (session *Session) release() {
 	session.mu.Lock()
 	session.active = false
@@ -171,6 +150,12 @@ func (session *Session) release() {
 
 // agentRun 把 Eino 迭代器与消息流投影为语义事件，并实现 Run。
 type agentRun struct {
+	input         string
+	inputMessages []*schema.AgenticMessage
+	outputs       []*schema.AgenticMessage
+	chunks        []*schema.AgenticMessage
+	lease         conversation.Lease
+	capture       *stateCapture
 	nextMu        sync.Mutex                                                       // 保证 Next 串行消费
 	context       context.Context                                                  // 本次运行的可取消 context
 	cancel        context.CancelFunc                                               // 取消本次运行
@@ -211,6 +196,14 @@ func (run *agentRun) next() Event {
 		if run.context.Err() != nil {
 			return run.finish(EventCanceled, nil)
 		}
+		if run.iterator == nil {
+			if err := run.initialize(); err != nil {
+				if run.context.Err() != nil {
+					return run.finish(EventCanceled, nil)
+				}
+				return run.finish(EventFailed, err)
+			}
+		}
 		if run.messageStream != nil {
 			if terminal := run.receiveMessageChunk(); terminal != nil {
 				return *terminal
@@ -231,6 +224,9 @@ func (run *agentRun) next() Event {
 			continue
 		}
 		debugEinoEvent(event)
+		if projected, ok := compressionEvent(event); ok {
+			return projected
+		}
 		if event.Err != nil {
 			wrappedErr := fmt.Errorf("receive Eino agent event: %w", event.Err)
 			logger.Error("agent run failed", zap.Error(wrappedErr))
@@ -248,6 +244,7 @@ func (run *agentRun) next() Event {
 		}
 		if output.Message != nil {
 			debugAgenticMessage(output.Message)
+			run.outputs = append(run.outputs, output.Message)
 			run.projectMessage(output.Message)
 		}
 	}
@@ -262,6 +259,15 @@ func (run *agentRun) receiveMessageChunk() *Event {
 			return &event
 		}
 		if errors.Is(err, io.EOF) {
+			if len(run.chunks) > 0 {
+				full, concatErr := schema.ConcatAgenticMessages(run.chunks)
+				if concatErr != nil {
+					event := run.finish(EventFailed, concatErr)
+					return &event
+				}
+				run.outputs = append(run.outputs, full)
+			}
+			run.chunks = nil
 			run.closeMessageStream()
 			return nil
 		}
@@ -271,6 +277,7 @@ func (run *agentRun) receiveMessageChunk() *Event {
 		return &event
 	}
 	if message != nil {
+		run.chunks = append(run.chunks, message)
 		run.streamLog.append(message)
 		run.projectMessage(message)
 	}
@@ -334,15 +341,59 @@ func (run *agentRun) popPending() (Event, bool) {
 // finish 释放本次运行资源，并恰好生成一个终态事件。
 func (run *agentRun) finish(kind EventKind, err error) Event {
 	run.finished = true
-	run.closeMessageStream()
-	run.cancel()
-	text := run.text.String()
-	if kind == EventCompleted {
-		run.session.complete(text)
-	} else {
-		run.session.release()
+	// Preserve received partial native output in the audit record only.
+	if len(run.chunks) > 0 {
+		if partial, concatErr := schema.ConcatAgenticMessages(run.chunks); concatErr == nil {
+			run.outputs = append(run.outputs, partial)
+		}
+		run.chunks = nil
 	}
+	run.closeMessageStream()
+	text := run.text.String()
+	next := run.inputMessages
+	if kind == EventCompleted {
+		next = run.capture.get()
+		if next == nil {
+			next = append(slices.Clone(run.inputMessages), run.outputs...)
+		}
+	}
+	if run.lease != nil {
+		// Canceled requests still get an audit record, using a bounded cleanup context.
+		commitCtx, cancel := context.WithTimeout(context.WithoutCancel(run.context), 10*time.Second)
+		audit := append([]*schema.AgenticMessage{schema.UserAgenticMessage(run.input)}, run.outputs...)
+		commitErr := run.lease.Commit(commitCtx, next, conversation.Turn{Status: string(kind), Messages: audit})
+		cancel()
+		run.lease.Close()
+		if commitErr != nil {
+			kind = EventFailed
+			err = fmt.Errorf("persist conversation: %w", commitErr)
+		}
+	}
+	run.session.release()
+	run.cancel()
 	return Event{Kind: kind, Text: text, Err: err}
+}
+
+func (run *agentRun) initialize() error {
+	lease, err := run.session.store.Begin(run.context, run.session.username, run.session.id)
+	if err != nil {
+		return err
+	}
+	run.lease = lease
+	run.inputMessages = append(slices.Clone(lease.Messages()), schema.UserAgenticMessage(run.input))
+	run.context = context.WithValue(run.context, captureKey{}, run.capture)
+	// Deep Agent injects the current system instruction on every Run.
+	modelInput := make([]*schema.AgenticMessage, 0, len(run.inputMessages))
+	for _, m := range run.inputMessages {
+		if m != nil && m.Role != schema.AgenticRoleTypeSystem {
+			modelInput = append(modelInput, m)
+		}
+	}
+	run.iterator = run.session.agent.Run(run.context, &adk.TypedAgentInput[*schema.AgenticMessage]{Messages: modelInput, EnableStreaming: true})
+	if run.iterator == nil {
+		return ErrAgentUnavailable
+	}
+	return nil
 }
 
 // closeMessageStream 关闭当前消息流，并把已收集的 Streaming chunk 聚合后打印。
@@ -353,16 +404,6 @@ func (run *agentRun) closeMessageStream() {
 	}
 	run.messageStream.Close()
 	run.messageStream = nil
-}
-
-// assistantMessage 用完整助手文本构造一条写入历史的 AgenticMessage。
-func assistantMessage(text string) *schema.AgenticMessage {
-	return &schema.AgenticMessage{
-		Role: schema.AgenticRoleTypeAssistant,
-		ContentBlocks: []*schema.ContentBlock{
-			schema.NewContentBlock(&schema.AssistantGenText{Text: text}),
-		},
-	}
 }
 
 // 编译期断言 Session 与 agentRun 分别实现 Conversation 与 Run。

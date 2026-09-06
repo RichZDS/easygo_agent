@@ -5,16 +5,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"syscall"
+	"time"
 
 	"easygo-agent/internal/agent/chatmodel"
 	deepagent "easygo-agent/internal/agent/deepagent.go"
 	agentruntime "easygo-agent/internal/agent/runtime"
 	"easygo-agent/internal/config"
+	"easygo-agent/internal/conversation"
+	"easygo-agent/internal/gateway"
 	"easygo-agent/internal/logger"
 	"easygo-agent/internal/observability"
-	"easygo-agent/internal/prompt"
 	"easygo-agent/internal/tools"
 	"easygo-agent/internal/tui"
 
@@ -24,13 +28,37 @@ import (
 
 type programRunner func(*tea.Program) (tea.Model, error)
 
+type Options struct {
+	Mode       string
+	Username   string
+	SessionID  string
+	NewSession bool
+	List       bool
+	Input      string
+}
+
 var (
 	lookupEnv                = os.LookupEnv
 	runProgram programRunner = runTeaProgram
 )
 
 // Run 加载配置并运行终端应用。
-func Run(ctx context.Context, configPath string) (resultErr error) {
+func Run(ctx context.Context, configPath string, options ...Options) (resultErr error) {
+	opts := Options{Mode: "cli", Username: "default"}
+	if len(options) > 0 {
+		opts = options[0]
+	}
+	if opts.Mode != "cli" && opts.Mode != "gateway" {
+		return errors.New("mode must be cli or gateway")
+	}
+	if opts.Mode == "cli" {
+		if err := conversation.ValidateUser(opts.Username); err != nil {
+			return err
+		}
+		if opts.NewSession && opts.SessionID != "" {
+			return errors.New("-new and -session are mutually exclusive")
+		}
+	}
 	// 运行应用
 	if ctx == nil {
 		ctx = context.Background()
@@ -57,6 +85,32 @@ func Run(ctx context.Context, configPath string) (resultErr error) {
 	}
 
 	// 集中构造全部内置 Tool，供 ReAct Agent 调用。
+	var store conversation.Store
+	if cfg.Database.Driver == "memory" {
+		store = conversation.NewMemory()
+	} else {
+		connectCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		store, err = conversation.NewPostgres(connectCtx, cfg.Database.DSN, cfg.Database.MaxConns)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("initialize PostgreSQL: %w", err)
+		}
+	}
+	defer store.Close()
+	if opts.Mode == "cli" && opts.List {
+		for offset := 0; ; offset += 100 {
+			items, listErr := store.List(ctx, opts.Username, 100, offset)
+			if listErr != nil {
+				return listErr
+			}
+			for _, s := range items {
+				fmt.Printf("%s\t%s\t%s\n", s.ID, s.Username, s.UpdatedAt.Format(time.RFC3339))
+			}
+			if len(items) < 100 {
+				return nil
+			}
+		}
+	}
 	allTools, err := tools.NewAgentTool().AllTools(ctx)
 	if err != nil {
 		wrappedErr := fmt.Errorf("initialize tools: %w", err)
@@ -71,16 +125,80 @@ func Run(ctx context.Context, configPath string) (resultErr error) {
 		return wrappedErr
 	}
 	// 构造 Eino Deep Agent，并由独立会话模块管理运行、流和对话历史。
-	agent, err := deepagent.New(ctx, model, allTools, cfg.Agent)
+	summaryModel, err := chatmodel.New(ctx, cfg.SubAgent)
+	if err != nil {
+		return fmt.Errorf("initialize summary model: %w", err)
+	}
+	agent, err := deepagent.New(ctx, model, allTools, cfg.Agent, summaryModel)
 	if err != nil {
 		wrappedErr := fmt.Errorf("initialize agent: %w", err)
 		logger.Error("assemble application failed", zap.String("stage", "agent"), zap.Error(wrappedErr))
 		return wrappedErr
 	}
-	conversation := agentruntime.New(ctx, agent, prompt.SystemPrompt)
+	if opts.Mode == "gateway" {
+		server := &http.Server{Addr: cfg.HTTP.Address, Handler: gateway.New(store, agent), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
+		return serve(ctx, server)
+	}
+	if opts.SessionID == "" && !opts.NewSession {
+		sessions, listErr := store.List(ctx, opts.Username, 1, 0)
+		if listErr != nil {
+			return listErr
+		}
+		if len(sessions) > 0 {
+			opts.SessionID = sessions[0].ID
+		}
+	}
+	if opts.SessionID == "" {
+		session, createErr := store.Create(ctx, opts.Username)
+		if createErr != nil {
+			return createErr
+		}
+		opts.SessionID = session.ID
+	}
+	sessionRuntime := agentruntime.NewStored(ctx, agent, store, opts.Username, opts.SessionID)
+	if opts.Input != "" {
+		fmt.Fprintf(os.Stderr, "user: %s · session: %s\n", opts.Username, opts.SessionID)
+		run, startErr := sessionRuntime.Start(opts.Input)
+		if startErr != nil {
+			return startErr
+		}
+		defer run.Cancel()
+		for {
+			event := run.Next()
+			switch event.Kind {
+			case agentruntime.EventTextDelta:
+				fmt.Print(event.Text)
+			case agentruntime.EventCompressing:
+				fmt.Fprintln(os.Stderr, "compressing history...")
+			case agentruntime.EventCompleted:
+				fmt.Println()
+				return nil
+			case agentruntime.EventCanceled:
+				return context.Canceled
+			case agentruntime.EventFailed:
+				return event.Err
+			}
+		}
+	}
+	var history []conversation.Turn
+	var after int64
+	for {
+		turns, historyErr := store.History(ctx, opts.Username, opts.SessionID, after, 100)
+		if historyErr != nil {
+			return historyErr
+		}
+		history = append(history, turns...)
+		if len(turns) < 100 {
+			break
+		}
+		after = turns[len(turns)-1].ID
+	}
+	ui := tui.New(sessionRuntime)
+	defer ui.Close()
+	ui.Restore(opts.Username, opts.SessionID, history)
 	// 启动 Bubble Tea TUI，占用备用屏幕；退出后由 ctx 取消。
 	program := tea.NewProgram(
-		tui.New(conversation),
+		ui,
 		tea.WithAltScreen(),
 		tea.WithContext(ctx),
 	)
@@ -91,6 +209,29 @@ func Run(ctx context.Context, configPath string) (resultErr error) {
 		return wrappedErr
 	}
 	return nil
+}
+
+func serve(ctx context.Context, server *http.Server) error {
+	server.BaseContext = func(_ net.Listener) context.Context { return ctx }
+	done := make(chan error, 1)
+	go func() { done <- server.ListenAndServe() }()
+	logger.Info("HTTP gateway listening", zap.String("address", server.Addr))
+	select {
+	case err := <-done:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		err := server.Shutdown(shutdownCtx)
+		if err != nil {
+			_ = server.Close()
+		}
+		<-done
+		return err
+	}
 }
 
 // runTeaProgram 执行一个 Bubble Tea 程序。

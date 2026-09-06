@@ -3,9 +3,11 @@ package main
 import (
 	"bufio"
 	"context"
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
+	osuser "os/user"
 	"strings"
 	"syscall"
 
@@ -23,6 +25,19 @@ func main() {
 
 // run 加载可选 .env，并使用固定配置文件启动应用。
 func run() int {
+	opts := app.Options{}
+	defaultUser := "default"
+	if user, err := osuser.Current(); err == nil {
+		defaultUser = user.Username
+	}
+	flag.StringVar(&opts.Mode, "mode", "cli", "cli or gateway")
+	flag.StringVar(&opts.Username, "user", defaultUser, "conversation username")
+	flag.StringVar(&opts.SessionID, "session", "", "resume a session ID (default: latest for user)")
+	flag.BoolVar(&opts.NewSession, "new", false, "create a new conversation")
+	flag.BoolVar(&opts.List, "list", false, "list this user's conversations")
+	flag.StringVar(&opts.Input, "prompt", "", "run one prompt and exit")
+	configPath := flag.String("config", config.DefaultPath, "YAML configuration path")
+	flag.Parse()
 	// 载入环境变量
 	if err := loadDotEnv(".env"); err != nil {
 		if _, printErr := fmt.Fprintf(os.Stderr, "application stopped: %v\n", err); printErr != nil {
@@ -34,7 +49,7 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	// 运行应用
-	if err := app.Run(ctx, config.DefaultPath); err != nil {
+	if err := app.Run(ctx, *configPath, opts); err != nil {
 		if _, printErr := fmt.Fprintf(os.Stderr, "application stopped: %v\n", err); printErr != nil {
 			logger.Error("print application error failed", zap.Error(printErr))
 		}

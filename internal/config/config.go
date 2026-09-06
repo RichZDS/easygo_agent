@@ -23,21 +23,34 @@ const (
 	DefaultPath = "configs/config.yaml"
 	// APIKeyEnvironmentVariable 是默认的模型凭证环境变量名。
 	APIKeyEnvironmentVariable = "EASYGO_AGENT_API_KEY"
-	defaultMaxSteps = 8
-	defaultTimeout      = "120s"
+	defaultMaxSteps           = 8
+	defaultTimeout            = "120s"
 )
 
 var envRefPattern = regexp.MustCompile(`^\{([A-Za-z_][A-Za-z0-9_]*)\}$`)
 
 // Config 包含模板的全部运行时配置。
 type Config struct {
-	Agent AgentConfig
-	Model ModelConfig
+	Agent    AgentConfig
+	Model    ModelConfig
+	SubAgent ModelConfig
+	Database DatabaseConfig
+	HTTP     HTTPConfig
+}
+
+type DatabaseConfig struct {
+	Driver   string `yaml:"driver"`
+	DSN      string `yaml:"dsn"`
+	MaxConns int32  `yaml:"max_conns"`
+}
+type HTTPConfig struct {
+	Address string `yaml:"address"`
 }
 
 // AgentConfig 控制 Eino ReAct 行为。
 type AgentConfig struct {
-	MaxSteps int
+	MaxSteps      int
+	ContextTokens int
 }
 
 // ModelConfig 控制单个 OpenAI 兼容模型。
@@ -49,12 +62,16 @@ type ModelConfig struct {
 }
 
 type rawConfig struct {
-	Agent rawAgentConfig `yaml:"agent"`
-	Model rawModelConfig `yaml:"model"`
+	Agent    rawAgentConfig  `yaml:"agent"`
+	Model    rawModelConfig  `yaml:"model"`
+	SubAgent *rawModelConfig `yaml:"subagent"`
+	Database DatabaseConfig  `yaml:"database"`
+	HTTP     HTTPConfig      `yaml:"http"`
 }
 
 type rawAgentConfig struct {
-	MaxSteps int `yaml:"max_steps"`
+	MaxSteps      int `yaml:"max_steps"`
+	ContextTokens int `yaml:"context_tokens"`
 }
 
 type rawModelConfig struct {
@@ -86,13 +103,16 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 
 	raw := rawConfig{
 		Agent: rawAgentConfig{
-			MaxSteps: defaultMaxSteps,
+			MaxSteps:      defaultMaxSteps,
+			ContextTokens: 24000,
 		},
-		Model: rawModelConfig{Timeout: defaultTimeout},
+		Model:    rawModelConfig{Timeout: defaultTimeout},
+		Database: DatabaseConfig{Driver: "postgres", DSN: "{DATABASE_URL}", MaxConns: 16},
+		HTTP:     HTTPConfig{Address: "127.0.0.1:8080"},
 	}
 	decoder := yaml.NewDecoder(bytes.NewReader(content))
 	// 允许未知字段 true 为不允许，false 允许
-	decoder.KnownFields(false)
+	decoder.KnownFields(true)
 	if err := decoder.Decode(&raw); err != nil {
 		wrappedErr := fmt.Errorf("decode config: %w", err)
 		logger.Error("load config failed", zap.String("path", path), zap.Error(wrappedErr))
@@ -123,7 +143,8 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 
 	cfg := Config{
 		Agent: AgentConfig{
-			MaxSteps: raw.Agent.MaxSteps,
+			MaxSteps:      raw.Agent.MaxSteps,
+			ContextTokens: raw.Agent.ContextTokens,
 		},
 		Model: ModelConfig{
 			Name:    strings.TrimSpace(raw.Model.Name),
@@ -131,6 +152,47 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 			Timeout: timeout,
 			APIKey:  apiKey,
 		},
+		Database: raw.Database,
+		HTTP:     raw.HTTP,
+	}
+	cfg.SubAgent = cfg.Model
+	if raw.SubAgent != nil {
+		sub := raw.SubAgent
+		if sub.Timeout == "" {
+			sub.Timeout = defaultTimeout
+		}
+		subTimeout, subErr := parseDuration(sub.Timeout)
+		if subErr != nil {
+			return Config{}, fmt.Errorf("subagent timeout: %w", subErr)
+		}
+		subKey, subErr := resolveAPIKey(sub.APIKey, lookupEnv)
+		if subErr != nil {
+			return Config{}, fmt.Errorf("subagent apikey: %w", subErr)
+		}
+		cfg.SubAgent = ModelConfig{Name: strings.TrimSpace(sub.Name), BaseURL: strings.TrimSpace(sub.BaseURL), Timeout: subTimeout, APIKey: subKey}
+		if subErr = validateConfig(Config{Agent: cfg.Agent, Model: cfg.SubAgent}); subErr != nil {
+			return Config{}, fmt.Errorf("subagent: %w", subErr)
+		}
+	}
+	if cfg.Database.Driver != "postgres" && cfg.Database.Driver != "memory" {
+		return Config{}, errors.New("database.driver must be postgres or memory")
+	}
+	if cfg.Database.MaxConns < 2 {
+		return Config{}, errors.New("database.max_conns must be at least 2")
+	}
+	if cfg.Database.Driver == "postgres" {
+		matches := envRefPattern.FindStringSubmatch(cfg.Database.DSN)
+		if matches == nil {
+			return Config{}, errors.New("database.dsn must be an environment reference like {DATABASE_URL}")
+		}
+		var ok bool
+		cfg.Database.DSN, ok = lookupEnv(matches[1])
+		if !ok || strings.TrimSpace(cfg.Database.DSN) == "" {
+			return Config{}, fmt.Errorf("environment variable %s is required", matches[1])
+		}
+	}
+	if strings.TrimSpace(cfg.HTTP.Address) == "" {
+		return Config{}, errors.New("http.address is required")
 	}
 	if err := validateConfig(cfg); err != nil {
 		wrappedErr := fmt.Errorf("validate config: %w", err)
@@ -177,6 +239,9 @@ func parseDuration(value string) (time.Duration, error) {
 
 // validateConfig 只校验运行模板所需的字段。
 func validateConfig(cfg Config) error {
+	if cfg.Agent.ContextTokens < 1024 {
+		return errors.New("agent.context_tokens must be at least 1024")
+	}
 	if cfg.Agent.MaxSteps <= 0 {
 		err := errors.New("agent max_steps must be greater than zero")
 		logger.Error("validate config failed", zap.String("field", "agent.max_steps"), zap.Error(err))

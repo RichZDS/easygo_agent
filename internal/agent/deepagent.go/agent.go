@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 
+	agentruntime "easygo-agent/internal/agent/runtime"
 	"easygo-agent/internal/config"
 	"easygo-agent/internal/logger"
+	"easygo-agent/internal/prompt"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/prebuilt/deep"
@@ -19,7 +21,7 @@ import (
 )
 
 // New 构造可并发调用的 Eino Deep Agent，消息类型为 *schema.AgenticMessage。
-func New(ctx context.Context, chatModel model.AgenticModel, tools []tool.BaseTool, cfg config.AgentConfig) (adk.TypedAgent[*schema.AgenticMessage], error) {
+func New(ctx context.Context, chatModel model.AgenticModel, tools []tool.BaseTool, cfg config.AgentConfig, summaryModels ...model.AgenticModel) (adk.TypedAgent[*schema.AgenticMessage], error) {
 	if chatModel == nil {
 		err := errors.New("chat model cannot be nil")
 		logger.Error("create agent failed", zap.String("field", "chat_model"), zap.Error(err))
@@ -31,9 +33,25 @@ func New(ctx context.Context, chatModel model.AgenticModel, tools []tool.BaseToo
 		return nil, err
 	}
 
+	summaryModel := chatModel
+	if len(summaryModels) > 0 && summaryModels[0] != nil {
+		summaryModel = summaryModels[0]
+	}
+	threshold := cfg.ContextTokens
+	if threshold <= 0 {
+		threshold = 24000
+	}
+	compression, err := newCompression(ctx, summaryModel, threshold)
+	if err != nil {
+		return nil, err
+	}
 	agent, err := deep.NewTyped(ctx, &deep.TypedConfig[*schema.AgenticMessage]{
-		Name:      "deep-agent",
-		ChatModel: chatModel,
+		Name:                   "deep-agent",
+		Instruction:            prompt.SystemPrompt,
+		WithoutWriteTodos:      true,
+		WithoutGeneralSubAgent: true,
+		Handlers:               []adk.TypedChatModelAgentMiddleware[*schema.AgenticMessage]{compression, &agentruntime.StateMiddleware{}},
+		ChatModel:              chatModel,
 		ToolsConfig: adk.ToolsConfig{
 			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: tools},
 		},

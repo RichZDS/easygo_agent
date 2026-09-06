@@ -67,6 +67,21 @@ func (model *Model) Init() tea.Cmd {
 	return textarea.Blink
 }
 
+// Close is called after the terminal program exits, including external errors.
+// Drain the canceled run so persistence and the database lease are released.
+func (model *Model) Close() {
+	if model.activeRun == nil {
+		return
+	}
+	model.activeRun.Cancel()
+	for {
+		event := model.activeRun.Next()
+		if event.Kind == agentruntime.EventCompleted || event.Kind == agentruntime.EventCanceled || event.Kind == agentruntime.EventFailed {
+			return
+		}
+	}
+}
+
 // Update 在 Bubble Tea 单线程中处理终端输入和 Agent 语义事件。
 func (model *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch message := message.(type) {
@@ -146,6 +161,12 @@ func (model *Model) applyRunEvent(event agentruntime.Event) tea.Cmd {
 	case agentruntime.EventToolFinished:
 		model.lines = append(model.lines, fmt.Sprintf("tool: %s completed", event.Tool))
 		model.refreshViewport()
+		return model.nextRunEvent()
+	case agentruntime.EventCompressing:
+		model.status = "compressing history · Ctrl+C cancel"
+		return model.nextRunEvent()
+	case agentruntime.EventCompressed:
+		model.status = "running · context compressed · Ctrl+C cancel"
 		return model.nextRunEvent()
 	case agentruntime.EventCompleted:
 		model.partial = event.Text

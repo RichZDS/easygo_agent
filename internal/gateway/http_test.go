@@ -130,7 +130,12 @@ func TestDisconnectCancelsAndAuditsRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(New(observedStore{memory, committed}, agent))
+	finished := make(chan struct{})
+	handler := New(observedStore{memory, committed}, agent)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(finished)
+		handler.ServeHTTP(w, r)
+	}))
 	defer server.Close()
 	req, err := http.NewRequestWithContext(ctx, "POST", server.URL+"/v1/users/alice/sessions/"+session.ID+"/runs", strings.NewReader(`{"input":"hi"}`))
 	if err != nil {
@@ -152,5 +157,19 @@ func TestDisconnectCancelsAndAuditsRun(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("disconnect did not release run")
+	}
+	select {
+	case <-finished:
+	case <-ctx.Done():
+		t.Fatal("HTTP cleanup did not finish")
+	}
+	lease, err := memory.Begin(ctx, "alice", session.ID)
+	if err != nil {
+		t.Fatalf("disconnect left session locked: %v", err)
+	}
+	lease.Close()
+	turns, err := memory.History(ctx, "alice", session.ID, 0, 10)
+	if err != nil || len(turns) != 1 || turns[0].Status != "canceled" {
+		t.Fatalf("disconnect audit=%+v err=%v", turns, err)
 	}
 }

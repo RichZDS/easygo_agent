@@ -39,6 +39,18 @@ func drain(run Run) Event {
 	}
 }
 
+func reasoningChunk(index int, text string) *schema.AgenticMessage {
+	return &schema.AgenticMessage{Role: schema.AgenticRoleTypeAssistant, ContentBlocks: []*schema.ContentBlock{
+		schema.NewContentBlockChunk(&schema.Reasoning{Text: text}, &schema.StreamingMeta{Index: index}),
+	}}
+}
+
+func assistantTextChunk(index int, text string) *schema.AgenticMessage {
+	return &schema.AgenticMessage{Role: schema.AgenticRoleTypeAssistant, ContentBlocks: []*schema.ContentBlock{
+		schema.NewContentBlockChunk(&schema.AssistantGenText{Text: text}, &schema.StreamingMeta{Index: index}),
+	}}
+}
+
 func TestNativeStreamingChunksAreConcatenated(t *testing.T) {
 	ctx := context.Background()
 	store := conversation.NewMemory()

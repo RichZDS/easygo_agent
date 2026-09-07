@@ -161,6 +161,14 @@ SSE 的每个事件包含 `event: <kind>` 和 JSON `data`，kind 包括：
 - `internal/gateway`：HTTP JSON / SSE 接口。
 - `internal/app`：配置、依赖组装和模式切换。
 
+## 运行结束与资源释放
+
+`Start` 只预留当前 runtime，首次 `Next()` 才加载历史并调用 Agent。`Cancel()` 非阻塞地请求取消；runtime 会自动提交已接收的原生审计、关闭消息流并释放会话锁，即使调用方已经停止读取事件。父 context 取消也会触发同样的收尾。
+
+退出时调用 `Run.Close()`：它请求取消并等待收尾，返回最终 `Event`，可与 `Next()` 并发或重复调用。`Close()` 不消费展示事件，也不会把已经完成的结果改为取消；提交失败返回 `failed`。HTTP、单次 CLI 与 TUI 共用这一规则，TUI 的关闭错误会返回应用入口。
+
+收尾提交使用独立的 10 秒超时 context；运行中的模型、工具和 Store 应遵守传入 context 的取消信号。成功终态只在提交和释放完成后可见。首次 `Next()` 前取消会释放预留，不调用模型或创建审计轮次。
+
 ## 验证
 
 ```powershell

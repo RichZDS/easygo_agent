@@ -32,6 +32,7 @@ type Model struct {
 	state        runState
 	lines        []string
 	partial      string
+	reasoning    string
 	activeRun    agentruntime.Run
 	status       string
 	width        int
@@ -68,18 +69,12 @@ func (model *Model) Init() tea.Cmd {
 }
 
 // Close is called after the terminal program exits, including external errors.
-// Drain the canceled run so persistence and the database lease are released.
-func (model *Model) Close() {
+// Runtime waits for persistence and lease release without consuming UI events.
+func (model *Model) Close() error {
 	if model.activeRun == nil {
-		return
+		return nil
 	}
-	model.activeRun.Cancel()
-	for {
-		event := model.activeRun.Next()
-		if event.Kind == agentruntime.EventCompleted || event.Kind == agentruntime.EventCanceled || event.Kind == agentruntime.EventFailed {
-			return
-		}
-	}
+	return model.activeRun.Close().Err
 }
 
 // Update 在 Bubble Tea 单线程中处理终端输入和 Agent 语义事件。
@@ -133,6 +128,7 @@ func (model *Model) submit() tea.Cmd {
 	model.input.Reset()
 	model.lines = append(model.lines, "you: "+content)
 	model.partial = ""
+	model.reasoning = ""
 	run, err := model.conversation.Start(content)
 	if err != nil {
 		model.lines = append(model.lines, "error: "+err.Error())
@@ -150,16 +146,23 @@ func (model *Model) submit() tea.Cmd {
 // applyRunEvent 只把运行模块的语义事件投影到 transcript。
 func (model *Model) applyRunEvent(event agentruntime.Event) tea.Cmd {
 	switch event.Kind {
+	case agentruntime.EventReasoningDelta:
+		model.reasoning += event.Text
+		model.refreshViewport()
+		return model.nextRunEvent()
 	case agentruntime.EventTextDelta:
+		model.commitReasoning()
 		model.partial += event.Text
 		model.refreshViewport()
 		return model.nextRunEvent()
 	case agentruntime.EventToolStarted:
-		model.lines = append(model.lines, fmt.Sprintf("tool: %s started", event.Tool))
+		model.commitReasoning()
+		model.lines = append(model.lines, formatToolStarted(event))
 		model.refreshViewport()
 		return model.nextRunEvent()
 	case agentruntime.EventToolFinished:
-		model.lines = append(model.lines, fmt.Sprintf("tool: %s completed", event.Tool))
+		model.commitReasoning()
+		model.lines = append(model.lines, formatToolFinished(event))
 		model.refreshViewport()
 		return model.nextRunEvent()
 	case agentruntime.EventCompressing:
@@ -169,12 +172,15 @@ func (model *Model) applyRunEvent(event agentruntime.Event) tea.Cmd {
 		model.status = "running · context compressed · Ctrl+C cancel"
 		return model.nextRunEvent()
 	case agentruntime.EventCompleted:
+		model.commitReasoning()
 		model.partial = event.Text
 		return model.finishCompleted()
 	case agentruntime.EventCanceled:
+		model.commitReasoning()
 		model.partial = event.Text
 		return model.finishCanceled()
 	case agentruntime.EventFailed:
+		model.commitReasoning()
 		model.partial = event.Text
 		return model.finishFailed(event.Err)
 	default:
@@ -182,11 +188,47 @@ func (model *Model) applyRunEvent(event agentruntime.Event) tea.Cmd {
 	}
 }
 
+// nextRunEvent 继续等待下一条运行事件。
 func (model *Model) nextRunEvent() tea.Cmd {
 	if model.activeRun == nil {
 		return nil
 	}
 	return waitForRunEvent(model.activeRun)
+}
+
+// commitReasoning 把已完成的 reasoning 固定到 transcript。
+func (model *Model) commitReasoning() {
+	if model.reasoning == "" {
+		return
+	}
+	model.lines = append(model.lines, "reasoning: "+model.reasoning)
+	model.reasoning = ""
+}
+
+// formatToolStarted 渲染工具调用开始时的全部细节。
+func formatToolStarted(event agentruntime.Event) string {
+	var builder strings.Builder
+	fmt.Fprintf(&builder, "tool started: %s", event.Tool)
+	if event.CallID != "" {
+		fmt.Fprintf(&builder, "\ncall_id: %s", event.CallID)
+	}
+	if event.Arguments != "" {
+		fmt.Fprintf(&builder, "\narguments: %s", event.Arguments)
+	}
+	return builder.String()
+}
+
+// formatToolFinished 渲染工具调用结束时的全部细节。
+func formatToolFinished(event agentruntime.Event) string {
+	var builder strings.Builder
+	fmt.Fprintf(&builder, "tool completed: %s", event.Tool)
+	if event.CallID != "" {
+		fmt.Fprintf(&builder, "\ncall_id: %s", event.CallID)
+	}
+	if event.Result != "" {
+		fmt.Fprintf(&builder, "\nresult: %s", event.Result)
+	}
+	return builder.String()
 }
 
 // finishCompleted 把完整助手文本固定到 transcript 后回到空闲。
@@ -240,6 +282,9 @@ func waitForRunEvent(run agentruntime.Run) tea.Cmd {
 // transcript 返回展示用 transcript，包含进行中的部分响应。
 func (model *Model) transcript() string {
 	lines := append([]string(nil), model.lines...)
+	if model.reasoning != "" {
+		lines = append(lines, "reasoning: "+model.reasoning)
+	}
 	if model.partial != "" {
 		lines = append(lines, "assistant: "+model.partial)
 	}

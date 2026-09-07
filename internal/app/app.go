@@ -18,7 +18,6 @@ import (
 	"easygo-agent/internal/conversation"
 	"easygo-agent/internal/gateway"
 	"easygo-agent/internal/logger"
-	"easygo-agent/internal/observability"
 	"easygo-agent/internal/tools"
 	"easygo-agent/internal/tui"
 
@@ -64,7 +63,7 @@ func Run(ctx context.Context, configPath string, options ...Options) (resultErr 
 		ctx = context.Background()
 	}
 	// 初始化日志
-	if _, err := observability.NewLogger(observability.DefaultPath()); err != nil {
+	if _, err := logger.New(logger.DefaultPath()); err != nil {
 		wrappedErr := fmt.Errorf("initialize logger: %w", err)
 		logger.Error("assemble application failed", zap.String("stage", "logger"), zap.Error(wrappedErr))
 		return wrappedErr
@@ -162,7 +161,7 @@ func Run(ctx context.Context, configPath string, options ...Options) (resultErr 
 		if startErr != nil {
 			return startErr
 		}
-		defer run.Cancel()
+		defer run.Close()
 		for {
 			event := run.Next()
 			switch event.Kind {
@@ -194,7 +193,7 @@ func Run(ctx context.Context, configPath string, options ...Options) (resultErr 
 		after = turns[len(turns)-1].ID
 	}
 	ui := tui.New(sessionRuntime)
-	defer ui.Close()
+	defer func() { resultErr = errors.Join(resultErr, ui.Close()) }()
 	ui.Restore(opts.Username, opts.SessionID, history)
 	// 启动 Bubble Tea TUI，占用备用屏幕；退出后由 ctx 取消。
 	program := tea.NewProgram(

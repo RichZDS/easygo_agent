@@ -106,23 +106,12 @@ func (h *Handler) run(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	terminal := false
-	defer func() {
-		run.Cancel()
-		if !terminal {
-			for {
-				e := run.Next()
-				if isTerminal(e.Kind) {
-					break
-				}
-			}
-		}
-	}()
+	defer run.Close()
 	streaming := strings.Contains(r.Header.Get("Accept"), "text/event-stream")
 	initialized := false
 	for {
 		event := run.Next()
-		terminal = isTerminal(event.Kind)
+		terminal := isTerminal(event.Kind)
 		if !initialized && event.Kind == agentruntime.EventFailed {
 			writeError(w, event.Err)
 			return

@@ -50,12 +50,19 @@ func New(ctx context.Context, chatModel model.AgenticModel, tools []tool.BaseToo
 		Instruction:            prompt.SystemPrompt,
 		WithoutWriteTodos:      true,
 		WithoutGeneralSubAgent: true,
-		Handlers:               []adk.TypedChatModelAgentMiddleware[*schema.AgenticMessage]{compression, &agentruntime.StateMiddleware{}},
 		ChatModel:              chatModel,
 		ToolsConfig: adk.ToolsConfig{
-			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: tools},
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools:               tools,
+				UnknownToolsHandler: unknownToolResult,
+			},
 		},
 		MaxIteration: cfg.MaxSteps,
+		Handlers: []adk.TypedChatModelAgentMiddleware[*schema.AgenticMessage]{
+			compression,
+			&agentruntime.StateMiddleware{},
+			newSafeToolMiddleware(),
+		},
 	})
 	if err != nil {
 		wrappedErr := fmt.Errorf("create Eino Deep Agent: %w", err)

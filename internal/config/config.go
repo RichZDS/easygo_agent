@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"easygo-agent/internal/logger"
+	"easygo-agent/internal/usermemory"
 
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -35,6 +36,7 @@ type Config struct {
 	Model    ModelConfig
 	SubAgent ModelConfig
 	Database DatabaseConfig
+	Memory   usermemory.Config
 	HTTP     HTTPConfig
 }
 
@@ -66,6 +68,7 @@ type rawConfig struct {
 	Model    rawModelConfig  `yaml:"model"`
 	SubAgent *rawModelConfig `yaml:"subagent"`
 	Database DatabaseConfig  `yaml:"database"`
+	Memory   rawMemoryConfig `yaml:"memory"`
 	HTTP     HTTPConfig      `yaml:"http"`
 }
 
@@ -79,6 +82,17 @@ type rawModelConfig struct {
 	BaseURL string `yaml:"base_url"`
 	Timeout string `yaml:"timeout"`
 	APIKey  string `yaml:"apikey"`
+}
+
+type rawMemoryConfig struct {
+	Enabled     bool   `yaml:"enabled"`
+	DailyAt     string `yaml:"daily_at"`
+	Timezone    string `yaml:"timezone"`
+	BatchTurns  int    `yaml:"batch_turns"`
+	TopK        int    `yaml:"top_k"`
+	StorageRoot string `yaml:"storage_root"`
+	DSN         string `yaml:"dsn"`
+	MaxConns    int32  `yaml:"max_conns"`
 }
 
 // Load 读取一份严格 YAML，并把 apikey 中的 {ENV} 引用解析为环境变量值。
@@ -101,6 +115,7 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 		return Config{}, wrappedErr
 	}
 
+	memoryDefaults := usermemory.DefaultConfig()
 	raw := rawConfig{
 		Agent: rawAgentConfig{
 			MaxSteps:      defaultMaxSteps,
@@ -108,6 +123,7 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 		},
 		Model:    rawModelConfig{Timeout: defaultTimeout},
 		Database: DatabaseConfig{Driver: "postgres", DSN: "{DATABASE_URL}", MaxConns: 16},
+		Memory:   rawMemoryConfig{Enabled: memoryDefaults.Enabled, DailyAt: memoryDefaults.DailyAt, Timezone: memoryDefaults.Timezone, BatchTurns: memoryDefaults.BatchTurns, TopK: memoryDefaults.TopK, StorageRoot: memoryDefaults.StorageRoot, DSN: "{MEMORY_DATABASE_URL}", MaxConns: memoryDefaults.MaxConns},
 		HTTP:     HTTPConfig{Address: "127.0.0.1:8080"},
 	}
 	decoder := yaml.NewDecoder(bytes.NewReader(content))
@@ -153,6 +169,7 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 			APIKey:  apiKey,
 		},
 		Database: raw.Database,
+		Memory:   usermemory.Config{Enabled: raw.Memory.Enabled, DailyAt: raw.Memory.DailyAt, Timezone: raw.Memory.Timezone, BatchTurns: raw.Memory.BatchTurns, TopK: raw.Memory.TopK, StorageRoot: raw.Memory.StorageRoot, DSN: raw.Memory.DSN, MaxConns: raw.Memory.MaxConns},
 		HTTP:     raw.HTTP,
 	}
 	cfg.SubAgent = cfg.Model
@@ -190,6 +207,23 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 		if !ok || strings.TrimSpace(cfg.Database.DSN) == "" {
 			return Config{}, fmt.Errorf("environment variable %s is required", matches[1])
 		}
+	}
+	if err := cfg.Memory.Validate(); err != nil {
+		return Config{}, fmt.Errorf("memory: %w", err)
+	}
+	if cfg.Database.Driver == "postgres" && cfg.Memory.Enabled {
+		matches := envRefPattern.FindStringSubmatch(cfg.Memory.DSN)
+		if matches == nil {
+			return Config{}, errors.New("memory.dsn must be an environment reference like {MEMORY_DATABASE_URL}")
+		}
+		value, ok := lookupEnv(matches[1])
+		if !ok || strings.TrimSpace(value) == "" {
+			return Config{}, fmt.Errorf("environment variable %s is required", matches[1])
+		}
+		cfg.Memory.DSN = value
+	}
+	if cfg.Memory.MaxConns < 1 {
+		return Config{}, errors.New("memory.max_conns must be at least 1")
 	}
 	if strings.TrimSpace(cfg.HTTP.Address) == "" {
 		return Config{}, errors.New("http.address is required")

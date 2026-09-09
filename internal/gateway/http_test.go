@@ -90,6 +90,42 @@ func TestHTTPConversationLifecycle(t *testing.T) {
 	}
 }
 
+func TestGatewayInjectsTheSameUserMemoryRuntimeAsTUI(t *testing.T) {
+	ctx := context.Background()
+	store := conversation.NewMemory()
+	session, err := store.Create(ctx, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, err := store.ReplaceProfile(ctx, "alice", []conversation.MemoryDraft{{
+		Kind: conversation.MemoryKindPreference, Content: "偏好先给结论", Importance: .9, Confidence: .9,
+		SourceSessions: []string{session.ID}, SourceTurnIDs: []int64{1},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := &testutil.Model{GenerateFunc: func(_ context.Context, messages []*schema.AgenticMessage) (*schema.AgenticMessage, error) {
+		for _, message := range messages {
+			if message.Role == schema.AgenticRoleTypeSystem && strings.Contains(message.String(), profile[0].ID) && strings.Contains(message.String(), "偏好先给结论") {
+				return testutil.Text("已采用长期偏好"), nil
+			}
+		}
+		return nil, fmt.Errorf("gateway missed user memory")
+	}}
+	calculator, _ := tools.NewCalculator()
+	agent, err := deepagent.New(ctx, model, []tool.BaseTool{calculator}, config.AgentConfig{MaxSteps: 2, ContextTokens: 24000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := New(store, agent, store)
+	request := httptest.NewRequest("POST", "/v1/users/alice/sessions/"+session.ID+"/runs", strings.NewReader(`{"input":"回答问题"}`))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "已采用长期偏好") {
+		t.Fatalf("gateway response=%d %s", response.Code, response.Body.String())
+	}
+}
+
 type observedStore struct {
 	conversation.Store
 	committed chan string

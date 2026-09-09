@@ -20,6 +20,7 @@ import (
 	"easygo-agent/internal/logger"
 	"easygo-agent/internal/tools"
 	"easygo-agent/internal/tui"
+	"easygo-agent/internal/usermemory"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"go.uber.org/zap"
@@ -96,6 +97,22 @@ func Run(ctx context.Context, configPath string, options ...Options) (resultErr 
 		}
 	}
 	defer store.Close()
+	var memoryStore conversation.MemoryStore
+	if cfg.Memory.Enabled {
+		if cfg.Database.Driver == "memory" {
+			var ok bool
+			memoryStore, ok = store.(conversation.MemoryStore)
+			if !ok {
+				return errors.New("in-memory conversation store does not support long-term memory")
+			}
+		} else {
+			memoryStore, err = conversation.NewMemoryPostgres(ctx, cfg.Memory.DSN, cfg.Memory.MaxConns)
+			if err != nil {
+				return fmt.Errorf("initialize dedicated memory PostgreSQL: %w", err)
+			}
+			defer memoryStore.(*conversation.MemoryPostgres).Close()
+		}
+	}
 	if opts.Mode == "cli" && opts.List {
 		for offset := 0; ; offset += 100 {
 			items, listErr := store.List(ctx, opts.Username, 100, offset)
@@ -134,8 +151,27 @@ func Run(ctx context.Context, configPath string, options ...Options) (resultErr 
 		logger.Error("assemble application failed", zap.String("stage", "agent"), zap.Error(wrappedErr))
 		return wrappedErr
 	}
+	if memoryStore != nil {
+		memoryAgent, memoryErr := usermemory.NewModelAgent(ctx, summaryModel)
+		if memoryErr != nil {
+			return memoryErr
+		}
+		writer, memoryErr := usermemory.NewFileProfileWriter(cfg.Memory.StorageRoot)
+		if memoryErr != nil {
+			return memoryErr
+		}
+		memoryService, memoryErr := usermemory.NewService(memoryStore, store, memoryAgent, writer, cfg.Memory)
+		if memoryErr != nil {
+			return fmt.Errorf("initialize user-memory service: %w", memoryErr)
+		}
+		if opts.Mode == "gateway" || (opts.Mode == "cli" && opts.Input == "" && !opts.List) {
+			if memoryErr = memoryService.StartScheduler(ctx); memoryErr != nil {
+				return fmt.Errorf("start user-memory scheduler: %w", memoryErr)
+			}
+		}
+	}
 	if opts.Mode == "gateway" {
-		server := &http.Server{Addr: cfg.HTTP.Address, Handler: gateway.New(store, agent), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
+		server := &http.Server{Addr: cfg.HTTP.Address, Handler: gateway.New(store, agent, memoryStore), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
 		return serve(ctx, server)
 	}
 	if opts.SessionID == "" && !opts.NewSession {
@@ -154,7 +190,7 @@ func Run(ctx context.Context, configPath string, options ...Options) (resultErr 
 		}
 		opts.SessionID = session.ID
 	}
-	sessionRuntime := agentruntime.NewStored(ctx, agent, store, opts.Username, opts.SessionID)
+	sessionRuntime := agentruntime.NewStored(ctx, agent, store, opts.Username, opts.SessionID, memoryStore)
 	if opts.Input != "" {
 		fmt.Fprintf(os.Stderr, "user: %s · session: %s\n", opts.Username, opts.SessionID)
 		run, startErr := sessionRuntime.Start(opts.Input)

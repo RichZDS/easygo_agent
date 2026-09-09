@@ -2,6 +2,7 @@ configs/config.local.yaml
 configs/config.production.yaml
 .env
 logs/
+Storage/
 *.log
 bin/
 coverage.out

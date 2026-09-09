@@ -19,12 +19,16 @@ import (
 )
 
 type Handler struct {
-	store conversation.Store
-	agent adk.TypedAgent[*schema.AgenticMessage]
+	store  conversation.Store
+	memory conversation.MemoryStore
+	agent  adk.TypedAgent[*schema.AgenticMessage]
 }
 
-func New(store conversation.Store, agent adk.TypedAgent[*schema.AgenticMessage]) http.Handler {
+func New(store conversation.Store, agent adk.TypedAgent[*schema.AgenticMessage], memory ...conversation.MemoryStore) http.Handler {
 	h := &Handler{store: store, agent: agent}
+	if len(memory) > 0 {
+		h.memory = memory[0]
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
 	mux.HandleFunc("POST /v1/users/{user}/sessions", h.create)
@@ -100,7 +104,7 @@ func (h *Handler) run(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "expected one JSON object"})
 		return
 	}
-	session := agentruntime.NewStored(r.Context(), h.agent, h.store, r.PathValue("user"), r.PathValue("id"))
+	session := agentruntime.NewStored(r.Context(), h.agent, h.store, r.PathValue("user"), r.PathValue("id"), h.memory)
 	run, err := session.StartContext(r.Context(), input.Input)
 	if err != nil {
 		writeError(w, err)

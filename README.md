@@ -1,6 +1,6 @@
 # EasyGo Eino Agent Template
 
-一个可复制的 Go Agent 模板，提供完整 CLI、HTTP 会话接口和 PostgreSQL 历史持久化，无前端。
+一个可复制的 Go Agent 模板，提供完整 CLI、HTTP 会话接口、PostgreSQL 历史持久化，以及独立数据库支持的用户级长期记忆，无前端。
 
 ## Agent loop
 
@@ -9,7 +9,9 @@ flowchart TD
   CLI[CLI: 用户名 / 会话] --> Runtime[共用 Runtime]
   HTTP[HTTP: 用户 / 会话接口] --> Runtime
   Runtime --> Load[获取会话锁 / 加载 PostgreSQL 上下文 / 加入输入]
-  Load --> Check[Eino BeforeModelRewriteState: 检查输入预算]
+  Load --> Recall[独立记忆库: 按时间与调用次数 Top 5]
+  Recall --> Check
+  Check[Eino BeforeModelRewriteState: 检查输入预算]
   Check -->|超过预算| Summary[独立 context-compressor Agent]
   Summary --> Finalize[Eino 原生摘要整理 / 再检查预算]
   Finalize --> Model[主 Agent 调用模型]
@@ -41,7 +43,17 @@ flowchart TD
 
 PostgreSQL 每轮加载一次上下文，轮次期间由 Eino 内存 state 管理循环，结束时提交一次。跨进程互斥使用 PostgreSQL session advisory lock，占用一条专用连接，但不会在推理期间保持长事务。锁随连接关闭释放；`max_conns` 同时约束可持有连接的运行数量。连接池饱和时新请求等待连接。
 
-`database.driver: memory` 使用相同 Store 接口，适合开发和测试；该模式退出即丢失历史。当前没有额外跨轮缓存。
+`database.driver: memory` 使用进程内会话与长期记忆 Store，适合开发和测试；退出即丢失数据。PostgreSQL 模式下，`database.dsn` 只保存会话历史，`memory.dsn` 是**必须独立**的长期记忆数据库。
+
+## 用户级长期记忆
+
+Gateway 与 TUI 都在同一 `Stored` Runtime 中，在每次模型调用前从独立记忆库检索最多 5 条 active 记忆，并只把这些结构化参考数据注入 Agent。被实际选中的记录会递增 `call_count`。排序严格为 `0.5 * recency + 0.5 * normalized_log_call_count`：recency 使用 `last_seen_at` 的 90 天半衰期。记忆内容不能覆盖系统/开发者策略或当前用户请求。
+
+长期记忆库的 `user_long_term_memories` 包含类别、内容、标签、重要性、置信度、来源会话/轮次、调用次数、首次/最后观测时间、最后调用时间、过期时间、创建/更新时间、归档时间、状态、版本及 1–5 的 profile slot。部分唯一索引从数据库层保证每个用户最多五条 active 画像；被替换的记录会归档而非静默删除。
+
+每天按 `memory.timezone` 的 `memory.daily_at`（默认 03:00）运行独立的无工具记忆 Agent：它只读取已完成的原始轮次，按 `memory.batch_turns` 分批提取有来源证据的候选，做全局排名取 Top 5，再和当前五槽画像对比、合并或淘汰。成功写库并物化文件后才推进 checkpoint，失败会在后续运行重试。
+
+数据库是唯一事实来源；`Storage/Long-term Memory/User profile/u-<sha256(user-id)>/` 是可重建物化视图，包含 `Agent.md`、`Memory.md`、`Experiment.md`、`Error.md`、`Preferences.md`、`Style.md`、`Prompts.md`、`Constraints.md` 和 `Metadata.md`。目录使用用户 ID 的 SHA-256，避免将原始用户名作为路径或暴露在目录列表中。
 
 ## 上下文预算
 
@@ -58,7 +70,7 @@ PostgreSQL 每轮加载一次上下文，轮次期间由 Eino 内存 state 管�
 ```powershell
 Copy-Item .env.example .env
 # 编辑 .env，填写 MODEL_API_KEY、SUBMODEL_API_KEY。
-# DATABASE_URL 示例与下面的本地开发数据库一致。
+# DATABASE_URL 和 MEMORY_DATABASE_URL 分别指向会话库与独立记忆库。
 docker compose up -d postgres
 go run . -user alice
 ```
@@ -69,9 +81,10 @@ go run . -user alice
 MODEL_API_KEY=your-main-model-key
 SUBMODEL_API_KEY=your-summary-model-key
 DATABASE_URL=postgres://easygo:easygo@127.0.0.1:5432/easygo?sslmode=disable
+MEMORY_DATABASE_URL=postgres://easygo:easygo@127.0.0.1:5432/easygo_memory?sslmode=disable
 ```
 
-数据库启动时自动执行 `internal/conversation/schema.sql` 的幂等建表，多个进程的初始化通过事务锁串行化。示例 Compose 的凭证仅用于 loopback 本地开发。
+会话库和记忆库启动时分别自动执行 `internal/conversation/schema.sql` 与 `internal/conversation/memory_schema.sql` 的幂等建表，多个进程的初始化通过事务锁串行化。示例 Compose 会创建两个独立数据库，凭证仅用于 loopback 本地开发；若沿用已有 volume，请先执行 `CREATE DATABASE easygo_memory`。
 
 配置位于 `configs/config.yaml`，也可用 `-config` 指定其他 YAML：
 
@@ -93,6 +106,15 @@ database:
   driver: postgres
   dsn: "{DATABASE_URL}"
   max_conns: 16
+memory:
+  enabled: true
+  dsn: "{MEMORY_DATABASE_URL}" # 独立于 database.dsn
+  max_conns: 4
+  daily_at: "03:00"
+  timezone: "Asia/Shanghai"
+  batch_turns: 20
+  top_k: 5
+  storage_root: "Storage/Long-term Memory/User profile"
 http:
   address: 127.0.0.1:8080
 ```
@@ -131,7 +153,7 @@ HTTP 默认只监听 `127.0.0.1:8080`。URL 中的用户名是会话命名空间
 | `GET /v1/users/{user}/sessions/{id}/messages?after=0&limit=50` | 原始历史轮次及 `next_after` 游标 |
 | `POST /v1/users/{user}/sessions/{id}/runs` | 执行一轮；请求体 `{"input":"..."}` |
 
-`limit` 为 1–100。历史的 `after` 是上次返回的轮次 ID；`messages` 字段直接返回 Eino 原生消息。POST runs 默认返回最终 JSON；添加 `Accept: text/event-stream` 获取 SSE。请求体最大 64 KiB，每次 HTTP 请求最长 10 分钟；客户端断连会取消运行。
+`limit` 为 1–100。历史的 `after` 是上次返回的轮次 ID；`messages` 字段直接返回 Eino 原生消息。POST runs 默认返回最终 JSON；添加 `Accept: text/event-stream` 获取 SSE。请求体最大 64 KiB，每次 HTTP 请求最长 10 分钟；客户端断连会取消运行。无论 Gateway 或 TUI，每轮都走相同的长期记忆检索和注入路径。
 
 PowerShell 示例：
 
@@ -157,6 +179,7 @@ SSE 的每个事件包含 `event: <kind>` 和 JSON `data`，kind 包括：
 - `internal/agent/deepagent.go`：构造 Eino 主 Agent、摘要 Agent、上下文预算中间件。
 - `internal/agent/runtime`：加载/提交原生上下文、流合并、运行生命周期和展示事件。
 - `internal/conversation`：PostgreSQL 与内存存储实现。
+- `internal/usermemory`：独立记忆库、时间/调用次数 50/50 排名、03:00 consolidation Agent 和 Storage 物化。
 - `internal/tui`：终端输入、历史展示、流式输出和取消。
 - `internal/gateway`：HTTP JSON / SSE 接口。
 - `internal/app`：配置、依赖组装和模式切换。
@@ -174,6 +197,8 @@ SSE 的每个事件包含 `event: <kind>` 和 JSON `data`，kind 包括：
 ```powershell
 go test ./...
 go vet ./...
+# 200 个实际 Eino Agent / Runtime 的用户记忆端到端验收（必须 100%，门槛为 95%）。
+go test ./internal/agent/deepagent.go -run TestUserMemoryEndToEndAcceptanceAtLeastNinetyFivePercent -count=1 -v
 # 需要启用 CGO 且安装 C 编译器。
 go test -race ./...
 # 使用专用测试数据库。测试只清理自己的随机用户名记录。

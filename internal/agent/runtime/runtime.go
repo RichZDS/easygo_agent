@@ -13,6 +13,7 @@ import (
 
 	"easygo-agent/internal/conversation"
 	"easygo-agent/internal/logger"
+	"easygo-agent/internal/usermemory"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
@@ -97,13 +98,18 @@ type Session struct {
 	agent    adk.TypedAgent[*schema.AgenticMessage] // 实际执行推理的 Eino Agent
 	active   bool                                   // 是否已有一次尚未结束的运行
 	store    conversation.Store
+	memory   conversation.MemoryStore
 	username string
 	id       string
 }
 
 // NewStored binds a runtime to a durable, user-scoped conversation.
-func NewStored(parent context.Context, agent adk.TypedAgent[*schema.AgenticMessage], store conversation.Store, username, id string) *Session {
-	return &Session{parent: parent, agent: agent, store: store, username: username, id: id}
+func NewStored(parent context.Context, agent adk.TypedAgent[*schema.AgenticMessage], store conversation.Store, username, id string, memory ...conversation.MemoryStore) *Session {
+	session := &Session{parent: parent, agent: agent, store: store, username: username, id: id}
+	if len(memory) > 0 {
+		session.memory = memory[0]
+	}
+	return session
 }
 
 // Start 把用户输入加入历史，并启动一条启用流式输出的 Eino 运行。
@@ -518,8 +524,21 @@ func (run *agentRun) initialize() error {
 	}
 	run.lease = lease
 	run.inputMessages = append(slices.Clone(lease.Messages()), schema.UserAgenticMessage(run.input))
+	var memoryContext string
+	if run.session.memory != nil {
+		memories, recallErr := run.session.memory.Recall(run.context, run.session.username, conversation.MaxProfileMemories)
+		if recallErr != nil {
+			lease.Close()
+			run.lease = nil
+			return fmt.Errorf("recall user memory: %w", recallErr)
+		}
+		memoryContext = usermemory.Prompt(memories)
+	}
 	// Deep Agent injects the current system instruction on every Run.
 	modelInput := make([]*schema.AgenticMessage, 0, len(run.inputMessages))
+	if memoryContext != "" {
+		modelInput = append(modelInput, schema.SystemAgenticMessage(memoryContext))
+	}
 	for _, m := range run.inputMessages {
 		if m != nil && m.Role != schema.AgenticRoleTypeSystem {
 			modelInput = append(modelInput, m)

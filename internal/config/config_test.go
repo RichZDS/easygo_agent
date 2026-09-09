@@ -21,11 +21,13 @@ subagent:
 database:
   driver: postgres
   dsn: "{TEST_DB}"
+memory:
+  dsn: "{MEMORY_DB}"
 http:
   address: "127.0.0.1:9000"
 `
 	lookup := func(key string) (string, bool) {
-		values := map[string]string{"MAIN_KEY": "main-key", "SUMMARY_KEY": "summary-key", "TEST_DB": "postgres://localhost/test"}
+		values := map[string]string{"MAIN_KEY": "main-key", "SUMMARY_KEY": "summary-key", "TEST_DB": "postgres://localhost/test", "MEMORY_DB": "postgres://localhost/memory"}
 		v, ok := values[key]
 		return v, ok
 	}

@@ -7,6 +7,18 @@ database:
   dsn: "{DATABASE_URL}"
   max_conns: 16
 
+# Dedicated database for user-level long-term memory. It is deliberately not
+# the conversation database; grant this DSN only to the memory runtime.
+memory:
+  enabled: true
+  dsn: "{MEMORY_DATABASE_URL}"
+  max_conns: 4
+  daily_at: "03:00"
+  timezone: "Asia/Shanghai"
+  batch_turns: 20
+  top_k: 5
+  storage_root: "Storage/Long-term Memory/User profile"
+
 http:
   address: "127.0.0.1:8080"
 

@@ -16,11 +16,21 @@ type memoryEntry struct {
 	busy     bool
 }
 type Memory struct {
-	mu      sync.Mutex
-	entries map[string]*memoryEntry
+	mu          sync.Mutex
+	entries     map[string]*memoryEntry
+	longTerms   map[string]map[string]LongTermMemory
+	checkpoints map[string]time.Time
+	memoryJobs  map[string]bool
 }
 
-func NewMemory() *Memory { return &Memory{entries: map[string]*memoryEntry{}} }
+func NewMemory() *Memory {
+	return &Memory{
+		entries:     map[string]*memoryEntry{},
+		longTerms:   map[string]map[string]LongTermMemory{},
+		checkpoints: map[string]time.Time{},
+		memoryJobs:  map[string]bool{},
+	}
+}
 func (m *Memory) Close() {}
 func (m *Memory) Create(ctx context.Context, user string) (Session, error) {
 	if err := ctx.Err(); err != nil {

@@ -3,6 +3,7 @@ package deepagent_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -271,5 +272,125 @@ func TestSharedAgentRunsIndependentUsersConcurrently(t *testing.T) {
 	}
 	if !seen["alice"] || !seen["bob"] {
 		t.Fatalf("cross-user state leakage: %v", seen)
+	}
+}
+
+// This is an end-to-end runtime assertion: a real Eino Deep Agent receives
+// exactly the user-scoped ranked profile before its model invocation. Both TUI
+// and HTTP Gateway construct this same Stored runtime.
+func TestDeepAgentReceivesUserLongTermMemory(t *testing.T) {
+	ctx := context.Background()
+	store := conversation.NewMemory()
+	session, err := store.Create(ctx, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, err := store.ReplaceProfile(ctx, "alice", []conversation.MemoryDraft{{
+		Kind: conversation.MemoryKindStyle, Content: "始终优先使用简洁中文", Importance: .9, Confidence: .95,
+		SourceSessions: []string{session.ID}, SourceTurnIDs: []int64{1},
+	}})
+	if err != nil || len(profile) != 1 {
+		t.Fatalf("profile=%+v err=%v", profile, err)
+	}
+	model := &testutil.Model{GenerateFunc: func(_ context.Context, messages []*schema.AgenticMessage) (*schema.AgenticMessage, error) {
+		var hasMemory bool
+		for _, message := range messages {
+			if message.Role == schema.AgenticRoleTypeSystem && strings.Contains(message.String(), "始终优先使用简洁中文") && strings.Contains(message.String(), profile[0].ID) {
+				hasMemory = true
+			}
+		}
+		if !hasMemory {
+			return nil, errors.New("ranked user memory was not injected")
+		}
+		return testutil.Text("收到"), nil
+	}}
+	calculator, _ := tools.NewCalculator()
+	agent, err := deepagent.New(ctx, model, []tool.BaseTool{calculator}, config.AgentConfig{MaxSteps: 2, ContextTokens: 24000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := agentruntime.NewStored(ctx, agent, store, "alice", session.ID, store).Start("你好")
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := collect(t, run)
+	if last := events[len(events)-1]; last.Kind != agentruntime.EventCompleted || last.Text != "收到" {
+		t.Fatalf("terminal=%+v", last)
+	}
+	updated, _ := store.ActiveProfile(ctx, "alice")
+	if updated[0].CallCount != 1 {
+		t.Fatalf("injected memory was not counted exactly once: %+v", updated[0])
+	}
+}
+
+// The acceptance suite exercises the production Eino Agent + Stored runtime
+// for 200 independent users. It pre-registers the expected memory for every
+// case and fails below 95%; 200/200 makes ranking, injection, isolation and
+// retrieval accounting measurable rather than a one-off manual check.
+func TestUserMemoryEndToEndAcceptanceAtLeastNinetyFivePercent(t *testing.T) {
+	ctx := context.Background()
+	store := conversation.NewMemory()
+	model := &testutil.Model{GenerateFunc: func(_ context.Context, messages []*schema.AgenticMessage) (*schema.AgenticMessage, error) {
+		var requested, remembered string
+		for _, message := range messages {
+			text := message.String()
+			if message.Role == schema.AgenticRoleTypeUser {
+				for _, block := range message.ContentBlocks {
+					if block != nil && block.UserInputText != nil && strings.HasPrefix(block.UserInputText.Text, "case-") {
+						requested = block.UserInputText.Text
+					}
+				}
+			}
+			if message.Role == schema.AgenticRoleTypeSystem {
+				for i := 0; i < 200; i++ {
+					candidate := fmt.Sprintf("preference-%03d", i)
+					if strings.Contains(text, candidate) {
+						remembered = candidate
+						break
+					}
+				}
+			}
+		}
+		want := "preference-" + strings.TrimPrefix(requested, "case-")
+		if remembered != want {
+			return nil, fmt.Errorf("memory isolation/injection mismatch: got %q want %q", remembered, want)
+		}
+		return testutil.Text(remembered), nil
+	}}
+	calculator, _ := tools.NewCalculator()
+	agent, err := deepagent.New(ctx, model, []tool.BaseTool{calculator}, config.AgentConfig{MaxSteps: 2, ContextTokens: 24000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const cases = 200
+	passed := 0
+	for i := 0; i < cases; i++ {
+		user := fmt.Sprintf("user-%03d", i)
+		session, createErr := store.Create(ctx, user)
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		preference := fmt.Sprintf("preference-%03d", i)
+		_, replaceErr := store.ReplaceProfile(ctx, user, []conversation.MemoryDraft{{
+			Kind: conversation.MemoryKindPreference, Content: preference, Importance: .9, Confidence: .99,
+			SourceSessions: []string{session.ID}, SourceTurnIDs: []int64{1},
+		}})
+		if replaceErr != nil {
+			t.Fatal(replaceErr)
+		}
+		run, startErr := agentruntime.NewStored(ctx, agent, store, user, session.ID, store).Start(fmt.Sprintf("case-%03d", i))
+		if startErr != nil {
+			t.Fatal(startErr)
+		}
+		events := collect(t, run)
+		last := events[len(events)-1]
+		if last.Kind == agentruntime.EventCompleted && last.Text == preference {
+			passed++
+		}
+	}
+	accuracy := float64(passed) / cases
+	t.Logf("user-memory E2E accuracy: %.2f%% (%d/%d)", accuracy*100, passed, cases)
+	if accuracy < .95 {
+		t.Fatalf("user-memory E2E accuracy %.2f%% (%d/%d), need >=95%%", accuracy*100, passed, cases)
 	}
 }

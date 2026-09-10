@@ -36,6 +36,7 @@ type Config struct {
 	SubAgent ModelConfig
 	Database DatabaseConfig
 	HTTP     HTTPConfig
+	Queue    QueueConfig
 }
 
 type DatabaseConfig struct {
@@ -45,6 +46,13 @@ type DatabaseConfig struct {
 }
 type HTTPConfig struct {
 	Address string `yaml:"address"`
+}
+
+type QueueConfig struct {
+	MaxPending   int
+	MaxWorkers   int
+	PollInterval time.Duration
+	LeaseTTL     time.Duration
 }
 
 // AgentConfig 控制 Eino ReAct 行为。
@@ -67,6 +75,7 @@ type rawConfig struct {
 	SubAgent *rawModelConfig `yaml:"subagent"`
 	Database DatabaseConfig  `yaml:"database"`
 	HTTP     HTTPConfig      `yaml:"http"`
+	Queue    rawQueueConfig  `yaml:"queue"`
 }
 
 type rawAgentConfig struct {
@@ -79,6 +88,13 @@ type rawModelConfig struct {
 	BaseURL string `yaml:"base_url"`
 	Timeout string `yaml:"timeout"`
 	APIKey  string `yaml:"apikey"`
+}
+
+type rawQueueConfig struct {
+	MaxPending   int    `yaml:"max_pending"`
+	MaxWorkers   int    `yaml:"max_workers"`
+	PollInterval string `yaml:"poll_interval"`
+	LeaseTTL     string `yaml:"lease_ttl"`
 }
 
 // Load 读取一份严格 YAML，并把 apikey 中的 {ENV} 引用解析为环境变量值。
@@ -109,6 +125,7 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 		Model:    rawModelConfig{Timeout: defaultTimeout},
 		Database: DatabaseConfig{Driver: "postgres", DSN: "{DATABASE_URL}", MaxConns: 16},
 		HTTP:     HTTPConfig{Address: "127.0.0.1:8080"},
+		Queue:    rawQueueConfig{MaxPending: 100, MaxWorkers: 4, PollInterval: "250ms", LeaseTTL: "30s"},
 	}
 	decoder := yaml.NewDecoder(bytes.NewReader(content))
 	// 允许未知字段 true 为不允许，false 允许
@@ -117,6 +134,18 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 		wrappedErr := fmt.Errorf("decode config: %w", err)
 		logger.Error("load config failed", zap.String("path", path), zap.Error(wrappedErr))
 		return Config{}, wrappedErr
+	}
+	if raw.Queue.MaxPending == 0 {
+		raw.Queue.MaxPending = 100
+	}
+	if raw.Queue.MaxWorkers == 0 {
+		raw.Queue.MaxWorkers = 4
+	}
+	if strings.TrimSpace(raw.Queue.PollInterval) == "" {
+		raw.Queue.PollInterval = "250ms"
+	}
+	if strings.TrimSpace(raw.Queue.LeaseTTL) == "" {
+		raw.Queue.LeaseTTL = "30s"
 	}
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
@@ -133,6 +162,14 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 		wrappedErr := fmt.Errorf("parse model timeout: %w", err)
 		logger.Error("load config failed", zap.String("field", "model.timeout"), zap.Error(wrappedErr))
 		return Config{}, wrappedErr
+	}
+	pollInterval, err := parseDuration(raw.Queue.PollInterval)
+	if err != nil {
+		return Config{}, fmt.Errorf("parse queue.poll_interval: %w", err)
+	}
+	leaseTTL, err := parseDuration(raw.Queue.LeaseTTL)
+	if err != nil {
+		return Config{}, fmt.Errorf("parse queue.lease_ttl: %w", err)
 	}
 	apiKey, err := resolveAPIKey(raw.Model.APIKey, lookupEnv)
 	if err != nil {
@@ -154,6 +191,12 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 		},
 		Database: raw.Database,
 		HTTP:     raw.HTTP,
+		Queue: QueueConfig{
+			MaxPending:   raw.Queue.MaxPending,
+			MaxWorkers:   raw.Queue.MaxWorkers,
+			PollInterval: pollInterval,
+			LeaseTTL:     leaseTTL,
+		},
 	}
 	cfg.SubAgent = cfg.Model
 	if raw.SubAgent != nil {
@@ -193,6 +236,15 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 	}
 	if strings.TrimSpace(cfg.HTTP.Address) == "" {
 		return Config{}, errors.New("http.address is required")
+	}
+	if cfg.Queue.MaxPending <= 0 {
+		return Config{}, errors.New("queue.max_pending must be greater than zero")
+	}
+	if cfg.Queue.MaxWorkers <= 0 {
+		return Config{}, errors.New("queue.max_workers must be greater than zero")
+	}
+	if cfg.Queue.PollInterval <= 0 || cfg.Queue.LeaseTTL <= 0 {
+		return Config{}, errors.New("queue durations must be greater than zero")
 	}
 	if err := validateConfig(cfg); err != nil {
 		wrappedErr := fmt.Errorf("validate config: %w", err)

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	deepagent "easygo-agent/internal/agent/deepagent.go"
+	agentruntime "easygo-agent/internal/agent/runtime"
 	"easygo-agent/internal/config"
 	"easygo-agent/internal/conversation"
 	"easygo-agent/internal/testutil"
@@ -20,6 +21,21 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+func TestEventPayloadKeepsToolDetails(t *testing.T) {
+	payload := eventPayload(agentruntime.Event{
+		Kind:      agentruntime.EventToolStarted,
+		Tool:      "calculator",
+		CallID:    "call-1",
+		Arguments: `{"a":2}`,
+		Result:    "5",
+	})
+	for key, want := range map[string]string{"tool": "calculator", "call_id": "call-1", "arguments": `{"a":2}`, "result": "5"} {
+		if payload[key] != want {
+			t.Fatalf("payload[%q]=%v want %q", key, payload[key], want)
+		}
+	}
+}
+
 func TestHTTPConversationLifecycle(t *testing.T) {
 	ctx := context.Background()
 	store := conversation.NewMemory()
@@ -27,7 +43,7 @@ func TestHTTPConversationLifecycle(t *testing.T) {
 		return testutil.Text("你好"), nil
 	}}
 	calculator, _ := tools.NewCalculator()
-	agent, err := deepagent.New(ctx, model, []tool.BaseTool{calculator}, config.AgentConfig{MaxSteps: 3, ContextTokens: 24000})
+	agent, err := deepagent.New(ctx, deepagent.Config{ChatModel: model, Tools: []tool.BaseTool{calculator}, Agent: config.AgentConfig{MaxSteps: 3, ContextTokens: 24000}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +142,7 @@ func TestDisconnectCancelsAndAuditsRun(t *testing.T) {
 		return reader, nil
 	}}
 	calculator, _ := tools.NewCalculator()
-	agent, err := deepagent.New(ctx, model, []tool.BaseTool{calculator}, config.AgentConfig{MaxSteps: 3, ContextTokens: 24000})
+	agent, err := deepagent.New(ctx, deepagent.Config{ChatModel: model, Tools: []tool.BaseTool{calculator}, Agent: config.AgentConfig{MaxSteps: 3, ContextTokens: 24000}})
 	if err != nil {
 		t.Fatal(err)
 	}

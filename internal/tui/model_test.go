@@ -67,7 +67,7 @@ func TestUICloseAuditsAndReleasesActiveRun(t *testing.T) {
 	model := &testutil.Model{GenerateFunc: func(context.Context, []*schema.AgenticMessage) (*schema.AgenticMessage, error) {
 		return testutil.Text("partial"), nil
 	}}
-	agent, err := deepagent.New(ctx, model, nil, config.AgentConfig{MaxSteps: 3, ContextTokens: 24000})
+	agent, err := deepagent.New(ctx, deepagent.Config{ChatModel: model, Agent: config.AgentConfig{MaxSteps: 3, ContextTokens: 24000}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,5 +144,37 @@ func TestTranscriptIncludesStreamingReasoning(t *testing.T) {
 	got := model.transcript()
 	if !strings.Contains(got, "reasoning: The user wants a calculation") {
 		t.Fatalf("transcript missing reasoning: %q", got)
+	}
+}
+
+func TestQueueViewShowsBannerAndStatuses(t *testing.T) {
+	model := New(nil)
+	model.queueMode = true
+	model.queueItems = []conversation.RunRecord{
+		{ID: "running-id", Input: "计算 12 * 34", Status: conversation.RunRunning},
+		{ID: "queued-id", Input: "查询上海天气", Status: conversation.RunQueued, Position: 1},
+	}
+	model.refreshViewport()
+	view := model.View()
+	for _, want := range []string{"EASY GO", "running: 1 · queued: 1", "[running]", "[queued]", "计算 12 * 34"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("queue view missing %q: %q", want, view)
+		}
+	}
+}
+
+func TestQueueTabSwitchesInputFocus(t *testing.T) {
+	model := New(nil)
+	model.queueMode = true
+	if !model.input.Focused() {
+		t.Fatal("input should start focused")
+	}
+	model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if model.input.Focused() || !model.queueFocus {
+		t.Fatal("tab did not move focus to queue")
+	}
+	model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if !model.input.Focused() || model.queueFocus {
+		t.Fatal("second tab did not move focus to input")
 	}
 }

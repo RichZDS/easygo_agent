@@ -10,6 +10,12 @@ database:
 http:
   address: "127.0.0.1:8080"
 
+queue:
+  max_pending: 100
+  max_workers: 4
+  poll_interval: 250ms
+  lease_ttl: 30s
+
 model:
   name: deepseek-v4-pro
   base_url: "https://api.deepseek.com"

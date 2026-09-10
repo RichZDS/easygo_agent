@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadStorageAndSummaryConfig(t *testing.T) {
@@ -23,6 +24,11 @@ database:
   dsn: "{TEST_DB}"
 http:
   address: "127.0.0.1:9000"
+queue:
+  max_pending: 7
+  max_workers: 2
+  poll_interval: 10ms
+  lease_ttl: 2s
 `
 	lookup := func(key string) (string, bool) {
 		values := map[string]string{"MAIN_KEY": "main-key", "SUMMARY_KEY": "summary-key", "TEST_DB": "postgres://localhost/test"}
@@ -36,7 +42,7 @@ http:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.SubAgent.Name != "summary" || cfg.SubAgent.APIKey != "summary-key" || cfg.Database.DSN != "postgres://localhost/test" || cfg.HTTP.Address != "127.0.0.1:9000" || cfg.Agent.ContextTokens != 12000 {
+	if cfg.SubAgent.Name != "summary" || cfg.SubAgent.APIKey != "summary-key" || cfg.Database.DSN != "postgres://localhost/test" || cfg.HTTP.Address != "127.0.0.1:9000" || cfg.Agent.ContextTokens != 12000 || cfg.Queue.MaxWorkers != 2 || cfg.Queue.MaxPending != 7 || cfg.Queue.PollInterval != 10*time.Millisecond || cfg.Queue.LeaseTTL != 2*time.Second {
 		t.Fatal("config mapping failed")
 	}
 	for _, tc := range []struct{ name, content string }{

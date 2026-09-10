@@ -9,6 +9,8 @@ import (
 
 // Restore renders the audit history. Model context stays owned by the runtime.
 func (m *Model) Restore(username, id string, turns []conversation.Turn) {
+	m.username = username
+	m.sessionID = id
 	m.lines = append(m.lines, fmt.Sprintf("user: %s · session: %s", username, id))
 	for _, turn := range turns {
 		for _, message := range turn.Messages {
@@ -44,6 +46,9 @@ func (m *Model) Restore(username, id string, turns []conversation.Turn) {
 		if turn.Status != "completed" {
 			m.lines = append(m.lines, "run: "+turn.Status)
 		}
+	}
+	if m.queueMode {
+		m.loadQueue()
 	}
 	m.refreshViewport()
 }

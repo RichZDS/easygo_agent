@@ -11,14 +11,10 @@ import (
 	"syscall"
 	"time"
 
-	"easygo-agent/internal/agent/chatmodel"
-	deepagent "easygo-agent/internal/agent/deepagent.go"
 	agentruntime "easygo-agent/internal/agent/runtime"
-	"easygo-agent/internal/config"
 	"easygo-agent/internal/conversation"
 	"easygo-agent/internal/gateway"
 	"easygo-agent/internal/logger"
-	"easygo-agent/internal/tools"
 	"easygo-agent/internal/tui"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -75,27 +71,13 @@ func Run(ctx context.Context, configPath string, options ...Options) (resultErr 
 		}
 	}()
 
-	// 加载 YAML 配置，并把 {ENV} 形式的 apikey 解析为环境变量值。
-	cfg, err := config.Load(configPath, lookupEnv)
+	app, err := assemble(ctx, configPath)
 	if err != nil {
-		wrappedErr := fmt.Errorf("load configuration: %w", err)
-		logger.Error("assemble application failed", zap.String("stage", "config"), zap.Error(wrappedErr))
-		return wrappedErr
+		return err
 	}
-
-	// 集中构造全部内置 Tool，供 ReAct Agent 调用。
-	var store conversation.Store
-	if cfg.Database.Driver == "memory" {
-		store = conversation.NewMemory()
-	} else {
-		connectCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		store, err = conversation.NewPostgres(connectCtx, cfg.Database.DSN, cfg.Database.MaxConns)
-		cancel()
-		if err != nil {
-			return fmt.Errorf("initialize PostgreSQL: %w", err)
-		}
-	}
-	defer store.Close()
+	defer app.close()
+	cfg := app.cfg
+	store := app.store
 	if opts.Mode == "cli" && opts.List {
 		for offset := 0; ; offset += 100 {
 			items, listErr := store.List(ctx, opts.Username, 100, offset)
@@ -110,32 +92,13 @@ func Run(ctx context.Context, configPath string, options ...Options) (resultErr 
 			}
 		}
 	}
-	allTools, err := tools.NewAgentTool().AllTools(ctx)
-	if err != nil {
-		wrappedErr := fmt.Errorf("initialize tools: %w", err)
-		logger.Error("assemble application failed", zap.String("stage", "tool"), zap.Error(wrappedErr))
-		return wrappedErr
+	if err := app.buildAgent(ctx); err != nil {
+		return err
 	}
-	// 创建单个 OpenAI 兼容 Chat Model，作为 Agent 的推理后端。
-	model, err := chatmodel.New(ctx, cfg.Model)
-	if err != nil {
-		wrappedErr := fmt.Errorf("initialize chat model: %w", err)
-		logger.Error("assemble application failed", zap.String("stage", "model"), zap.Error(wrappedErr))
-		return wrappedErr
-	}
-	// 构造 Eino Deep Agent，并由独立会话模块管理运行、流和对话历史。
-	summaryModel, err := chatmodel.New(ctx, cfg.SubAgent)
-	if err != nil {
-		return fmt.Errorf("initialize summary model: %w", err)
-	}
-	agent, err := deepagent.New(ctx, model, allTools, cfg.Agent, summaryModel)
-	if err != nil {
-		wrappedErr := fmt.Errorf("initialize agent: %w", err)
-		logger.Error("assemble application failed", zap.String("stage", "agent"), zap.Error(wrappedErr))
-		return wrappedErr
-	}
+	app.buildQueue(ctx)
+	agent := app.agent
 	if opts.Mode == "gateway" {
-		server := &http.Server{Addr: cfg.HTTP.Address, Handler: gateway.New(store, agent), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
+		server := &http.Server{Addr: cfg.HTTP.Address, Handler: gateway.New(store, agent, app.queue), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
 		return serve(ctx, server)
 	}
 	if opts.SessionID == "" && !opts.NewSession {
@@ -154,31 +117,54 @@ func Run(ctx context.Context, configPath string, options ...Options) (resultErr 
 		}
 		opts.SessionID = session.ID
 	}
-	sessionRuntime := agentruntime.NewStored(ctx, agent, store, opts.Username, opts.SessionID)
 	if opts.Input != "" {
 		fmt.Fprintf(os.Stderr, "user: %s · session: %s\n", opts.Username, opts.SessionID)
-		run, startErr := sessionRuntime.Start(opts.Input)
-		if startErr != nil {
-			return startErr
+		record, _, submitErr := app.queue.Submit(context.Background(), opts.Username, opts.SessionID, opts.Input, "")
+		if submitErr != nil {
+			return submitErr
 		}
-		defer run.Close()
-		for {
-			event := run.Next()
+		subscription, subscribeErr := app.queue.Subscribe(context.Background(), opts.Username, opts.SessionID, record.ID)
+		if subscribeErr != nil {
+			return subscribeErr
+		}
+		defer subscription.Close()
+		printedText := false
+		for event := range subscription.Events() {
 			switch event.Kind {
 			case agentruntime.EventTextDelta:
-				fmt.Print(event.Text)
+				if _, printErr := fmt.Print(event.Text); printErr != nil {
+					return printErr
+				}
+				printedText = true
 			case agentruntime.EventCompressing:
-				fmt.Fprintln(os.Stderr, "compressing history...")
+				if _, printErr := fmt.Fprintln(os.Stderr, "compressing history..."); printErr != nil {
+					return printErr
+				}
 			case agentruntime.EventCompleted:
+				if !printedText && event.Text != "" {
+					if _, printErr := fmt.Print(event.Text); printErr != nil {
+						return printErr
+					}
+				}
 				fmt.Println()
 				return nil
 			case agentruntime.EventCanceled:
 				return context.Canceled
 			case agentruntime.EventFailed:
-				return event.Err
+				if event.Err != nil {
+					return event.Err
+				}
+				return errors.New("queued run failed")
 			}
 		}
+		return errors.New("queued run subscription closed before terminal event")
 	}
+	ui := tui.NewQueue(app.queue, opts.Username, opts.SessionID)
+	defer func() { resultErr = errors.Join(resultErr, ui.Close()) }()
+	// Subscribe to active runs before loading history. A recovered run can
+	// finish while the initial history pages are being read; establishing the
+	// queue observer first prevents that result from falling into the gap
+	// between the two startup snapshots.
 	var history []conversation.Turn
 	var after int64
 	for {
@@ -192,8 +178,6 @@ func Run(ctx context.Context, configPath string, options ...Options) (resultErr 
 		}
 		after = turns[len(turns)-1].ID
 	}
-	ui := tui.New(sessionRuntime)
-	defer func() { resultErr = errors.Join(resultErr, ui.Close()) }()
 	ui.Restore(opts.Username, opts.SessionID, history)
 	// 启动 Bubble Tea TUI，占用备用屏幕；退出后由 ctx 取消。
 	program := tea.NewProgram(

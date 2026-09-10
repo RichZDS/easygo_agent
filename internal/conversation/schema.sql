@@ -14,3 +14,30 @@ CREATE TABLE IF NOT EXISTS agent_turns (
  created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS agent_turns_session_id ON agent_turns(session_id, id);
+
+CREATE TABLE IF NOT EXISTS agent_runs (
+ id uuid PRIMARY KEY,
+ session_id uuid NOT NULL REFERENCES agent_sessions(id),
+ input text NOT NULL,
+ status text NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'completed', 'failed', 'canceled')),
+ idempotency_key text,
+ cancel_requested boolean NOT NULL DEFAULT false,
+ worker_id text,
+ claim_token uuid,
+ lease_expires_at timestamptz,
+ result_text text,
+ error text,
+ turn_id bigint REFERENCES agent_turns(id),
+ created_at timestamptz NOT NULL DEFAULT now(),
+ started_at timestamptz,
+ finished_at timestamptz
+);
+ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS claim_token uuid;
+CREATE UNIQUE INDEX IF NOT EXISTS agent_runs_session_idempotency
+ ON agent_runs(session_id, idempotency_key)
+ WHERE idempotency_key IS NOT NULL AND idempotency_key <> '';
+CREATE INDEX IF NOT EXISTS agent_runs_queue_order
+ ON agent_runs(session_id, status, created_at, id);
+CREATE UNIQUE INDEX IF NOT EXISTS agent_runs_one_running_per_session
+ ON agent_runs(session_id)
+ WHERE status = 'running';

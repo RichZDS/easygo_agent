@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"regexp"
@@ -25,6 +26,9 @@ const (
 	APIKeyEnvironmentVariable = "EASYGO_AGENT_API_KEY"
 	defaultMaxSteps           = 8
 	defaultTimeout            = "120s"
+	defaultSandboxBaseURL     = "http://127.0.0.1:8787"
+	defaultSandboxTimeout     = "11m"
+	defaultSandboxOutputBytes = 65536
 )
 
 var envRefPattern = regexp.MustCompile(`^\{([A-Za-z_][A-Za-z0-9_]*)\}$`)
@@ -37,6 +41,7 @@ type Config struct {
 	Database DatabaseConfig
 	HTTP     HTTPConfig
 	Queue    QueueConfig
+	Sandbox  SandboxConfig
 }
 
 type DatabaseConfig struct {
@@ -55,6 +60,16 @@ type QueueConfig struct {
 	LeaseTTL     time.Duration
 }
 
+// SandboxConfig controls the optional local sandbox controller tools. The
+// controller owns Docker access and lifecycle; this process only calls HTTP.
+type SandboxConfig struct {
+	Enabled        bool
+	BaseURL        string
+	AuthToken      string
+	RequestTimeout time.Duration
+	MaxOutputBytes int
+}
+
 // AgentConfig 控制 Eino ReAct 行为。
 type AgentConfig struct {
 	MaxSteps      int
@@ -70,12 +85,13 @@ type ModelConfig struct {
 }
 
 type rawConfig struct {
-	Agent    rawAgentConfig  `yaml:"agent"`
-	Model    rawModelConfig  `yaml:"model"`
-	SubAgent *rawModelConfig `yaml:"subagent"`
-	Database DatabaseConfig  `yaml:"database"`
-	HTTP     HTTPConfig      `yaml:"http"`
-	Queue    rawQueueConfig  `yaml:"queue"`
+	Agent    rawAgentConfig   `yaml:"agent"`
+	Model    rawModelConfig   `yaml:"model"`
+	SubAgent *rawModelConfig  `yaml:"subagent"`
+	Database DatabaseConfig   `yaml:"database"`
+	HTTP     HTTPConfig       `yaml:"http"`
+	Queue    rawQueueConfig   `yaml:"queue"`
+	Sandbox  rawSandboxConfig `yaml:"sandbox"`
 }
 
 type rawAgentConfig struct {
@@ -97,7 +113,15 @@ type rawQueueConfig struct {
 	LeaseTTL     string `yaml:"lease_ttl"`
 }
 
-// Load 读取一份严格 YAML，并把 apikey 中的 {ENV} 引用解析为环境变量值。
+type rawSandboxConfig struct {
+	Enabled        bool   `yaml:"enabled"`
+	BaseURL        string `yaml:"base_url"`
+	AuthToken      string `yaml:"auth_token"`
+	RequestTimeout string `yaml:"request_timeout"`
+	MaxOutputBytes int    `yaml:"max_output_bytes"`
+}
+
+// Load 读取一份严格 YAML，并把敏感字段中的 {ENV} 引用解析为环境变量值。
 func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 	if strings.TrimSpace(path) == "" {
 		err := errors.New("config path cannot be empty")
@@ -126,6 +150,7 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 		Database: DatabaseConfig{Driver: "postgres", DSN: "{DATABASE_URL}", MaxConns: 16},
 		HTTP:     HTTPConfig{Address: "127.0.0.1:8080"},
 		Queue:    rawQueueConfig{MaxPending: 100, MaxWorkers: 4, PollInterval: "250ms", LeaseTTL: "30s"},
+		Sandbox:  rawSandboxConfig{BaseURL: defaultSandboxBaseURL, RequestTimeout: defaultSandboxTimeout, MaxOutputBytes: defaultSandboxOutputBytes},
 	}
 	decoder := yaml.NewDecoder(bytes.NewReader(content))
 	// 允许未知字段 true 为不允许，false 允许
@@ -146,6 +171,15 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 	}
 	if strings.TrimSpace(raw.Queue.LeaseTTL) == "" {
 		raw.Queue.LeaseTTL = "30s"
+	}
+	if strings.TrimSpace(raw.Sandbox.BaseURL) == "" {
+		raw.Sandbox.BaseURL = defaultSandboxBaseURL
+	}
+	if strings.TrimSpace(raw.Sandbox.RequestTimeout) == "" {
+		raw.Sandbox.RequestTimeout = defaultSandboxTimeout
+	}
+	if raw.Sandbox.MaxOutputBytes == 0 {
+		raw.Sandbox.MaxOutputBytes = defaultSandboxOutputBytes
 	}
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
@@ -171,11 +205,22 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("parse queue.lease_ttl: %w", err)
 	}
+	sandboxRequestTimeout, err := parseDuration(raw.Sandbox.RequestTimeout)
+	if err != nil {
+		return Config{}, fmt.Errorf("parse sandbox.request_timeout: %w", err)
+	}
 	apiKey, err := resolveAPIKey(raw.Model.APIKey, lookupEnv)
 	if err != nil {
 		wrappedErr := fmt.Errorf("resolve model apikey: %w", err)
 		logger.Error("load config failed", zap.String("field", "model.apikey"), zap.Error(wrappedErr))
 		return Config{}, wrappedErr
+	}
+	sandboxAuthToken := ""
+	if raw.Sandbox.Enabled {
+		sandboxAuthToken, err = resolveEnvironmentReference(raw.Sandbox.AuthToken, "sandbox.auth_token", lookupEnv)
+		if err != nil {
+			return Config{}, fmt.Errorf("resolve sandbox controller auth token: %w", err)
+		}
 	}
 
 	cfg := Config{
@@ -196,6 +241,13 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 			MaxWorkers:   raw.Queue.MaxWorkers,
 			PollInterval: pollInterval,
 			LeaseTTL:     leaseTTL,
+		},
+		Sandbox: SandboxConfig{
+			Enabled:        raw.Sandbox.Enabled,
+			BaseURL:        strings.TrimRight(strings.TrimSpace(raw.Sandbox.BaseURL), "/"),
+			AuthToken:      sandboxAuthToken,
+			RequestTimeout: sandboxRequestTimeout,
+			MaxOutputBytes: raw.Sandbox.MaxOutputBytes,
 		},
 	}
 	cfg.SubAgent = cfg.Model
@@ -246,6 +298,23 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 	if cfg.Queue.PollInterval <= 0 || cfg.Queue.LeaseTTL <= 0 {
 		return Config{}, errors.New("queue durations must be greater than zero")
 	}
+	if cfg.Sandbox.MaxOutputBytes <= 0 || cfg.Sandbox.MaxOutputBytes > 1024*1024 {
+		return Config{}, errors.New("sandbox.max_output_bytes must be between 1 and 1048576")
+	}
+	if cfg.Sandbox.Enabled {
+		parsedURL, parseErr := url.ParseRequestURI(cfg.Sandbox.BaseURL)
+		if parseErr != nil || parsedURL.Scheme == "" || parsedURL.Host == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") || parsedURL.User != nil || parsedURL.RawQuery != "" || parsedURL.Fragment != "" {
+			return Config{}, errors.New("sandbox.base_url must be an absolute http or https URL without credentials, query, or fragment")
+		}
+		hostname := strings.TrimSuffix(strings.ToLower(parsedURL.Hostname()), ".")
+		hostIP := net.ParseIP(hostname)
+		if hostname != "localhost" && (hostIP == nil || !hostIP.IsLoopback()) {
+			return Config{}, errors.New("sandbox.base_url must use a loopback host")
+		}
+		if len(cfg.Sandbox.AuthToken) < 32 || strings.IndexFunc(cfg.Sandbox.AuthToken, func(r rune) bool { return r < 33 || r > 126 }) >= 0 {
+			return Config{}, errors.New("sandbox.auth_token must resolve to at least 32 printable ASCII characters without spaces")
+		}
+	}
 	if err := validateConfig(cfg); err != nil {
 		wrappedErr := fmt.Errorf("validate config: %w", err)
 		logger.Error("load config failed", zap.String("path", path), zap.Error(wrappedErr))
@@ -256,21 +325,25 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 
 // resolveAPIKey 将 YAML 中的 {ENV_NAME} 引用解析为对应环境变量值。
 func resolveAPIKey(raw string, lookupEnv func(string) (string, bool)) (string, error) {
+	return resolveEnvironmentReference(raw, "model.apikey", lookupEnv)
+}
+
+func resolveEnvironmentReference(raw, field string, lookupEnv func(string) (string, bool)) (string, error) {
 	trimmed := strings.TrimSpace(raw)
 	matches := envRefPattern.FindStringSubmatch(trimmed)
 	if matches == nil {
-		err := errors.New("model apikey must be an env reference like {EASYGO_AGENT_API_KEY}")
-		logger.Error("resolve apikey failed", zap.String("field", "model.apikey"), zap.Error(err))
+		err := fmt.Errorf("%s must be an environment reference like {ENV_NAME}", field)
+		logger.Error("resolve environment reference failed", zap.String("field", field), zap.Error(err))
 		return "", err
 	}
 	envName := matches[1]
-	apiKey, ok := lookupEnv(envName)
-	if !ok || strings.TrimSpace(apiKey) == "" {
+	value, ok := lookupEnv(envName)
+	if !ok || strings.TrimSpace(value) == "" {
 		err := fmt.Errorf("environment variable %s is required", envName)
-		logger.Error("resolve apikey failed", zap.String("env", envName), zap.Error(err))
+		logger.Error("resolve environment reference failed", zap.String("field", field), zap.String("env", envName), zap.Error(err))
 		return "", err
 	}
-	return apiKey, nil
+	return value, nil
 }
 
 // parseDuration 将 YAML 时长字符串解析为正的 Go duration。

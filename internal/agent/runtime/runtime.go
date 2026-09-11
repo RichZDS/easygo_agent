@@ -16,6 +16,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
@@ -150,6 +151,7 @@ func (session *Session) StartContext(parent context.Context, input string) (Run,
 		parent = context.Background()
 	}
 	runContext, cancel := context.WithCancel(parent)
+	runContext = WithInvocationIdentity(runContext, InvocationIdentity{SessionID: session.id, RunID: uuid.NewString()})
 	capture := &stateCapture{}
 	run := &agentRun{
 		context:       context.WithValue(runContext, captureKey{}, capture),
@@ -192,6 +194,7 @@ func NewClaimed(parent context.Context, agent adk.TypedAgent[*schema.AgenticMess
 	}
 	record := lease.Run()
 	runContext, cancel := context.WithCancel(parent)
+	runContext = WithInvocationIdentity(runContext, InvocationIdentity{SessionID: record.SessionID, RunID: record.ID})
 	capture := &stateCapture{}
 	run := &agentRun{
 		context:       context.WithValue(runContext, captureKey{}, capture),

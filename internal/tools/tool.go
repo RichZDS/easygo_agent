@@ -10,11 +10,18 @@ import (
 )
 
 // AgentTool 集中构造并持有当前 Agent 可用的全部 Tool。
-type AgentTool struct{}
+type AgentTool struct {
+	sandbox *SandboxControllerConfig
+}
 
 // NewAgentTool 创建 Tool 集合，后续新增 Tool 只需在 AllTools 中 append。
-func NewAgentTool() *AgentTool {
-	return &AgentTool{}
+func NewAgentTool(sandbox ...SandboxControllerConfig) *AgentTool {
+	result := &AgentTool{}
+	if len(sandbox) > 0 {
+		cfg := sandbox[0]
+		result.sandbox = &cfg
+	}
+	return result
 }
 
 // AllTools 逐个构造内置 Tool 并收集到切片中，供 Agent 一次性绑定。
@@ -27,6 +34,15 @@ func (t *AgentTool) AllTools(ctx context.Context) ([]tool.BaseTool, error) {
 		return nil, err
 	}
 	all = append(all, calculator)
+
+	if t.sandbox != nil {
+		sandboxTools, err := NewSandboxTools(*t.sandbox)
+		if err != nil {
+			logger.Error("collect all tools failed", zap.String("tool", "sandbox"), zap.Error(err))
+			return nil, err
+		}
+		all = append(all, sandboxTools...)
+	}
 
 	return all, nil
 }

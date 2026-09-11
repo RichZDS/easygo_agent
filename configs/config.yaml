@@ -16,6 +16,13 @@ queue:
   poll_interval: 250ms
   lease_ttl: 30s
 
+sandbox:
+  enabled: false
+  base_url: "http://127.0.0.1:8787"
+  auth_token: "{SANDBOX_CONTROLLER_TOKEN}"
+  request_timeout: 11m
+  max_output_bytes: 65536
+
 model:
   name: deepseek-v4-pro
   base_url: "https://api.deepseek.com"

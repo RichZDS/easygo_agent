@@ -15,5 +15,56 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  # Build target only. It is intentionally in a separate profile so bringing
+  # up the controller never starts an unused sandbox runtime.
+  sandbox-runtime:
+    profiles: ["sandbox-image"]
+    image: easygo-agent-sandbox-runtime:local
+    build:
+      context: .
+      dockerfile: deploy/sandbox/runtime.Dockerfile
+    entrypoint: ["/bin/true"]
+    network_mode: none
+    restart: "no"
+
+  # Trusted control plane. Only this process gets the Docker Engine socket;
+  # dynamically-created runtime containers never receive it.
+  sandbox-controller:
+    profiles: ["sandbox"]
+    image: easygo-agent-sandbox-controller:local
+    build:
+      context: .
+      dockerfile: deploy/sandbox/controller.Dockerfile
+    command: ["-config", "/etc/easygo/sandbox-controller.yaml"]
+    environment:
+      SANDBOX_CONTROLLER_TOKEN: "${SANDBOX_CONTROLLER_TOKEN:?set SANDBOX_CONTROLLER_TOKEN to at least 32 printable characters}"
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - "${DOCKER_SOCKET_PATH:-/var/run/docker.sock}:/var/run/docker.sock"
+      - ./configs/sandbox-controller.yaml:/etc/easygo/sandbox-controller.yaml:ro
+      - sandbox-controller-data:/var/lib/easygo-sandbox
+    restart: unless-stopped
+    stop_grace_period: 30s
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,nosuid,nodev,noexec
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/sandbox-controller", "-healthcheck", "http://127.0.0.1:8787/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 2s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 volumes:
   postgres-data:
+  sandbox-controller-data:

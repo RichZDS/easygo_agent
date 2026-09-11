@@ -1,0 +1,31 @@
+namespace: easygo-agent
+listen_address: "0.0.0.0:8787"
+auth_token: "{SANDBOX_CONTROLLER_TOKEN}"
+state_path: "/var/lib/easygo-sandbox/state.db"
+docker_host: "unix:///var/run/docker.sock"
+image: "easygo-agent-sandbox-runtime:local"
+
+max_running: 3
+# A stricter total-application cap: active/starting applications also count,
+# so the number of hibernated workspaces can never exceed 30.
+max_applications: 30
+max_starting: 2
+wait_timeout: 30s
+
+base_idle_ttl: 1m
+hard_ttl: 5h
+reaper_interval: 10s
+
+cpus: 1
+memory: 2GiB
+pids_limit: 256
+shm_size: 64MiB
+tmp_size: 256MiB
+
+workspace_soft_limit: 1GiB
+total_workspace_limit: 20GiB
+min_free_disk: 10GiB
+
+max_output_bytes: 65536
+command_timeout: 120s
+max_command_timeout: 10m

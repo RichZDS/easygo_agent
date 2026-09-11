@@ -17,6 +17,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
@@ -28,6 +29,7 @@ var (
 	// ErrAgentUnavailable 表示会话没有可调用的 Agent。
 	ErrAgentUnavailable = errors.New("agent is unavailable")
 	ErrStoreUnavailable = errors.New("conversation store is unavailable")
+	ErrQueueClosed      = errors.New("queue manager is closed")
 	// ErrRunFinished 表示调用方在终态事件之后再次读取运行。
 	ErrRunFinished = errors.New("agent run already finished")
 )
@@ -49,13 +51,21 @@ const (
 	// EventCanceled 表示运行被取消。
 	EventCanceled EventKind = "canceled"
 	// EventFailed 表示运行因错误失败。
-	EventFailed      EventKind = "failed"
+	EventFailed EventKind = "failed"
+	// EventQueued 表示请求已持久化并等待 worker。
+	EventQueued EventKind = "queued"
+	// EventRunning 表示请求已被 worker claim。
+	EventRunning     EventKind = "running"
 	EventCompressing EventKind = "compressing"
 	EventCompressed  EventKind = "compressed"
 )
 
 // Event 是 Agent 运行投影出的语义事件。终态事件的 Text 是本次运行的完整助手文本。
 type Event struct {
+	// Queue metadata is populated for runs executed by QueueManager.
+	RunID    string                 `json:"run_id,omitempty"`
+	Status   conversation.RunStatus `json:"status,omitempty"`
+	Position int                    `json:"position,omitempty"`
 	// Kind 标识事件类型。
 	Kind EventKind
 	// Text 是文本或 reasoning 增量；终态事件则为本次运行的完整助手文本。
@@ -147,11 +157,13 @@ func (session *Session) StartContext(parent context.Context, input string) (Run,
 		parent = context.Background()
 	}
 	runContext, cancel := context.WithCancel(parent)
+	runContext = WithInvocationIdentity(runContext, InvocationIdentity{SessionID: session.id, RunID: uuid.NewString()})
 	capture := &stateCapture{}
 	run := &agentRun{
 		context:       context.WithValue(runContext, captureKey{}, capture),
 		cancel:        cancel,
 		input:         content,
+		agent:         session.agent,
 		capture:       capture,
 		done:          make(chan struct{}),
 		session:       session,
@@ -168,6 +180,57 @@ func (session *Session) StartContext(parent context.Context, input string) (Run,
 	return run, nil
 }
 
+// NewClaimed constructs a run from a lease already claimed by QueueManager.
+// It bypasses Store.Begin so claim ownership and the final transaction remain
+// one continuous boundary.
+func NewClaimed(parent context.Context, agent adk.TypedAgent[*schema.AgenticMessage], lease conversation.RunLease, memory ...conversation.MemoryStore) Run {
+	if parent == nil {
+		parent = context.Background()
+	}
+	if lease == nil {
+		cancel := func() {}
+		return &agentRun{
+			agent:    agent,
+			context:  parent,
+			cancel:   cancel,
+			done:     closedRunChannel(),
+			finished: true,
+			terminal: Event{Kind: EventFailed, Err: ErrStoreUnavailable},
+		}
+	}
+	record := lease.Run()
+	runContext, cancel := context.WithCancel(parent)
+	runContext = WithInvocationIdentity(runContext, InvocationIdentity{SessionID: record.SessionID, RunID: record.ID})
+	capture := &stateCapture{}
+	run := &agentRun{
+		context:       context.WithValue(runContext, captureKey{}, capture),
+		cancel:        cancel,
+		input:         record.Input,
+		agent:         agent,
+		queueLease:    lease,
+		record:        record,
+		capture:       capture,
+		done:          make(chan struct{}),
+		startedTools:  make(map[string]struct{}),
+		finishedTools: make(map[string]struct{}),
+	}
+	if len(memory) > 0 {
+		run.memory = memory[0]
+	}
+	context.AfterFunc(run.context, func() {
+		run.nextMu.Lock()
+		defer run.nextMu.Unlock()
+		run.finalize(EventCanceled, nil)
+	})
+	return run
+}
+
+func closedRunChannel() chan struct{} {
+	done := make(chan struct{})
+	close(done)
+	return done
+}
+
 // release releases the local run reservation after persistence has finished.
 func (session *Session) release() {
 	session.mu.Lock()
@@ -182,6 +245,9 @@ type agentRun struct {
 	outputs       []*schema.AgenticMessage
 	chunks        []*schema.AgenticMessage
 	lease         conversation.Lease
+	queueLease    conversation.RunLease
+	record        conversation.RunRecord
+	agent         adk.TypedAgent[*schema.AgenticMessage]
 	capture       *stateCapture
 	nextMu        sync.Mutex                                                       // 保证 Next 串行消费
 	context       context.Context                                                  // 本次运行的可取消 context
@@ -199,6 +265,7 @@ type agentRun struct {
 	done          chan struct{}                                                    // terminal 就绪、资源释放后关闭
 	streamLog     logger.StreamChunkLog                                            // 当前消息流的 chunk，结束后再聚合打印
 	toolDraft     toolCallDraft                                                    // 正在聚合的流式 tool call
+	memory        conversation.MemoryStore
 }
 
 // toolCallDraft 在内存中拼接流式 FunctionToolCall 的 name、call_id 与 arguments。
@@ -216,7 +283,7 @@ func (run *agentRun) Cancel() {
 func (run *agentRun) Close() Event {
 	run.cancel()
 	<-run.done
-	return run.terminal
+	return run.decorate(run.terminal)
 }
 
 // Next 隐藏 Eino 迭代器与消息流，并逐条返回稳定的语义事件。
@@ -224,6 +291,7 @@ func (run *agentRun) Next() Event {
 	run.nextMu.Lock()
 	defer run.nextMu.Unlock()
 	event := run.next()
+	event = run.decorate(event)
 	debugSemanticEvent(event)
 	return event
 }
@@ -397,12 +465,15 @@ func (run *agentRun) projectToolResult(result *schema.FunctionToolResult) {
 
 // emitToolEvent 按 CallID 去重后追加一条工具生命周期事件。
 func (run *agentRun) emitToolEvent(kind EventKind, name, callID, arguments, result string) {
+	if callID == "" && name == "" {
+		return
+	}
 	key := callID
 	if key == "" {
-		key = name
-	}
-	if key == "" {
-		return
+		// Some providers omit CallID. Keep each completed call visible instead
+		// of collapsing separate invocations of the same named tool; the
+		// sequence suffix is local to this run and only serves de-duplication.
+		key = fmt.Sprintf("%s#%d", name, len(run.startedTools)+len(run.finishedTools)+1)
 	}
 	seen := run.startedTools
 	if kind == EventToolFinished {
@@ -490,6 +561,9 @@ func (run *agentRun) finalize(kind EventKind, err error) {
 	}
 	run.closeMessageStream()
 	text := run.text.String()
+	if run.queueLease != nil && run.inputMessages == nil {
+		run.inputMessages = append(slices.Clone(run.queueLease.Messages()), schema.UserAgenticMessage(run.input))
+	}
 	next := run.inputMessages
 	if kind == EventCompleted {
 		next = run.capture.get()
@@ -500,8 +574,7 @@ func (run *agentRun) finalize(kind EventKind, err error) {
 	if run.lease != nil {
 		// Canceled requests still get an audit record, using a bounded cleanup context.
 		commitCtx, cancel := context.WithTimeout(context.WithoutCancel(run.context), 10*time.Second)
-		audit := append([]*schema.AgenticMessage{schema.UserAgenticMessage(run.input)}, run.outputs...)
-		commitErr := run.lease.Commit(commitCtx, next, conversation.Turn{Status: string(kind), Messages: audit})
+		commitErr := conversation.CommitRun(commitCtx, run.lease, next, string(kind), run.input, run.outputs)
 		cancel()
 		run.lease.Close()
 		if commitErr != nil {
@@ -510,7 +583,57 @@ func (run *agentRun) finalize(kind EventKind, err error) {
 			logger.Error("persist conversation failed", zap.Error(err))
 		}
 	}
-	run.session.release()
+	if run.queueLease != nil {
+		status := conversation.RunFailed
+		switch kind {
+		case EventCompleted:
+			status = conversation.RunCompleted
+		case EventCanceled:
+			status = conversation.RunCanceled
+		}
+		commitCtx, cancel := context.WithTimeout(context.WithoutCancel(run.context), 10*time.Second)
+		runError := ""
+		if err != nil {
+			runError = err.Error()
+		}
+		commitErr := run.queueLease.CommitRun(commitCtx, next, status, run.outputs, text, runError)
+		cancel()
+		// A cancellation request that wins immediately before the final
+		// transaction must not be silently cleared by a successful completion.
+		// Retry the same atomic commit as canceled, using the pre-run context.
+		if errors.Is(commitErr, conversation.ErrCancellationRequested) && status == conversation.RunCompleted {
+			status = conversation.RunCanceled
+			kind = EventCanceled
+			err = nil
+			cancelNext := run.inputMessages
+			commitCtx, cancel = context.WithTimeout(context.WithoutCancel(run.context), 10*time.Second)
+			commitErr = run.queueLease.CommitRun(commitCtx, cancelNext, status, run.outputs, text, "")
+			cancel()
+		}
+		if commitErr != nil {
+			persistErr := fmt.Errorf("persist queued conversation: %w", commitErr)
+			// A failed transaction normally leaves the lease claim intact. Make a
+			// best effort to persist a failed terminal row before releasing it;
+			// otherwise Close deliberately requeues the work for recovery.
+			failedNext := next
+			if kind == EventCompleted {
+				failedNext = run.inputMessages
+			}
+			fallbackCtx, fallbackCancel := context.WithTimeout(context.WithoutCancel(run.context), 10*time.Second)
+			fallbackErr := run.queueLease.CommitRun(fallbackCtx, failedNext, conversation.RunFailed, run.outputs, text, persistErr.Error())
+			fallbackCancel()
+			kind = EventFailed
+			err = persistErr
+			if fallbackErr != nil {
+				err = fmt.Errorf("%w (failed-state commit: %v)", persistErr, fallbackErr)
+			}
+			logger.Error("persist queued conversation failed", zap.Error(err))
+		}
+		run.queueLease.Close()
+	}
+	if run.session != nil {
+		run.session.release()
+	}
 	run.cancel()
 	run.terminal = Event{Kind: kind, Text: text, Err: err}
 	run.finished = true
@@ -518,21 +641,41 @@ func (run *agentRun) finalize(kind EventKind, err error) {
 }
 
 func (run *agentRun) initialize() error {
+	if run.queueLease != nil {
+		run.inputMessages = append(slices.Clone(run.queueLease.Messages()), schema.UserAgenticMessage(run.input))
+		memoryContext, recallErr := recallMemoryPrompt(run.context, run.memory, run.record.Username)
+		if recallErr != nil {
+			return recallErr
+		}
+		modelInput := make([]*schema.AgenticMessage, 0, len(run.inputMessages)+1)
+		if memoryContext != "" {
+			modelInput = append(modelInput, schema.SystemAgenticMessage(memoryContext))
+		}
+		for _, m := range run.inputMessages {
+			if m != nil && m.Role != schema.AgenticRoleTypeSystem {
+				modelInput = append(modelInput, m)
+			}
+		}
+		if run.agent == nil {
+			return ErrAgentUnavailable
+		}
+		run.iterator = run.agent.Run(run.context, &adk.TypedAgentInput[*schema.AgenticMessage]{Messages: modelInput, EnableStreaming: true})
+		if run.iterator == nil {
+			return ErrAgentUnavailable
+		}
+		return nil
+	}
 	lease, err := run.session.store.Begin(run.context, run.session.username, run.session.id)
 	if err != nil {
 		return err
 	}
 	run.lease = lease
 	run.inputMessages = append(slices.Clone(lease.Messages()), schema.UserAgenticMessage(run.input))
-	var memoryContext string
-	if run.session.memory != nil {
-		memories, recallErr := run.session.memory.Recall(run.context, run.session.username, conversation.MaxProfileMemories)
-		if recallErr != nil {
-			lease.Close()
-			run.lease = nil
-			return fmt.Errorf("recall user memory: %w", recallErr)
-		}
-		memoryContext = usermemory.Prompt(memories)
+	memoryContext, recallErr := recallMemoryPrompt(run.context, run.session.memory, run.session.username)
+	if recallErr != nil {
+		lease.Close()
+		run.lease = nil
+		return recallErr
 	}
 	// Deep Agent injects the current system instruction on every Run.
 	modelInput := make([]*schema.AgenticMessage, 0, len(run.inputMessages))
@@ -544,11 +687,48 @@ func (run *agentRun) initialize() error {
 			modelInput = append(modelInput, m)
 		}
 	}
-	run.iterator = run.session.agent.Run(run.context, &adk.TypedAgentInput[*schema.AgenticMessage]{Messages: modelInput, EnableStreaming: true})
+	run.iterator = run.agent.Run(run.context, &adk.TypedAgentInput[*schema.AgenticMessage]{Messages: modelInput, EnableStreaming: true})
 	if run.iterator == nil {
 		return ErrAgentUnavailable
 	}
 	return nil
+}
+
+func recallMemoryPrompt(ctx context.Context, store conversation.MemoryStore, username string) (string, error) {
+	if store == nil || strings.TrimSpace(username) == "" {
+		return "", nil
+	}
+	memories, err := store.Recall(ctx, username, conversation.MaxProfileMemories)
+	if err != nil {
+		return "", fmt.Errorf("recall user memory: %w", err)
+	}
+	return usermemory.Prompt(memories), nil
+}
+
+func (run *agentRun) decorate(event Event) Event {
+	if run.queueLease == nil {
+		return event
+	}
+	event.RunID = run.record.ID
+	event.Position = run.record.Position
+	switch event.Kind {
+	case EventQueued:
+		event.Status = conversation.RunQueued
+		event.Position = run.record.Position
+	case EventCompleted:
+		event.Status = conversation.RunCompleted
+		event.Position = 0
+	case EventCanceled:
+		event.Status = conversation.RunCanceled
+		event.Position = 0
+	case EventFailed:
+		event.Status = conversation.RunFailed
+		event.Position = 0
+	default:
+		event.Status = conversation.RunRunning
+		event.Position = 0
+	}
+	return event
 }
 
 // closeMessageStream 关闭当前消息流，发出已聚合的 tool call，并打印完整 AgenticMessage。

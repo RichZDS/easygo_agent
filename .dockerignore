@@ -1,0 +1,13 @@
+**
+!go.mod
+!go.sum
+!cmd/
+!cmd/sandbox-controller/
+!cmd/sandbox-controller/**
+!internal/
+!internal/sandbox/
+!internal/sandbox/**
+!deploy/
+!deploy/sandbox/
+!deploy/sandbox/*.Dockerfile
+!deploy/sandbox/runtime-entrypoint.sh

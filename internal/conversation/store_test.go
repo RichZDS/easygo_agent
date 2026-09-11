@@ -27,6 +27,50 @@ func TestPostgresContract(t *testing.T) {
 	}
 	defer store.Close()
 	testStore(t, store)
+	testQueueStore(t, store)
+}
+
+func testQueueStore(t *testing.T, store QueueStore) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	user := "queue-test-" + uuid.NewString()
+	session, err := store.Create(ctx, user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pg, ok := store.(*Postgres); ok {
+		t.Cleanup(func() {
+			cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
+			defer stop()
+			_, _ = pg.pool.Exec(cleanup, "DELETE FROM agent_runs WHERE session_id IN (SELECT id FROM agent_sessions WHERE username=$1)", user)
+			_, _ = pg.pool.Exec(cleanup, "DELETE FROM agent_turns WHERE session_id IN (SELECT id FROM agent_sessions WHERE username=$1)", user)
+			_, _ = pg.pool.Exec(cleanup, "DELETE FROM agent_sessions WHERE username=$1", user)
+		})
+	}
+	run, err := store.Enqueue(ctx, user, session.ID, "queued input", "idempotent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry, err := store.Enqueue(ctx, user, session.ID, "queued input", "idempotent")
+	if err != nil || retry.ID != run.ID {
+		t.Fatalf("idempotent retry: %+v %v", retry, err)
+	}
+	lease, err := store.ClaimNext(ctx, "contract-worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Run().ID != run.ID || lease.Run().Status != RunRunning {
+		t.Fatalf("claim: %+v", lease.Run())
+	}
+	if err = lease.CommitRun(ctx, []*schema.AgenticMessage{schema.UserAgenticMessage("context")}, RunCompleted, []*schema.AgenticMessage{schema.UserAgenticMessage("output")}, "output", ""); err != nil {
+		t.Fatal(err)
+	}
+	lease.Close()
+	completed, err := store.GetRun(ctx, user, session.ID, run.ID)
+	if err != nil || completed.Status != RunCompleted || completed.TurnID == 0 {
+		t.Fatalf("completed: %+v %v", completed, err)
+	}
 }
 
 func testStore(t *testing.T, store Store) {
@@ -42,6 +86,7 @@ func testStore(t *testing.T, store Store) {
 		defer func() {
 			cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
 			defer stop()
+			_, _ = pg.pool.Exec(cleanup, "DELETE FROM agent_runs WHERE session_id IN (SELECT id FROM agent_sessions WHERE username=$1)", user)
 			_, _ = pg.pool.Exec(cleanup, "DELETE FROM agent_turns WHERE session_id IN (SELECT id FROM agent_sessions WHERE username=$1)", user)
 			_, _ = pg.pool.Exec(cleanup, "DELETE FROM agent_sessions WHERE username=$1", user)
 		}()
@@ -59,8 +104,7 @@ func testStore(t *testing.T, store Store) {
 	}
 	input := schema.UserAgenticMessage("原始输入")
 	output := &schema.AgenticMessage{Role: schema.AgenticRoleTypeAssistant, ContentBlocks: []*schema.ContentBlock{schema.NewContentBlock(&schema.FunctionToolCall{CallID: "abc", Name: "calculator", Arguments: `{"a":2}`})}, ResponseMeta: &schema.AgenticResponseMeta{TokenUsage: &schema.TokenUsage{TotalTokens: 42}}}
-	raw := []*schema.AgenticMessage{input, output}
-	if err = lease.Commit(ctx, []*schema.AgenticMessage{schema.UserAgenticMessage("压缩摘要")}, Turn{Status: "completed", Messages: raw}); err != nil {
+	if err = CommitRun(ctx, lease, []*schema.AgenticMessage{schema.UserAgenticMessage("压缩摘要")}, "completed", "原始输入", []*schema.AgenticMessage{output}); err != nil {
 		t.Fatal(err)
 	}
 	lease.Close()

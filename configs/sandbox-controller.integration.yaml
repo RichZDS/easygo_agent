@@ -1,0 +1,33 @@
+# Dedicated black-box test namespace. Do not reuse this file for a real
+# controller: scripts/test-sandbox-docker.sh removes every resource carrying
+# this namespace label when it exits.
+namespace: easygo-agent-it
+listen_address: "0.0.0.0:8787"
+auth_token: "{SANDBOX_CONTROLLER_TOKEN}"
+state_path: "/var/lib/easygo-sandbox/state.db"
+docker_host: "unix:///var/run/docker.sock"
+image: "easygo-agent-sandbox-runtime:local"
+
+max_running: 3
+# Total applications, including active/starting and hibernated workspaces.
+max_applications: 30
+max_starting: 2
+wait_timeout: 30s
+
+base_idle_ttl: 1m
+hard_ttl: 5h
+reaper_interval: 1s
+
+cpus: 1
+memory: 2GiB
+pids_limit: 256
+shm_size: 64MiB
+tmp_size: 256MiB
+
+workspace_soft_limit: 1GiB
+total_workspace_limit: 20GiB
+min_free_disk: 1GiB
+
+max_output_bytes: 65536
+command_timeout: 120s
+max_command_timeout: 10m

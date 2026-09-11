@@ -19,6 +19,17 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+func TestNewValidatesConstructionConfig(t *testing.T) {
+	if _, err := deepagent.New(context.Background(), deepagent.Config{}); err == nil {
+		t.Fatal("nil chat model was accepted")
+	}
+	if _, err := deepagent.New(context.Background(), deepagent.Config{
+		ChatModel: &testutil.Model{},
+	}); err == nil {
+		t.Fatal("non-positive max steps was accepted")
+	}
+}
+
 func collect(t *testing.T, run agentruntime.Run) []agentruntime.Event {
 	t.Helper()
 	var events []agentruntime.Event
@@ -75,7 +86,7 @@ func TestLoopPreservesNativeMessagesAcrossSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := deepagent.New(ctx, model, []tool.BaseTool{calculator}, config.AgentConfig{MaxSteps: 5, ContextTokens: 24000})
+	agent, err := deepagent.New(ctx, deepagent.Config{ChatModel: model, Tools: []tool.BaseTool{calculator}, Agent: config.AgentConfig{MaxSteps: 5, ContextTokens: 24000}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +150,7 @@ func TestCompressionAfterToolResultPersistsNativeState(t *testing.T) {
 		return testutil.Text("summary-marker: multiplication returned 8. Reply to the user's question."), nil
 	}}
 	calculator, _ := tools.NewCalculator()
-	agent, err := deepagent.New(ctx, main, []tool.BaseTool{calculator}, config.AgentConfig{MaxSteps: 5, ContextTokens: 24000}, summary)
+	agent, err := deepagent.New(ctx, deepagent.Config{ChatModel: main, SummaryModel: summary, Tools: []tool.BaseTool{calculator}, Agent: config.AgentConfig{MaxSteps: 5, ContextTokens: 24000}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +205,7 @@ func TestSummaryFailureAndIterationLimitDoNotCommitPartialContext(t *testing.T) 
 				return nil, errors.New("summary backend unavailable")
 			}}
 			calculator, _ := tools.NewCalculator()
-			agent, err := deepagent.New(ctx, main, []tool.BaseTool{calculator}, config.AgentConfig{MaxSteps: 2, ContextTokens: 24000}, summary)
+			agent, err := deepagent.New(ctx, deepagent.Config{ChatModel: main, SummaryModel: summary, Tools: []tool.BaseTool{calculator}, Agent: config.AgentConfig{MaxSteps: 2, ContextTokens: 24000}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -232,7 +243,7 @@ func TestSharedAgentRunsIndependentUsersConcurrently(t *testing.T) {
 		return testutil.Text(messages[len(messages)-1].ContentBlocks[0].UserInputText.Text), nil
 	}}
 	calculator, _ := tools.NewCalculator()
-	agent, err := deepagent.New(ctx, model, []tool.BaseTool{calculator}, config.AgentConfig{MaxSteps: 3, ContextTokens: 24000})
+	agent, err := deepagent.New(ctx, deepagent.Config{ChatModel: model, Tools: []tool.BaseTool{calculator}, Agent: config.AgentConfig{MaxSteps: 3, ContextTokens: 24000}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,7 +316,7 @@ func TestDeepAgentReceivesUserLongTermMemory(t *testing.T) {
 		return testutil.Text("收到"), nil
 	}}
 	calculator, _ := tools.NewCalculator()
-	agent, err := deepagent.New(ctx, model, []tool.BaseTool{calculator}, config.AgentConfig{MaxSteps: 2, ContextTokens: 24000})
+	agent, err := deepagent.New(ctx, deepagent.Config{ChatModel: model, Tools: []tool.BaseTool{calculator}, Agent: config.AgentConfig{MaxSteps: 2, ContextTokens: 24000}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,7 +369,7 @@ func TestUserMemoryEndToEndAcceptanceAtLeastNinetyFivePercent(t *testing.T) {
 		return testutil.Text(remembered), nil
 	}}
 	calculator, _ := tools.NewCalculator()
-	agent, err := deepagent.New(ctx, model, []tool.BaseTool{calculator}, config.AgentConfig{MaxSteps: 2, ContextTokens: 24000})
+	agent, err := deepagent.New(ctx, deepagent.Config{ChatModel: model, Tools: []tool.BaseTool{calculator}, Agent: config.AgentConfig{MaxSteps: 2, ContextTokens: 24000}})
 	if err != nil {
 		t.Fatal(err)
 	}

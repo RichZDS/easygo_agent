@@ -65,7 +65,16 @@ func (app *application) buildQueue(ctx context.Context) {
 }
 
 func (app *application) buildAgent(ctx context.Context) error {
-	allTools, err := tools.NewAgentTool().AllTools(ctx)
+	agentTools := tools.NewAgentTool()
+	if app.cfg.Sandbox.Enabled {
+		agentTools = tools.NewAgentTool(tools.SandboxControllerConfig{
+			BaseURL:        app.cfg.Sandbox.BaseURL,
+			AuthToken:      app.cfg.Sandbox.AuthToken,
+			RequestTimeout: app.cfg.Sandbox.RequestTimeout,
+			MaxOutputBytes: app.cfg.Sandbox.MaxOutputBytes,
+		})
+	}
+	allTools, err := agentTools.AllTools(ctx)
 	if err != nil {
 		wrappedErr := fmt.Errorf("initialize tools: %w", err)
 		logger.Error("assemble application failed", zap.String("stage", "tool"), zap.Error(wrappedErr))

@@ -102,9 +102,67 @@ queue:
   max_workers: 4
   poll_interval: 250ms
   lease_ttl: 30s
+sandbox:
+  enabled: false
+  base_url: http://127.0.0.1:8787
+  auth_token: "{SANDBOX_CONTROLLER_TOKEN}"
+  request_timeout: 11m
+  max_output_bytes: 65536
 ```
 
-省略整个 `subagent` 块时，摘要 Agent 使用主模型配置；仍是独立 Agent。配置严格校验未知字段；模型 key 和数据库 DSN 必须使用 `{ENV}` 引用。
+省略整个 `subagent` 块时，摘要 Agent 使用主模型配置；仍是独立 Agent。配置严格校验未知字段；模型 key、数据库 DSN 和启用后的 Controller token 必须使用 `{ENV}` 引用。
+
+## Docker 沙箱
+
+可选的本地 Docker 沙箱把逻辑申请和运行容器分开。每个 Agent 会话最多持有一个 `application_id` 和一个独立命名卷；容器停止、丢失或重建时 `/workspace` 代码仍然存在。默认最多同时运行三个容器、最多保留 30 个总申请，因此休眠工作区也绝不会超过 30 个，但 active/starting 申请同样占这 30 个名额。空闲容器会按指数增长的保温时间自动停止，容量紧张时也可提前休眠。Agent 主动销毁或申请达到五小时硬期限后，容器和命名卷都会删除。
+
+沙箱 Controller 位于独立的 `sandbox` Compose profile，普通的 `docker compose up -d postgres` 不会启动它，Compose 也不会预先启动任何 Runtime 容器。先运行 `openssl rand -hex 32`，把结果填入 `.env` 的 `SANDBOX_CONTROLLER_TOKEN`。Linux 默认使用 `/var/run/docker.sock`；Docker Desktop 使用其他 socket 时同步修改 `DOCKER_SOCKET_PATH`。然后构建固定的编译镜像并启动 Controller：
+
+```bash
+docker compose --profile sandbox-image build sandbox-runtime
+docker compose --profile sandbox up -d --build sandbox-controller
+curl http://127.0.0.1:8787/healthz
+```
+
+然后把 `configs/config.yaml` 中的 `sandbox.enabled` 改为 `true`。Agent 可调用 `sandbox_apply`、`sandbox_create`、`sandbox_exec`、`sandbox_write_file`、`sandbox_read_file`、`sandbox_status`、`sandbox_release` 和 `sandbox_destroy`。这些能力只作为 Agent Tool 暴露，不会加入用户 HTTP Gateway。
+
+Runtime 镜像包含 Go 1.25、Python 3.11、Node.js 22、GCC/G++、make、git 和常用 shell 工具。运行容器使用 `network=none`，且 Go、pip、npm 均配置为离线模式；外部依赖必须随工作区上传或提前 vendor。镜像预置由 UID/GID 1000 持有的 `/workspace` 骨架，Docker 首次挂载空命名卷时将其 copy-up，无需高权限卷初始化。PID 1 使用独立的非 root UID 1001，模型可控执行和文件操作固定为 UID/GID 1000，因此 Controller 可以在每次命令后清除该 UID 的所有后台进程而不影响容器 supervisor。根文件系统只读，不挂载宿主目录、凭证或 Docker socket，并有 CPU、内存、PID 和输出限制。`/tmp` 是 `noexec` 的受限 tmpfs，编译器临时目录指向受配额监控的 `/workspace/.tmp`，因此 Go 测试等需要执行临时产物的操作仍可运行。
+
+Controller 是唯一可访问 Docker socket 的可信进程，监听端口只发布到宿主 loopback，并要求独立 Bearer token。Docker socket 权限通常等同宿主 root 权限，因此不要把 Controller 端口暴露到公网，也不要把 socket 传给 Runtime 容器。Controller 的完整资源和生命周期配置位于 `configs/sandbox-controller.yaml`。
+
+启动、销毁和并发成本的官方资料与本机 benchmark 方法见 [Docker 沙箱调研](doc/docker-sandbox-research.md)。真实 Docker 集成测试和 benchmark 都是显式启用的；脚本结束前会删除自己的测试容器与命名卷，不会留下常驻沙箱。
+
+Docker daemon 已由操作者启动后，可以运行完整黑盒验证。脚本使用独立的 `easygo-agent-it` namespace 和 Compose project；它不会启动或关闭 Docker Desktop，并通过退出 trap 删除测试 Controller、状态卷以及所有带该测试 namespace 的容器和工作区卷：
+
+```bash
+./scripts/test-sandbox-docker.sh
+```
+
+测试覆盖 Python、Go、Node.js、C++ 编译/执行、运行时禁网、UID 1000、只读根文件系统、CPU/内存/PID/`shm`/`tmpfs` 限制、无端口/设备/宿主挂载、后台进程清理，以及工作区跨 stop/start 和容器重建保留、destroy 后彻底消失。普通 `go test ./...` 不接触 Docker；也可在已有测试 Controller 前显式设置 `EASYGO_SANDBOX_INTEGRATION_URL` 后单独运行 `go test ./integration/sandbox -v`。
+
+100 个并发申请和 waiter 取消属于额外压力轮，显式设置 `SANDBOX_RUN_STRESS=1` 启用。测试配置仍保持最多 30 个申请和 3 个运行容器：超出的并发申请必须返回结构化 `application_limit_reached`，已获批申请的运行容器采样值不得超过 3；等待容量的请求被取消后必须可以重新进入队列。退出时再次验证该测试 namespace 下容器和卷均为零。
+
+```bash
+SANDBOX_RUN_STRESS=1 ./scripts/test-sandbox-docker.sh
+```
+
+需要采集本机时延分布时，在同一次隔离运行中显式打开 benchmark：
+
+```bash
+SANDBOX_RUN_BENCHMARK=1 \
+SANDBOX_BENCH_OUTPUT=sandbox-benchmark.json \
+./scripts/test-sandbox-docker.sh
+```
+
+默认先丢弃 10 次全生命周期预热，再对并发度 1/3/6 和 `noop`、Python、Go、Node.js、C++ 负载各执行 100 次，并分别覆盖 active reuse、stop/start 和容器丢失后复用原 volume 重建三条路径。v4 JSON 同时保留原始样本和汇总：queue/create/start/ready/exec/stop/remove/destroy 的时延、错误率，exec 窗口内 Docker cgroup CPU time、采样峰值 memory/PIDs（附带 block I/O），以及各宿主生命周期 phase 的 Docker daemon/Desktop backend CPU time delta、峰值 RSS 和匹配 PID 数。宿主字段为 `host_cpu_time_ms`、`host_peak_rss_bytes`、`host_peak_pids`、`host_stats_samples`、`host_observation_method` 和 `host_missing_reason`；发现或采样不可靠时数值字段缺失而不是补 0。`queue` 由 Controller 精确记录从进入容量队列到取得运行槽的时间，包含为腾出槽位而执行的 LRU stop，不包含前置空间检查、`max_starting` 信号量等待或 Engine create/start；cold `create` 则是 HTTP 请求开始到宿主收到 Docker create event 的上界，包含前置检查、排队和事件传输，不会伪装成纯 Engine create 时间。Docker socket 由测试脚本显式传入；单独运行命令时可用 `-docker-host`、`-namespace`，或复用 `DOCKER_SOCKET_PATH`。这些指标必须在目标机器上实测，不能由其他机器的数据代替；benchmark 只读取进程表和已运行的 Docker API，绝不会自行启动或停止 Docker。
+
+停止正式 Controller 时，先停止服务，再运行一次受信任的 cleanup 模式，可立即删除该 namespace 下的所有申请、容器和命名卷。该操作会永久删除沙箱工作区，不会删除 PostgreSQL 数据卷：
+
+```bash
+docker compose --profile sandbox stop sandbox-controller
+docker compose --profile sandbox run --rm --no-deps sandbox-controller -config /etc/easygo/sandbox-controller.yaml -cleanup
+docker compose --profile sandbox rm -f sandbox-controller
+```
 
 ## CLI
 
@@ -172,6 +230,9 @@ SSE 的每个事件包含 `event: <kind>` 和 JSON `data`，首先是 `queued` �
 - `internal/conversation`：PostgreSQL 与内存存储、`agent_runs` 队列和租约提交。
 - `internal/tui`：banner、队列面板、历史展示、流式输出和取消。
 - `internal/gateway`：HTTP JSON / SSE 接口。
+- `internal/sandbox`：Docker Engine 适配、申请/容量/TTL 状态机、bbolt 对账和内部鉴权 HTTP。
+- `cmd/sandbox-controller`：可信本地 Controller；包含健康检查与显式 cleanup 模式。
+- `cmd/sandbox-bench`：显式启用的端到端沙箱时延 benchmark。
 - `internal/app`：配置、依赖组装和模式切换。
 
 ## 运行结束与资源释放

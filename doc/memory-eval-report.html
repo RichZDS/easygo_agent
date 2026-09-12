@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>记忆系统评测 · deepseek-flash</title>
+  <style>
+    :root {
+      --bg: #f4efe6;
+      --paper: #fffaf2;
+      --ink: #1c1915;
+      --muted: #6b645b;
+      --line: #e3d8c6;
+      --pass: #1f6b45;
+      --pass-bg: #e5f4ea;
+      --fail: #9b2c2c;
+      --fail-bg: #fdecec;
+      --user: #24364a;
+      --user-bg: #e8eef5;
+      --bot: #3b2f22;
+      --bot-bg: #f6f0e4;
+      --accent: #c45c26;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink); }
+    body {
+      font: 16px/1.65 "Iowan Old Style", "Palatino Linotype", "Songti SC", "Source Han Serif SC", serif;
+    }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 48px 24px 80px; }
+    header.hero {
+      border-bottom: 3px solid var(--ink);
+      padding-bottom: 28px;
+      margin-bottom: 36px;
+    }
+    .kicker {
+      letter-spacing: .18em;
+      text-transform: uppercase;
+      font-size: 12px;
+      color: var(--accent);
+      font-family: "Segoe UI", sans-serif;
+      margin: 0 0 10px;
+    }
+    h1 { font-size: 40px; line-height: 1.15; margin: 0 0 12px; font-weight: 700; }
+    .lede { font-size: 18px; color: var(--muted); margin: 0; max-width: 42em; }
+    .meta {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-top: 28px;
+    }
+    .stat {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      padding: 14px 16px;
+    }
+    .stat b { display: block; font-size: 22px; }
+    .stat span { color: var(--muted); font-size: 13px; font-family: "Segoe UI", sans-serif; }
+    nav.toc {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin: 0 0 36px;
+    }
+    nav.toc a {
+      color: var(--ink);
+      text-decoration: none;
+      border: 1px solid var(--ink);
+      padding: 6px 12px;
+      font-size: 13px;
+      font-family: "Segoe UI", sans-serif;
+    }
+    h2 {
+      font-size: 28px;
+      margin: 48px 0 16px;
+      padding-top: 12px;
+      border-top: 1px solid var(--line);
+    }
+    h3 { font-size: 20px; margin: 28px 0 10px; }
+    p { margin: 0 0 14px; }
+    table { width: 100%; border-collapse: collapse; background: var(--paper); margin: 12px 0 24px; }
+    th, td { border: 1px solid var(--line); padding: 10px 12px; text-align: left; vertical-align: top; }
+    th { background: #f0e6d4; font-family: "Segoe UI", sans-serif; font-size: 13px; }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-family: "Segoe UI", sans-serif;
+      font-size: 12px;
+    }
+    .ok { background: var(--pass-bg); color: var(--pass); }
+    .no { background: var(--fail-bg); color: var(--fail); }
+    .case {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      padding: 22px;
+      margin: 0 0 28px;
+    }
+    .case-head { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+    .hits { font-family: "Segoe UI", sans-serif; font-size: 13px; color: var(--muted); }
+    .chat { margin: 18px 0 8px; display: grid; gap: 12px; }
+    .msg { padding: 12px 14px; border: 1px solid var(--line); }
+    .msg.user { background: var(--user-bg); border-left: 4px solid var(--user); }
+    .msg.bot { background: var(--bot-bg); border-left: 4px solid var(--accent); }
+    .msg.sys { background: #f3eee8; color: var(--muted); font-size: 14px; }
+    .who { font-family: "Segoe UI", sans-serif; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; margin-bottom: 6px; color: var(--muted); }
+    .msg p { margin: 0 0 8px; }
+    .msg p:last-child { margin: 0; }
+    .msg ul { margin: 8px 0 0; padding-left: 1.2em; }
+    .card-list { display: grid; gap: 8px; margin: 8px 0 16px; }
+    .card {
+      border: 1px dashed var(--line);
+      padding: 10px 12px;
+      font-size: 14px;
+      background: #fff;
+    }
+    .card em { font-style: normal; font-family: "Segoe UI", sans-serif; font-size: 11px; letter-spacing: .08em; color: var(--accent); margin-right: 8px; }
+    .note {
+      background: #fff4e5;
+      border: 1px solid #ead2a8;
+      padding: 12px 14px;
+      font-size: 14px;
+      margin: 12px 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    code { font-family: Consolas, "Courier New", monospace; font-size: .92em; background: #efe7d8; padding: 0 4px; }
+    pre {
+      background: #1c1915;
+      color: #f4efe6;
+      padding: 14px 16px;
+      overflow: auto;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    footer { margin-top: 48px; color: var(--muted); font-size: 13px; }
+    @media (max-width: 720px) {
+      .meta { grid-template-columns: 1fr 1fr; }
+      h1 { font-size: 30px; }
+      .case-head { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="hero">
+      <p class="kicker">EasyGo Agent · Memory Eval</p>
+      <h1>记忆系统评测结果</h1>
+      <p class="lede">用 <code>deepseek-flash</code> 实测三档记忆：同会话短期窗口、单轮长期档案、超长轮撑破后再召回。生产路径与评测相同：加载会话上下文，注入最多 5 条长期记忆，再交给 Deep Agent 回答。</p>
+      <div class="meta">
+        <div class="stat"><b>3 / 3</b><span>用例通过</span></div>
+        <div class="stat"><b>deepseek-flash</b><span>主模型 / 摘要 / 记忆 Agent</span></div>
+        <div class="stat"><b>2026-09-11 15:31 UTC</b><span>评测时间</span></div>
+        <div class="stat"><b>cmd/memory-eval</b><span>评测入口</span></div>
+      </div>
+    </header>
+
+    <nav class="toc">
+      <a href="#method">评测方法</a>
+      <a href="#summary">总览</a>
+      <a href="#stm">短期记忆对话</a>
+      <a href="#ltm">单轮长期记忆对话</a>
+      <a href="#long">超长轮长期记忆对话</a>
+      <a href="#analysis">效果分析</a>
+      <a href="#limits">系统边界</a>
+      <a href="#rerun">复跑</a>
+    </nav>
+
+    <h2 id="method">评测方法</h2>
+    <p>三档走同一条生产路径：<code>NewStored</code> 加载会话上下文 → <code>MemoryStore.Recall</code> 注入最多 5 条长期记忆 → Deep Agent 回答。长期档在探针前显式调用 <code>ConsolidateUser</code>。生产环境默认每天 03:00 归档，不会在当轮立刻入库；这次评测是立刻 consolidation，用来单独看档案通道本身。</p>
+    <table>
+      <thead>
+        <tr><th>档位</th><th>测什么</th><th>怎样制造条件</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>短期记忆</td><td>会话窗口 <code>context_messages</code></td><td>同会话两轮，长期库为空</td></tr>
+        <tr><td>单轮长期记忆</td><td>提取 → 五槽档案 → 新会话召回</td><td>一轮偏好后 consolidation，再开空会话</td></tr>
+        <tr><td>超长轮长期记忆</td><td>窗口被撑满后，早期事实能否靠档案复活</td><td>写入内部约束，再填充多轮直至压缩/预算失败，然后新会话提问</td></tr>
+      </tbody>
+    </table>
+    <p>关键词必须全部出现才算通过。短期档要求复述项目代号、日期、对接人；长期档要求新会话回答里出现过敏原、素食、简体中文，或工号、内部工具、周五禁发。</p>
+
+    <h2 id="summary">总览</h2>
+    <table>
+      <thead>
+        <tr><th>档位</th><th>用例</th><th>结果</th><th>压缩成功</th><th>探针耗时</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>短期记忆（同会话上下文）</td>
+          <td>近期事实仍在会话窗口内</td>
+          <td><span class="badge ok">通过</span></td>
+          <td>否</td>
+          <td>1.101s</td>
+        </tr>
+        <tr>
+          <td>单轮长期记忆（新会话召回）</td>
+          <td>一轮稳定偏好写入五槽档案后，空上下文仍能遵守</td>
+          <td><span class="badge ok">通过</span></td>
+          <td>否</td>
+          <td>2.769s</td>
+        </tr>
+        <tr>
+          <td>超长轮长期记忆（压缩后归档再新开会话）</td>
+          <td>早期约束在长对话压缩后仍能进入档案并被新会话使用</td>
+          <td><span class="badge ok">通过</span></td>
+          <td>否（压缩后仍超预算，fail-closed）</td>
+          <td>1.105s</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2 id="stm">短期记忆对话</h2>
+    <div class="case">
+      <div class="case-head">
+        <h3>近期事实仍在会话窗口内</h3>
+        <span class="badge ok">通过</span>
+      </div>
+      <p>用户 <code>eval-stm</code>，同一会话。探针前长期召回为空，确认没有误走档案。</p>
+      <p class="hits">命中：夜莺、3月18、王敏</p>
+      <div class="chat">
+        <div class="msg user">
+          <div class="who">用户 · 写入</div>
+          <p>请记住这些工作事实，后面我会提问：项目代号是夜莺，截止日期是3月18日，对接人是王敏。先简短确认。</p>
+        </div>
+        <div class="msg sys">
+          <div class="who">系统</div>
+          <p>确认轮完成，未走长期库。下一轮仍在同一会话里提问。</p>
+        </div>
+        <div class="msg user">
+          <div class="who">用户 · 探针</div>
+          <p>请根据刚才的对话，依次写出：项目代号、截止日期、对接人。</p>
+        </div>
+        <div class="msg bot">
+          <div class="who">deepseek-flash · 探针回答</div>
+          <p>根据刚才的对话，依次为：</p>
+          <ol>
+            <li>项目代号：夜莺</li>
+            <li>截止日期：3月18日</li>
+            <li>对接人：王敏</li>
+          </ol>
+        </div>
+      </div>
+      <p>对照抽样：第一次把问题写成「夜莺项目的截止日期和对接人分别是谁」，模型只答了「截止日期：3月18日 / 对接人：王敏」，没重复项目代号。窗口里事实还在，是问法问题。</p>
+    </div>
+
+    <h2 id="ltm">单轮长期记忆对话</h2>
+    <div class="case">
+      <div class="case-head">
+        <h3>一轮稳定偏好写入五槽档案后，空上下文仍能遵守</h3>
+        <span class="badge ok">通过</span>
+      </div>
+      <p>用户 <code>eval-ltm-single</code>。先在会话 A 写入偏好并 consolidation，再开会话 B（空历史）提问。</p>
+      <p class="hits">命中：白羽豆荚、素食、简体</p>
+      <div class="chat">
+        <div class="msg user">
+          <div class="who">用户 · 会话 A 写入</div>
+          <p>请记住我的长期偏好：我是素食者；我对「白羽豆荚」严重过敏，任何推荐都不能包含它；对外文档必须用简体中文。先简短确认。</p>
+        </div>
+        <div class="msg sys">
+          <div class="who">系统 · consolidation</div>
+          <p>立刻调用 <code>ConsolidateUser</code>，把完成轮次写入五槽档案。然后创建新会话，会话历史为空。</p>
+        </div>
+      </div>
+      <h3>长期档案 / 探针前召回</h3>
+      <div class="card-list">
+        <div class="card"><em>constraint</em>用户对「白羽豆荚」严重过敏；任何推荐都必须严格排除该食材。</div>
+        <div class="card"><em>constraint</em>对外文档必须使用简体中文。</div>
+        <div class="card"><em>constraint</em>用户是素食者；所有饮食或产品推荐不得包含肉类及动物性食材。</div>
+      </div>
+      <div class="chat">
+        <div class="msg user">
+          <div class="who">用户 · 会话 B 探针</div>
+          <p>这是一个新会话。请根据你对我的长期记忆：1) 写出我过敏的食材名称；2) 列出三种符合我饮食习惯的加餐；3) 对外文档必须用什么语言？</p>
+        </div>
+        <div class="msg bot">
+          <div class="who">deepseek-flash · 探针回答</div>
+          <p>根据我的长期记忆，回答如下：</p>
+          <p><strong>1) 过敏食材</strong><br>您对<strong>「白羽豆荚」</strong>严重过敏。任何推荐都会严格排除该食材。</p>
+          <p><strong>2) 三种符合您饮食习惯的加餐</strong><br>您为素食者（不含肉类及动物性食材），以下加餐均满足要求，且不含白羽豆荚：</p>
+          <ul>
+            <li><strong>混合坚果与果干</strong>：如杏仁、核桃、腰果搭配葡萄干或蔓越莓干，方便携带、饱腹感强。</li>
+            <li><strong>鹰嘴豆泥配蔬菜条</strong>：以鹰嘴豆泥搭配胡萝卜、黄瓜、彩椒等生鲜蔬菜条，植物蛋白丰富。</li>
+            <li><strong>燕麦能量球（或全麦面包配花生酱）</strong>：用燕麦、花生酱、少量蜂蜜/枫糖揉制，无动物性成分，适合加餐补充能量。</li>
+          </ul>
+          <p>温馨提示：若选购市售成品，建议留意配料表，避免与「白羽豆荚」及其制品发生交叉污染。</p>
+          <p><strong>3) 对外文档语言</strong><br>对外文档必须使用<strong>简体中文</strong>。</p>
+        </div>
+      </div>
+      <p>对照抽样：第一次新会话只问「列三种加餐」，档案里已经有白羽豆荚过敏，模型却推荐了花生酱，也没有主动说出过敏原。注入成功不等于模型会主动执行约束。</p>
+    </div>
+
+    <h2 id="long">超长轮长期记忆对话</h2>
+    <div class="case">
+      <div class="case-head">
+        <h3>早期约束在长对话压缩后仍能进入档案并被新会话使用</h3>
+        <span class="badge ok">通过</span>
+      </div>
+      <p>用户 <code>eval-ltm-long</code>。评测把 <code>context_tokens</code> 降到 8000 来模拟长对话。填充第 4 轮时压缩后估计仍是 12197，系统 fail-closed。</p>
+      <p class="hits">命中：玄枢台账、EG-7741、周五</p>
+      <div class="chat">
+        <div class="msg user">
+          <div class="who">用户 · 早期事实</div>
+          <p>这些是必须长期遵守的内部事实：我们的内部工具叫「玄枢台账」；我的工号是 EG-7741；绝对禁止在周五把变更推到生产。先简短确认，不要展开。</p>
+        </div>
+        <div class="msg user">
+          <div class="who">用户 · 填充轮次 1–3</div>
+          <p>填充轮次 N。这是一段与内部工具无关的填充说明，用于逐渐撑满会话上下文，请只回复「继续」。…（重复 12 次）</p>
+        </div>
+        <div class="msg sys">
+          <div class="who">系统 · 填充轮次 4 中断</div>
+          <p>会话窗口已经撑破，改为只检验长期档案能否在新会话恢复早期事实。</p>
+        </div>
+      </div>
+      <div class="note">receive Eino agent event: [NodeRunError] compressed context estimate 12197 exceeds input budget 8000; shorten the input or increase agent.context_tokens within the model window
+node path: [node_1, ChatModel]</div>
+      <h3>长期档案 / 探针前召回</h3>
+      <div class="card-list">
+        <div class="card"><em>constraint</em>绝对禁止在周五将变更推送到生产环境。</div>
+        <div class="card"><em>memory</em>用户的内部工具叫「玄枢台账」。</div>
+        <div class="card"><em>memory</em>用户的工号是 EG-7741。</div>
+      </div>
+      <div class="chat">
+        <div class="msg user">
+          <div class="who">用户 · 新会话探针</div>
+          <p>这是一个新会话。根据长期记忆回答：我的工号、内部工具名称，以及周五能否把变更推到生产？</p>
+        </div>
+        <div class="msg bot">
+          <div class="who">deepseek-flash · 探针回答</div>
+          <p>根据长期记忆，以下是相关信息：</p>
+          <ol>
+            <li><strong>工号</strong>：EG-7741</li>
+            <li><strong>内部工具名称</strong>：玄枢台账</li>
+            <li><strong>周五能否推变更到生产</strong>：不可以。有一条明确约束——<strong>绝对禁止在周五将变更推送到生产环境</strong>。</li>
+          </ol>
+          <p>如需进一步协助（例如安排其他时间窗口），请告诉我。</p>
+        </div>
+      </div>
+    </div>
+
+    <h2 id="analysis">效果分析</h2>
+    <h3>短期记忆：会话上下文是有效的工作记忆</h3>
+    <p>探针前长期召回为空，说明没有误走档案。模型把「夜莺 / 3月18日 / 王敏」原样复述出来，证明 <code>agent_sessions.context_messages</code> 作为单会话短期记忆是够用的。这一档不依赖 consolidation，延迟大约 1 秒。</p>
+    <h3>单轮长期记忆：档案写入和召回是硬的，遵守程度取决于提问</h3>
+    <p>一轮对话后，记忆 Agent 抽出 3 条 <code>constraint</code> 并写进五槽档案。新会话的会话历史是空的，但探针前召回已经带上这三条。长期记忆的上下文通道是通的：<code>Recall</code> → <code>usermemory.Prompt</code> → 额外 system 消息。它不依赖旧会话还在窗口里。</p>
+    <p>第一次抽样里，新会话被问「列三种加餐」时，档案里已经有白羽豆荚过敏，模型却推荐了花生酱。结论是：<strong>注入成功不等于模型会主动执行约束</strong>；约束要写进档案，提问也得让模型去用这块 reference。</p>
+    <h3>超长轮长期记忆：窗口会撑破，档案能把早期事实捞回来</h3>
+    <p>填充到第 4 轮时，压缩后估计仍超预算，系统 fail-closed，没有继续往主模型送超预算上下文。这是预期行为，不是静默截断。已经成功提交的前几轮仍在 transcript 里。consolidation 抽出「玄枢台账 / EG-7741 / 周五禁止推生产」，新会话召回并正确回答。短窗被预算打穿之后，长期档案是唯一还能恢复早期约束的层。</p>
+    <p>本次没有观察到 <code>compressing</code> 事件成功完成——压缩器跑了，但摘要仍超预算。生产默认 <code>context_tokens: 24000</code>，真实撑破会更晚；一旦撑破，表现应与这次相同：当轮失败，档案仍可在之后的会话里用。</p>
+
+    <h2 id="limits">系统层面的边界</h2>
+    <ul>
+      <li>五槽上限：三条约束已经占满 3/5，更多稳定事实会互相挤掉。</li>
+      <li>时效：生产 consolidation 是每天 03:00，评测里是立刻跑的。刚聊完的偏好在当天新会话里不一定已经入库。</li>
+      <li>注入策略：长期记忆是 retrieved reference data, not instructions。模型可以看见，也可以忽略，除非用户问题把它用起来。</li>
+      <li>压缩 fail-closed：超预算不会偷偷丢历史，会直接报错。这对正确性好，对超长会话的同轮连续性不友好。</li>
+    </ul>
+
+    <h2>结论</h2>
+    <p>三档抽样均通过。<code>deepseek-flash</code> 下，短期记忆靠会话上下文就能用；长期记忆的提取、五槽档案、跨会话召回是通的，而且在会话窗口被撑破之后仍能恢复早期内部约束。主要风险不在「记不住」，而在三件事：当日档案还没 consolidation、五槽互相覆盖、以及模型把档案当成参考而不是强制指令。</p>
+
+    <h2 id="rerun">复跑</h2>
+    <pre>go run ./cmd/memory-eval -config configs/memory-eval.yaml -out doc/memory-eval-report.md</pre>
+    <p>Markdown 原文在 <code>doc/memory-eval-report.md</code>。本页是同一份评测的对话版。</p>
+    <footer>EasyGo Agent memory eval · 2026-09-11 · model deepseek-flash</footer>
+  </div>
+</body>
+</html>

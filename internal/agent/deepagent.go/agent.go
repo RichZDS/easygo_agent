@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	agentruntime "easygo-agent/internal/agent/runtime"
@@ -28,6 +29,7 @@ type Config struct {
 	SummaryModel model.AgenticModel
 	Tools        []tool.BaseTool
 	Agent        config.AgentConfig
+	Instruction  string
 }
 
 // New constructs a concurrent Eino Deep Agent using the supplied adapters.
@@ -64,9 +66,13 @@ func New(ctx context.Context, cfg Config) (adk.TypedAgent[*schema.AgenticMessage
 		if err != nil {
 			return nil, err
 		}
+		instruction := strings.TrimSpace(cfg.Instruction)
+		if instruction == "" {
+			instruction = prompt.SystemPrompt
+		}
 		return deep.NewTyped(ctx, &deep.TypedConfig[*schema.AgenticMessage]{
 			Name:                   "deep-agent",
-			Instruction:            prompt.SystemPrompt,
+			Instruction:            instruction,
 			WithoutWriteTodos:      true,
 			WithoutGeneralSubAgent: true,
 			ChatModel:              cfg.ChatModel,

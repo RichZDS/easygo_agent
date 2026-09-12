@@ -146,7 +146,7 @@ func FitBaseline(req FitRequest) (FitResult, error) {
 		summarized++
 		summarizedBytes += n
 	}
-	kept = append(kept, schemaSystem("Conversation history was summarized in full; heuristic skill and tools were not reduced."))
+	kept = append(kept, schemaUser("Conversation history was summarized in full; heuristic skill and tools were not reduced."))
 	after, err := Measure(kept, req.Tools)
 	if err != nil {
 		return FitResult{}, err
@@ -191,7 +191,7 @@ func fitDialogue(messages []*schema.AgenticMessage, tools []*schema.ToolInfo, li
 		notes := extractThemeNotes(prefix, situation)
 		candidate := append([]*schema.AgenticMessage{}, sys...)
 		if notes != "" {
-			candidate = append(candidate, schemaSystem(notes))
+			candidate = append(candidate, schemaUser(notes))
 		}
 		candidate = append(candidate, keep...)
 		ok, err := wouldFit(candidate, tools, limit)
@@ -212,7 +212,7 @@ func fitDialogue(messages []*schema.AgenticMessage, tools []*schema.ToolInfo, li
 	last := dialogue[len(dialogue)-1]
 	candidate := append([]*schema.AgenticMessage{}, sys...)
 	if notes != "" {
-		candidate = append(candidate, schemaSystem(notes))
+		candidate = append(candidate, schemaUser(notes))
 	}
 	candidate = append(candidate, last)
 	out.Messages = candidate

@@ -131,19 +131,33 @@ type compressionBudget struct {
 	limit int
 }
 
-// A summary is not assumed to fit. Reject an oversized result before invoking
-// the main model, rather than repeatedly compressing or silently truncating it.
+// A summary is not assumed to fit. Shrink unused heuristic skill/tool first,
+// then summarize only as much older dialogue as needed. Reject an oversized
+// result before invoking the main model; never silently truncate history.
 func (m *compressionBudget) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[*schema.AgenticMessage], mc *adk.TypedModelContext[*schema.AgenticMessage]) (context.Context, *adk.TypedChatModelAgentState[*schema.AgenticMessage], error) {
-	ctx, next, err := m.TypedChatModelAgentMiddleware.BeforeModelRewriteState(ctx, state, mc)
+	if state == nil {
+		return ctx, nil, fmt.Errorf("agent state is required")
+	}
+	fitted, err := Fit(FitRequest{Messages: state.Messages, Tools: state.ToolInfos, Limit: m.limit})
 	if err != nil {
 		return ctx, nil, err
 	}
-	tokens, err := countInputTokens(ctx, &summarization.TypedTokenCounterInput[*schema.AgenticMessage]{Messages: next.Messages, Tools: next.ToolInfos})
+	next := *state
+	next.Messages = fitted.Messages
+	next.ToolInfos = fitted.Tools
+	if fitted.Fitted {
+		return ctx, &next, nil
+	}
+	ctx, summarized, err := m.TypedChatModelAgentMiddleware.BeforeModelRewriteState(ctx, &next, mc)
+	if err != nil {
+		return ctx, nil, err
+	}
+	tokens, err := countInputTokens(ctx, &summarization.TypedTokenCounterInput[*schema.AgenticMessage]{Messages: summarized.Messages, Tools: summarized.ToolInfos})
 	if err != nil {
 		return ctx, nil, err
 	}
 	if tokens > m.limit {
 		return ctx, nil, fmt.Errorf("compressed context estimate %d exceeds input budget %d; shorten the input or increase agent.context_tokens within the model window", tokens, m.limit)
 	}
-	return ctx, next, nil
+	return ctx, summarized, nil
 }

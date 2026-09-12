@@ -20,6 +20,9 @@ import (
 	"easygo-agent/internal/config"
 	"easygo-agent/internal/conversation"
 	"easygo-agent/internal/logger"
+	"easygo-agent/internal/maze"
+	"easygo-agent/internal/prompt"
+	"easygo-agent/internal/skill"
 	"easygo-agent/internal/tools"
 	"easygo-agent/internal/usermemory"
 
@@ -34,10 +37,20 @@ func main() {
 func run() int {
 	configPath := flag.String("config", "configs/memory-eval.yaml", "YAML configuration path")
 	outPath := flag.String("out", "doc/memory-eval-report.md", "markdown report path")
+	fitReport := flag.String("fit-report", "doc/memory-opt-before-after.md", "before/after compression report from the shipped Fit path")
+	fitOnly := flag.Bool("fit-only", false, "write the Fit before/after report and skip live model eval")
 	flag.Parse()
 	if err := loadDotEnv(".env"); err != nil {
 		fmt.Fprintf(os.Stderr, "memory-eval: %v\n", err)
 		return 1
+	}
+	if err := writeFitReport(*fitReport); err != nil {
+		fmt.Fprintf(os.Stderr, "memory-eval: %v\n", err)
+		return 1
+	}
+	if *fitOnly {
+		fmt.Printf("wrote %s\n", *fitReport)
+		return 0
 	}
 	if _, err := logger.New(logger.DefaultPath()); err != nil {
 		fmt.Fprintf(os.Stderr, "memory-eval: %v\n", err)
@@ -128,7 +141,15 @@ func evaluate(ctx context.Context, configPath string) (evalReport, error) {
 }
 
 func newEvaluator(ctx context.Context, cfg config.Config, store *conversation.Memory) (*evaluator, error) {
-	allTools, err := tools.NewAgentTool().AllTools(ctx)
+	agentTools := tools.NewAgentTool()
+	instruction := prompt.SystemPrompt
+	lib, skillErr := skill.Open(skill.DefaultRoot)
+	if skillErr == nil {
+		agentTools = agentTools.WithSkills(lib)
+		instruction = prompt.WithSkillCatalog(instruction, lib.CatalogPrompt())
+	}
+	agentTools = agentTools.WithHiddenMaze(maze.NewStore(maze.DefaultDir))
+	allTools, err := agentTools.AllTools(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -145,6 +166,7 @@ func newEvaluator(ctx context.Context, cfg config.Config, store *conversation.Me
 		SummaryModel: summaryModel,
 		Tools:        allTools,
 		Agent:        cfg.Agent,
+		Instruction:  instruction,
 	})
 	if err != nil {
 		return nil, err
@@ -223,19 +245,16 @@ func (e *evaluator) ultraLongLongTerm(ctx context.Context) caseResult {
 	if err != nil {
 		return fail(result, err)
 	}
-	setup := "这些是必须长期遵守的内部事实：我们的内部工具叫「玄枢台账」；我的工号是 EG-7741；绝对禁止在周五把变更推到生产。先简短确认，不要展开。"
-	first, err := e.chat(ctx, user, session.ID, setup)
-	if err != nil {
+	turns := deepagent.ThemedUserTurns()
+	if err = deepagent.RejectRepeatedFiller(turns); err != nil {
 		return fail(result, err)
 	}
-	result.Compressed = first.Compressed
-	padding := strings.Repeat("这是一段与内部工具无关的填充说明，用于逐渐撑满会话上下文，请只回复「继续」。", 12)
 	windowBroken := false
-	for i := 0; i < 6; i++ {
-		turn, chatErr := e.chat(ctx, user, session.ID, fmt.Sprintf("填充轮次 %d。%s", i+1, padding))
+	for i, turnText := range turns[:len(turns)-1] {
+		turn, chatErr := e.chat(ctx, user, session.ID, turnText)
 		if chatErr != nil {
 			windowBroken = true
-			result.Notes = append(result.Notes, fmt.Sprintf("填充轮次 %d 中断：%s", i+1, chatErr.Error()))
+			result.Notes = append(result.Notes, fmt.Sprintf("主题轮次 %d 中断：%s", i+1, chatErr.Error()))
 			break
 		}
 		result.Compressed = result.Compressed || turn.Compressed
@@ -265,9 +284,31 @@ func (e *evaluator) ultraLongLongTerm(ctx context.Context) caseResult {
 	result.Profile = profileTexts(ctx, e.store, user)
 	probed := e.probe(ctx, result, user, fresh.ID, "这是一个新会话。根据长期记忆回答：我的工号、内部工具名称，以及周五能否把变更推到生产？")
 	if !result.Compressed && !windowBroken {
-		probed.Notes = append(probed.Notes, "本轮未观察到 compressing 事件，上下文预算可能仍能装下全部填充文本")
+		probed.Notes = append(probed.Notes, "本轮未观察到 compressing 事件；可能已靠启发式 skill/tool 收缩装进预算")
 	}
 	return probed
+}
+
+func writeFitReport(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	req, err := deepagent.NewThemedFitRequest()
+	if err != nil {
+		return err
+	}
+	report, err := deepagent.BuildBudgetReport(req, []string{"玄枢台账", "EG-7741", "周五"})
+	if err != nil {
+		return err
+	}
+	if err = os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	if err = os.WriteFile(path, []byte(deepagent.RenderBudgetMarkdown(report)), 0o644); err != nil {
+		return err
+	}
+	htmlPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".html"
+	return os.WriteFile(htmlPath, []byte(deepagent.RenderBudgetHTML(report)), 0o644)
 }
 
 type turnResult struct {

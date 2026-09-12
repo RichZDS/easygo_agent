@@ -51,6 +51,6 @@
 
 抽取笔记以 **user** 消息写入（与 Eino `DefaultFinalize` 相同）。下一轮 `initialize()` 会丢掉持久化里的 system 行并重新注入 Instruction；user 笔记会留下，早期事实不会在第二轮超预算时消失。
 
-## 同期 live 评测（`go run ./cmd/memory-eval`）
+## 同期 live 评测（`go run ./cmd/eval/memory`）
 
-同一主题的多轮长对话走生产 Agent 路径：`configs/memory-eval.yaml` 的 8000 token 预算下，三档均通过（3/3）。超长轮同会话探针命中「玄枢台账 / EG-7741 / 周五」，没有再出现旧路径那种 `compressed context estimate exceeds input budget` 的 fail-closed。
+同一主题的多轮长对话走生产 Agent 路径：`configs/eval/memory.yaml` 的 8000 token 预算下，三档均通过（3/3）。超长轮同会话探针命中「玄枢台账 / EG-7741 / 周五」，没有再出现旧路径那种 `compressed context estimate exceeds input budget` 的 fail-closed。

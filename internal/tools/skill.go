@@ -12,7 +12,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// LoadSkillInput names one catalog entry. The name must match a SKILL/skill
+// LoadSkillInput names one catalog entry. The name must match a skills/
 // directory exactly; path fragments are rejected by the library.
 type LoadSkillInput struct {
 	Name string `json:"name" jsonschema:"required,description=Exact catalog skill name to load into context"`

@@ -13,7 +13,7 @@ const (
 	DefaultDailyAt     = "03:00"
 	DefaultTimezone    = "Local"
 	DefaultBatchTurns  = 20
-	DefaultStorageRoot = "Storage/Long-term Memory/User profile"
+	DefaultStorageRoot = "storage/longterm"
 )
 
 type Config struct {

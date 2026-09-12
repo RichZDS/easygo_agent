@@ -17,7 +17,7 @@ memory:
   timezone: "Asia/Shanghai"
   batch_turns: 20
   top_k: 5
-  storage_root: "Storage/Long-term Memory/User profile"
+  storage_root: "storage/longterm"
 
 http:
   address: "127.0.0.1:8080"

@@ -55,7 +55,7 @@ Gateway 与 TUI 都在同一 `Stored` Runtime 中，在每次模型调用前从�
 
 每天按 `memory.timezone` 的 `memory.daily_at`（默认 03:00）运行独立的无工具记忆 Agent：它只读取已完成的原始轮次，按 `memory.batch_turns` 分批提取有来源证据的候选，做全局排名取 Top 5，再和当前五槽画像对比、合并或淘汰。成功写库并物化文件后才推进 checkpoint，失败会在后续运行重试。
 
-数据库是唯一事实来源；`Storage/Long-term Memory/User profile/u-<sha256(user-id)>/` 是可重建物化视图，包含 `Agent.md`、`Memory.md`、`Experiment.md`、`Error.md`、`Preferences.md`、`Style.md`、`Prompts.md`、`Constraints.md` 和 `Metadata.md`。目录使用用户 ID 的 SHA-256，避免将原始用户名作为路径或暴露在目录列表中。
+数据库是唯一事实来源；`storage/longterm/u-<sha256(user-id)>/` 是可重建物化视图，包含 `Agent.md`、`Memory.md`、`Experiment.md`、`Error.md`、`Preferences.md`、`Style.md`、`Prompts.md`、`Constraints.md` 和 `Metadata.md`。目录使用用户 ID 的 SHA-256，避免将原始用户名作为路径或暴露在目录列表中。
 
 ## 上下文预算
 
@@ -74,7 +74,7 @@ Copy-Item .env.example .env
 # 编辑 .env，填写 MODEL_API_KEY、SUBMODEL_API_KEY。
 # DATABASE_URL 和 MEMORY_DATABASE_URL 分别指向会话库与独立记忆库。
 docker compose up -d postgres
-go run . -user alice
+go run ./cmd/easygo-agent -user alice
 ```
 
 `.env` 仅补充当前环境中未设置的变量。已有 `.env` 时请直接补齐字段。
@@ -116,7 +116,7 @@ memory:
   timezone: "Asia/Shanghai"
   batch_turns: 20
   top_k: 5
-  storage_root: "Storage/Long-term Memory/User profile"
+  storage_root: "storage/longterm"
 http:
   address: 127.0.0.1:8080
 queue:
@@ -190,14 +190,14 @@ docker compose --profile sandbox rm -f sandbox-controller
 
 ```powershell
 # 默认恢复该用户名最近使用的会话；省略 -user 时使用操作系统用户名。
-go run . -user alice
+go run ./cmd/easygo-agent -user alice
 # 创建新会话。
-go run . -user alice -new
+go run ./cmd/easygo-agent -user alice -new
 # 列出会话 / 按 ID 恢复。
-go run . -user alice -list
-go run . -user alice -session <session-id>
+go run ./cmd/easygo-agent -user alice -list
+go run ./cmd/easygo-agent -user alice -session <session-id>
 # 单次执行，适合脚本；正文输出到 stdout，会话标识输出到 stderr。
-go run . -user alice -prompt "用计算器计算 12 * 34"
+go run ./cmd/easygo-agent -user alice -prompt "用计算器计算 12 * 34"
 ```
 
 CLI 启动时展示该会话的原始历史。TUI 顶部固定显示居中的 `EASY GO` banner 和 `running / queued` 计数；`Enter` 会立即把输入写入持久化队列，即使当前任务仍在运行也可以继续输入。队列区显示序号、短 run ID、输入摘要和状态。`Tab` 切换输入框与队列焦点，队列焦点下用 `↑/↓` 选择项目，`Delete` 取消 queued 项；运行中 `Ctrl+C` 取消当前任务，空闲且没有待处理任务时退出。TUI 启动会恢复数据库中的 queued/running 项，终端尺寸变化时队列区会按可用高度截断。
@@ -205,7 +205,7 @@ CLI 启动时展示该会话的原始历史。TUI 顶部固定显示居中的 `E
 ## HTTP API
 
 ```powershell
-go run . -mode gateway
+go run ./cmd/easygo-agent -mode gateway
 ```
 
 HTTP 默认只监听 `127.0.0.1:8080`。URL 中的用户名是会话命名空间，不是已验证身份；模板不包含登录认证。公开部署时，由可信网关认证并绑定用户身份。
@@ -247,16 +247,20 @@ SSE 的每个事件包含 `event: <kind>` 和 JSON `data`，首先是 `queued` �
 
 ## 模块位置
 
-- `internal/agent/deepagent.go`：构造 Eino 主 Agent、摘要 Agent、上下文预算中间件。
+- `cmd/easygo-agent`：CLI / TUI / HTTP 入口。
+- `cmd/sandbox-controller`、`cmd/sandbox-bench`：沙箱控制面与压测。
+- `cmd/eval/`：记忆 / 迷宫 / skill 评测入口，报告写到 `doc/eval/`。
+- `internal/agent/deepagent`：构造 Eino 主 Agent、摘要 Agent、上下文预算中间件。
 - `internal/agent/runtime`：QueueManager、已 claim run 的执行、流合并、运行生命周期和展示事件。
 - `internal/conversation`：PostgreSQL 与内存存储、`agent_runs` 队列和租约提交。
-- `internal/usermemory`：独立记忆库、时间/调用次数 50/50 排名、03:00 consolidation Agent 和 Storage 物化。
+- `internal/usermemory`：独立记忆库、时间/调用次数 50/50 排名、03:00 consolidation Agent 和 `storage/longterm` 物化。
 - `internal/tui`：banner、队列面板、历史展示、流式输出和取消。
 - `internal/gateway`：HTTP JSON / SSE 接口。
 - `internal/sandbox`：Docker Engine 适配、申请/容量/TTL 状态机、bbolt 对账和内部鉴权 HTTP。
-- `cmd/sandbox-controller`：可信本地 Controller；包含健康检查与显式 cleanup 模式。
-- `cmd/sandbox-bench`：显式启用的端到端沙箱时延 benchmark。
 - `internal/app`：配置、依赖组装和模式切换。
+- `skills/`：skill 目录；`skills/SKILL.md` 是启动启发式，`skills/<name>/SKILL.md` 是专项正文。
+- `data/maze/`：迷宫 JSON 存储。
+- `configs/eval/`：评测用 YAML。
 
 ## 运行结束与资源释放
 
@@ -272,7 +276,7 @@ SSE 的每个事件包含 `event: <kind>` 和 JSON `data`，首先是 `queued` �
 go test ./...
 go vet ./...
 # 200 个实际 Eino Agent / Runtime 的用户记忆端到端验收（必须 100%，门槛为 95%）。
-go test ./internal/agent/deepagent.go -run TestUserMemoryEndToEndAcceptanceAtLeastNinetyFivePercent -count=1 -v
+go test ./internal/agent/deepagent -run TestUserMemoryEndToEndAcceptanceAtLeastNinetyFivePercent -count=1 -v
 # 需要启用 CGO 且安装 C 编译器。
 go test -race ./...
 # 使用专用测试数据库。测试只清理自己的随机用户名记录。

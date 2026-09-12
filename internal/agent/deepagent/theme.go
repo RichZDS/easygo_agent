@@ -217,7 +217,7 @@ func NewThemedFitRequest() (FitRequest, error) {
 // FatHeuristicInstruction is the production catalog plus unused long rows.
 func FatHeuristicInstruction() string {
 	catalog := fallbackCatalog()
-	for _, root := range []string{"SKILL", filepath.Join("..", "..", "SKILL"), filepath.Join("..", "..", "..", "SKILL")} {
+	for _, root := range []string{"skills", filepath.Join("..", "..", "skills"), filepath.Join("..", "..", "..", "skills")} {
 		if lib, err := skill.Open(root); err == nil {
 			catalog = lib.CatalogPrompt()
 			break

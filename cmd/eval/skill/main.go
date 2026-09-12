@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"easygo-agent/internal/agent/chatmodel"
-	deepagent "easygo-agent/internal/agent/deepagent.go"
+	"easygo-agent/internal/agent/deepagent"
 	agentruntime "easygo-agent/internal/agent/runtime"
 	"easygo-agent/internal/config"
 	"easygo-agent/internal/conversation"
@@ -29,8 +29,8 @@ import (
 func main() { os.Exit(run()) }
 
 func run() int {
-	configPath := flag.String("config", "configs/memory-eval.yaml", "YAML configuration path")
-	outPath := flag.String("out", "doc/skill-eval-report.md", "markdown report path")
+	configPath := flag.String("config", "configs/eval/memory.yaml", "YAML configuration path")
+	outPath := flag.String("out", "doc/eval/skill.md", "markdown report path")
 	flag.Parse()
 	if err := loadDotEnv(".env"); err != nil {
 		fmt.Fprintf(os.Stderr, "skill-eval: %v\n", err)

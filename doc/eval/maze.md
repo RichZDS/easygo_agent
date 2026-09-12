@@ -8,7 +8,7 @@
 
 新增文字迷宫：每个字是一个实体。`墙` 不可走，`路` 可走，`起` 起点，`终` 终点，跑的时候用 `人` 标当前位置。
 
-存储在仓库根目录 `maze/`，一迷宫一个 JSON，例如 `maze/sample-xiaojing.json`：
+存储在 `data/maze/`，一迷宫一个 JSON，例如 `data/maze/sample-xiaojing.json`：
 
 ```json
 {
@@ -35,7 +35,7 @@
 | `makemaze` | 用二维数组新建迷宫 |
 | `runmaze` | 输入指令序列，看 `人` 能不能到 `终` |
 
-Skill：`SKILL/skill/playing-maze/SKILL.md`。目录启发式会列出它的 Use when，正文不进启动上下文。
+Skill：`skills/playing-maze/SKILL.md`。目录启发式会列出它的 Use when，正文不进启动上下文。
 
 生产路径（`internal/app/bootstrap.go`）采用**启发式**：原生只挂 `calculator`、`load_skill`、`call_tool`。迷宫四个工具藏在 `call_tool` 后面。
 
@@ -84,5 +84,5 @@ Skill：`SKILL/skill/playing-maze/SKILL.md`。目录启发式会列出它的 Use
 复跑：
 
 ```powershell
-go run ./cmd/maze-eval -config configs/memory-eval.yaml -out doc/maze-eval-report.md
+go run ./cmd/eval/maze -config configs/eval/memory.yaml -out doc/eval/maze.md
 ```

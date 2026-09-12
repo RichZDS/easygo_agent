@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"easygo-agent/internal/agent/chatmodel"
-	deepagent "easygo-agent/internal/agent/deepagent.go"
+	"easygo-agent/internal/agent/deepagent"
 	agentruntime "easygo-agent/internal/agent/runtime"
 	"easygo-agent/internal/config"
 	"easygo-agent/internal/conversation"

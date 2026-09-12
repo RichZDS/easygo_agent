@@ -14,7 +14,7 @@ import (
 	"easygo-agent/internal/conversation"
 	"easygo-agent/internal/testutil"
 
-	deepagent "easygo-agent/internal/agent/deepagent.go"
+	"easygo-agent/internal/agent/deepagent"
 	"github.com/cloudwego/eino/schema"
 )
 

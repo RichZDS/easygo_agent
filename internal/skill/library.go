@@ -15,9 +15,8 @@ import (
 
 const (
 	// DefaultRoot is the working-directory folder that holds the catalog.
-	DefaultRoot = "SKILL"
+	DefaultRoot = "skills"
 	catalogFile = "SKILL.md"
-	collection  = "skill"
 )
 
 var skillNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$`)
@@ -38,8 +37,8 @@ type Library struct {
 	bodies    map[string]string
 }
 
-// Open reads SKILL/SKILL.md and every SKILL/skill/<name>/SKILL.md. Unknown
-// extra files are ignored so the catalog stays the only registered skill.
+// Open reads skills/SKILL.md and every skills/<name>/SKILL.md. Directories
+// without SKILL.md are ignored so staging folders can sit beside the catalog.
 func Open(root string) (*Library, error) {
 	root = filepath.Clean(strings.TrimSpace(root))
 	if root == "" {
@@ -51,20 +50,19 @@ func Open(root string) (*Library, error) {
 		return nil, fmt.Errorf("read skill catalog: %w", err)
 	}
 	lib := &Library{root: root, heuristic: string(heuristic), bodies: map[string]string{}}
-	collectionDir := filepath.Join(root, collection)
-	entries, err := os.ReadDir(collectionDir)
+	entries, err := os.ReadDir(root)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return lib, nil
-		}
 		return nil, fmt.Errorf("read skill collection: %w", err)
 	}
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
-		body, readErr := os.ReadFile(filepath.Join(collectionDir, entry.Name(), catalogFile))
+		body, readErr := os.ReadFile(filepath.Join(root, entry.Name(), catalogFile))
 		if readErr != nil {
+			if os.IsNotExist(readErr) {
+				continue
+			}
 			return nil, fmt.Errorf("read skill %s: %w", entry.Name(), readErr)
 		}
 		name, description, parseErr := parseFrontmatter(string(body))

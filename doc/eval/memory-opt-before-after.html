@@ -65,5 +65,5 @@ pre{white-space:pre-wrap;background:var(--paper);border:1px solid var(--line);pa
 
 优化后先丢掉当前形势用不上的启发式 skill/tool，再只抽取旧对话里和主题重叠的句子，因此对话被摘要的量小于旧路径，且早期约束（玄枢台账 / EG-7741 / 周五冻结）仍留在改写后的上下文中。
 </pre>
-<p>抽取笔记是 user 消息，能穿过下一轮 <code>initialize()</code> 对持久化 system 行的过滤。同期 live：<code>go run ./cmd/memory-eval</code> 三档 3/3 通过。</p>
+<p>抽取笔记是 user 消息，能穿过下一轮 <code>initialize()</code> 对持久化 system 行的过滤。同期 live：<code>go run ./cmd/eval/memory</code> 三档 3/3 通过。</p>
 </div></body></html>

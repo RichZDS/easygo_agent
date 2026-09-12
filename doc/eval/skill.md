@@ -59,7 +59,7 @@ This is the only skill registered at startup. Specialized procedures stay on dis
 
 ## When writing a new skill
 
-Add `SKILL/skill/<name>/SKILL.md` with YAML `name` and a "Use when..." `description`. The Directory is rebuilt from those descriptions at process start. Put the triggering condition in the description; put the procedure in the skill body.
+Add `skills/<name>/SKILL.md` with YAML `name` and a "Use when..." `description`. The Directory is rebuilt from those descriptions at process start. Put the triggering condition in the description; put the procedure in the skill body.
 
 ## Directory
 

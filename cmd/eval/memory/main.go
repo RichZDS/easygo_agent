@@ -15,7 +15,7 @@ import (
 	"unicode"
 
 	"easygo-agent/internal/agent/chatmodel"
-	deepagent "easygo-agent/internal/agent/deepagent.go"
+	"easygo-agent/internal/agent/deepagent"
 	agentruntime "easygo-agent/internal/agent/runtime"
 	"easygo-agent/internal/config"
 	"easygo-agent/internal/conversation"
@@ -35,9 +35,9 @@ func main() {
 }
 
 func run() int {
-	configPath := flag.String("config", "configs/memory-eval.yaml", "YAML configuration path")
-	outPath := flag.String("out", "doc/memory-eval-report.md", "markdown report path")
-	fitReport := flag.String("fit-report", "doc/memory-opt-before-after.md", "before/after compression report from the shipped Fit path")
+	configPath := flag.String("config", "configs/eval/memory.yaml", "YAML configuration path")
+	outPath := flag.String("out", "doc/eval/memory.md", "markdown report path")
+	fitReport := flag.String("fit-report", "doc/eval/memory-opt-before-after.md", "before/after compression report from the shipped Fit path")
 	fitOnly := flag.Bool("fit-only", false, "write the Fit before/after report and skip live model eval")
 	flag.Parse()
 	if err := loadDotEnv(".env"); err != nil {

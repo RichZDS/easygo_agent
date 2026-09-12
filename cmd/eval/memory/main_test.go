@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	deepagent "easygo-agent/internal/agent/deepagent.go"
+	"easygo-agent/internal/agent/deepagent"
 )
 
 func TestUltraLongEvalCorpusIsThemedNotRepeatedFiller(t *testing.T) {

@@ -16,14 +16,14 @@ description: Use when deciding whether a specialized skill applies.
 # Skill Catalog
 Call load_skill before specialized procedures.
 `,
-		"skill/strict-arithmetic/SKILL.md": `---
+		"strict-arithmetic/SKILL.md": `---
 name: strict-arithmetic
 description: Use when the user asks for a numeric calculation.
 ---
 # Strict Arithmetic
 Always call the calculator tool.
 `,
-		"skill/bracket-token-reply/SKILL.md": `---
+		"bracket-token-reply/SKILL.md": `---
 name: bracket-token-reply
 description: Use when the user asks to repeat a passphrase or token.
 ---
@@ -55,7 +55,7 @@ description: Use when deciding whether a specialized skill applies.
 ---
 # Skill Catalog
 `,
-		"skill/strict-arithmetic/SKILL.md": `---
+		"strict-arithmetic/SKILL.md": `---
 name: strict-arithmetic
 description: Use when the user asks for a numeric calculation.
 ---
@@ -82,7 +82,7 @@ Always call the calculator tool.
 }
 
 func TestRepositoryCatalogListsCollectionWithoutBodies(t *testing.T) {
-	lib, err := Open(filepath.Join("..", "..", "SKILL"))
+	lib, err := Open(filepath.Join("..", "..", "skills"))
 	if err != nil {
 		t.Fatal(err)
 	}

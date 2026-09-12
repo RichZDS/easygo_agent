@@ -25,7 +25,7 @@ func TestLoadSkillToolReturnsCatalogBodyAndRejectsUnknownNames(t *testing.T) {
 		}
 	}
 	write("SKILL.md", "---\nname: skill-catalog\ndescription: Use when deciding whether a specialized skill applies.\n---\n# Skill Catalog\n")
-	write("skill/strict-arithmetic/SKILL.md", "---\nname: strict-arithmetic\ndescription: Use when the user asks for a numeric calculation.\n---\n# Strict Arithmetic\nAlways call the calculator tool.\n")
+	write("strict-arithmetic/SKILL.md", "---\nname: strict-arithmetic\ndescription: Use when the user asks for a numeric calculation.\n---\n# Strict Arithmetic\nAlways call the calculator tool.\n")
 	lib, err := skill.Open(root)
 	if err != nil {
 		t.Fatal(err)

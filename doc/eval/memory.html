@@ -150,7 +150,7 @@
         <div class="stat"><b>3 / 3</b><span>用例通过</span></div>
         <div class="stat"><b>deepseek-flash</b><span>主模型 / 摘要 / 记忆 Agent</span></div>
         <div class="stat"><b>2026-09-11 15:31 UTC</b><span>评测时间</span></div>
-        <div class="stat"><b>cmd/memory-eval</b><span>评测入口</span></div>
+        <div class="stat"><b>cmd/eval/memory</b><span>评测入口</span></div>
       </div>
     </header>
 
@@ -359,8 +359,8 @@ node path: [node_1, ChatModel]</div>
     <p>三档抽样均通过。<code>deepseek-flash</code> 下，短期记忆靠会话上下文就能用；长期记忆的提取、五槽档案、跨会话召回是通的，而且在会话窗口被撑破之后仍能恢复早期内部约束。主要风险不在「记不住」，而在三件事：当日档案还没 consolidation、五槽互相覆盖、以及模型把档案当成参考而不是强制指令。</p>
 
     <h2 id="rerun">复跑</h2>
-    <pre>go run ./cmd/memory-eval -config configs/memory-eval.yaml -out doc/memory-eval-report.md</pre>
-    <p>Markdown 原文在 <code>doc/memory-eval-report.md</code>。本页是同一份评测的对话版。</p>
+    <pre>go run ./cmd/eval/memory -config configs/eval/memory.yaml -out doc/eval/memory.md</pre>
+    <p>Markdown 原文在 <code>doc/eval/memory.md</code>。本页是同一份评测的对话版。</p>
     <footer>EasyGo Agent memory eval · 2026-09-11 · model deepseek-flash</footer>
   </div>
 </body>

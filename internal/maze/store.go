@@ -12,7 +12,7 @@ import (
 	"github.com/google/uuid"
 )
 
-const DefaultDir = "maze"
+const DefaultDir = "data/maze"
 
 // Store persists mazes as one JSON file per id under a directory.
 type Store struct {

@@ -3,6 +3,7 @@ configs/config.production.yaml
 .env
 logs/
 Storage/
+storage/
 *.log
 bin/
 coverage.out

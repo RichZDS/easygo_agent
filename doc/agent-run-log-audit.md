@@ -32,7 +32,7 @@
 - Agent 日志辅助：internal/logger/agent.go 的 DebugEinoEvent 只把 TypedAgentEvent 做成日志快照；StreamChunkLog 先聚合 chunk 再打印，因此不会保留每个 chunk 的接收时间和边界。
 - 运行生命周期：internal/agent/runtime/runtime.go 的 StartContext 保留一次运行，initialize 读取历史并启动 Eino，next 消费 ADK 事件，receiveMessageChunk 消费消息流，finalize 负责终态提交和资源释放。这些位置天然适合作为 run/scope/event 的边界。
 - 当前 Eino 调用：initialize 仍直接调用 session.agent.Run(ctx, input)，没有使用 TypedRunner，也没有注入 Agent callback。即使底层模型、工具或 compose 节点可能触发自己的 callback，也不能据此推断 Agent 生命周期 callback 一定被触发。
-- 压缩 Agent：internal/agent/deepagent.go/compression.go 也有独立的 context-compressor 直接 Run 路径；若它属于审计范围，必须显式复用同一 ID 和 sink。
+- 压缩 Agent：internal/agent/deepagent/compression.go 也有独立的 context-compressor 直接 Run 路径；若它属于审计范围，必须显式复用同一 ID 和 sink。
 - 代码审计没有发现业务层实际构建 compose Graph/Chain、ADK TurnLoop 或 AgentTool 的入口；本文对这些对象的说明是 Eino 能力边界和后续接入方案，不代表当前版本已经产生这类运行事件。
 - HTTP/TUI：当前工作树的 app.Run 已构建并把 QueueManager 传给默认 gateway、CLI 和 TUI；现有按 run 的 SSE 路由只返回 QueueManager 的状态/实时语义 Event，不是 `agent_run_events` 的历史 raw 查询。仍保留不传 manager 的 gateway.New 兼容路径，此时会走 direct runtime，Event/eventPayload 没有可持久化的 run_id；上线前要明确禁止或补齐这个兼容入口。
 
@@ -693,8 +693,8 @@ CozeLoop 的网络、异步批量、平台留存和外部数据边界都与本�
 - internal/logger/file.go：Zap 文件 sink。
 - internal/logger/agent.go：Eino event/message 的当前日志快照。
 - internal/agent/runtime/runtime.go：StartContext、initialize、next、receiveMessageChunk、finalize。
-- internal/agent/deepagent.go/agent.go：主 Deep Agent 构造和名称。
-- internal/agent/deepagent.go/compression.go：context-compressor 路径。
+- internal/agent/deepagent/agent.go：主 Deep Agent 构造和名称。
+- internal/agent/deepagent/compression.go：context-compressor 路径。
 - internal/conversation/schema.sql：agent_sessions、agent_turns 以及当前工作树的 agent_runs 队列表（建议旁边增加 execution/scope/event 表）。
 - internal/conversation/store.go、memory.go、postgres.go：Store、Lease 和 QueueStore 语义。
 - internal/gateway/http.go：运行接口和 SSE 投影。

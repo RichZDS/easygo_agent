@@ -1,0 +1,69 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>超长上下文压缩优化前后</title><style>
+:root{--bg:#f4efe6;--paper:#fffaf2;--ink:#1c1915;--muted:#6b645b;--line:#e3d8c6;--accent:#c45c26;--pass:#1f6b45;--pass-bg:#e5f4ea}
+html,body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.65 "Iowan Old Style","Songti SC",serif}
+.wrap{max-width:900px;margin:0 auto;padding:48px 24px 80px}
+h1{font-size:36px;margin:0 0 12px}
+.kicker{letter-spacing:.18em;text-transform:uppercase;font-size:12px;color:var(--accent);font-family:"Segoe UI",sans-serif}
+.meta{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:28px 0}
+.stat{background:var(--paper);border:1px solid var(--line);padding:14px 16px}
+.stat b{display:block;font-size:20px}
+.stat span{color:var(--muted);font-size:13px;font-family:"Segoe UI",sans-serif}
+table{width:100%;border-collapse:collapse;background:var(--paper);margin:12px 0 24px}
+th,td{border:1px solid var(--line);padding:10px 12px;text-align:left}
+th{background:#f0e6d4;font-family:"Segoe UI",sans-serif;font-size:13px}
+.ok{background:var(--pass-bg);color:var(--pass);padding:2px 8px;font-family:"Segoe UI",sans-serif;font-size:12px}
+pre{white-space:pre-wrap;background:var(--paper);border:1px solid var(--line);padding:16px}
+@media(max-width:800px){.meta{grid-template-columns:1fr 1fr}}
+</style></head><body><div class="wrap"><p class="kicker">Memory compression</p><h1>超长上下文压缩优化前后</h1><div class="meta"><div class="stat"><b>14359</b><span>优化前合计</span></div><div class="stat"><b>4303</b><span>优化后合计</span></div><div class="stat"><b>1147</b><span>少摘要的对话字节</span></div><div class="stat"><b>是</b><span>装进预算</span></div></div><pre># 超长上下文压缩优化前后报告
+
+- 时间：2026-09-12T02:11:27Z
+- 主题：玄枢台账发布窗口（工号 EG-7741，周五生产冻结）
+- 输入预算 `agent.context_tokens`：4786
+- 语料：多轮真实主题对话（玄枢台账发布），每轮独立长文本，禁止一段话*n。
+
+## 优化前（当前路径的构成）
+
+| 构成 | token 估计（UTF-8 字节 + 256 帧） |
+| --- | ---: |
+| 对话消息 | 9527 |
+| 启发式 skill 目录 | 2227 |
+| 工具 schema | 2349 |
+| 合计 | **14359** |
+
+相对预算超支 9573（300.0%）。
+
+旧路径会把**整段对话**交给摘要模型，且不缩小 skill/tool。基线统计：
+
+- 被整段摘要的对话字节：9527（11 条消息）
+- skill/tool 是否缩小：否 / 否
+- 摘要后能否装进预算：否（合计 5013）
+
+## 优化后（先缩启发式，再按形势抽取旧对话）
+
+| 构成 | 优化前 | 优化后 | 变化 |
+| --- | ---: | ---: | ---: |
+| 对话 | 9527 | 3614 | -5913 |
+| 启发式 skill | 2227 | 433 | -1794 |
+| 工具 schema | 2349 | 0 | -2349 |
+| 合计 | 14359 | **4303** | -10056 |
+
+- 是否触发对话摘要/抽取：是（抽取/替换 10 条旧消息，8380 字节）
+- 完整保留的对话字节：1147
+- 相对基线少摘要的对话字节：1147
+- skill 目录是否压缩：是
+- 去掉的启发式工具：load_skill, call_tool, calculator
+- 保留的工具：（无）
+- 装进预算：是
+
+## 主题事实是否还在
+
+- `玄枢台账`：保留
+- `EG-7741`：保留
+- `周五`：保留
+
+## 结论
+
+优化后先丢掉当前形势用不上的启发式 skill/tool，再只抽取旧对话里和主题重叠的句子，因此对话被摘要的量小于旧路径，且早期约束（玄枢台账 / EG-7741 / 周五冻结）仍留在改写后的上下文中。
+</pre>
+<p>同期 live：<code>go run ./cmd/memory-eval</code> 三档 3/3 通过。超长轮同会话探针命中玄枢台账 / EG-7741 / 周五，未再 fail-closed。</p>
+</div></body></html>

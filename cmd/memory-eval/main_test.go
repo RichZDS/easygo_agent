@@ -1,6 +1,25 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	deepagent "easygo-agent/internal/agent/deepagent.go"
+)
+
+func TestUltraLongEvalCorpusIsThemedNotRepeatedFiller(t *testing.T) {
+	turns := deepagent.ThemedUserTurns()
+	if err := deepagent.RejectRepeatedFiller(turns); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(turns, "\n")
+	if !strings.Contains(joined, "玄枢台账") || !strings.Contains(joined, "EG-7741") {
+		t.Fatal("themed corpus missing early facts")
+	}
+	if strings.Contains(joined, "这是一段与内部工具无关的填充说明") {
+		t.Fatal("old 一段话*n padding leaked into the themed corpus")
+	}
+}
 
 func TestPartitionFoundIgnoresCaseAndSpaces(t *testing.T) {
 	found, missing := partitionFound("工号是 EG-7741，内部工具叫玄枢台账。", []string{"EG-7741", "玄枢台账", "周五"})

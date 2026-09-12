@@ -651,11 +651,7 @@ func (run *agentRun) initialize() error {
 		if memoryContext != "" {
 			modelInput = append(modelInput, schema.SystemAgenticMessage(memoryContext))
 		}
-		for _, m := range run.inputMessages {
-			if m != nil && m.Role != schema.AgenticRoleTypeSystem {
-				modelInput = append(modelInput, m)
-			}
-		}
+		modelInput = append(modelInput, DropPersistedSystemMessages(run.inputMessages)...)
 		if run.agent == nil {
 			return ErrAgentUnavailable
 		}
@@ -682,16 +678,25 @@ func (run *agentRun) initialize() error {
 	if memoryContext != "" {
 		modelInput = append(modelInput, schema.SystemAgenticMessage(memoryContext))
 	}
-	for _, m := range run.inputMessages {
-		if m != nil && m.Role != schema.AgenticRoleTypeSystem {
-			modelInput = append(modelInput, m)
-		}
-	}
+	modelInput = append(modelInput, DropPersistedSystemMessages(run.inputMessages)...)
 	run.iterator = run.agent.Run(run.context, &adk.TypedAgentInput[*schema.AgenticMessage]{Messages: modelInput, EnableStreaming: true})
 	if run.iterator == nil {
 		return ErrAgentUnavailable
 	}
 	return nil
+}
+
+// DropPersistedSystemMessages removes system rows from stored context before
+// the next Run. Deep Agent re-injects Instruction; leftover system messages
+// would duplicate it. Extracted theme notes must therefore be user messages.
+func DropPersistedSystemMessages(messages []*schema.AgenticMessage) []*schema.AgenticMessage {
+	out := make([]*schema.AgenticMessage, 0, len(messages))
+	for _, message := range messages {
+		if message != nil && message.Role != schema.AgenticRoleTypeSystem {
+			out = append(out, message)
+		}
+	}
+	return out
 }
 
 func recallMemoryPrompt(ctx context.Context, store conversation.MemoryStore, username string) (string, error) {

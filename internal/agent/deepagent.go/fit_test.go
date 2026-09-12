@@ -7,6 +7,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	agentruntime "easygo-agent/internal/agent/runtime"
 	"easygo-agent/internal/testutil"
 
 	"github.com/cloudwego/eino/adk"
@@ -117,6 +118,41 @@ func TestBeforeModelRewriteStateUsesFitNotWholesaleSummary(t *testing.T) {
 	}
 	if containsTool(next.ToolInfos, heuristicLoadSkill) || containsTool(next.ToolInfos, heuristicCallTool) {
 		t.Fatalf("heuristic tools still bound: %v", toolNames(next.ToolInfos))
+	}
+}
+
+func TestThemeNotesSurviveRuntimeSystemDrop(t *testing.T) {
+	req := themedOverBudgetRequest(t)
+	opt, err := Fit(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !opt.Fitted {
+		t.Fatalf("optimized path still over budget: after=%d limit=%d", opt.After.Total, req.Limit)
+	}
+	if opt.ThemeNotes == "" || opt.SummarizedMessages == 0 {
+		t.Fatal("expected extracted theme notes for the over-budget fixture")
+	}
+	var noteRole schema.AgenticRoleType
+	for _, message := range opt.Messages {
+		if message != nil && messageText(message) == opt.ThemeNotes {
+			noteRole = message.Role
+		}
+	}
+	if noteRole != schema.AgenticRoleTypeUser {
+		t.Fatalf("theme notes role=%q, want user so initialize() will keep them", noteRole)
+	}
+	kept := agentruntime.DropPersistedSystemMessages(opt.Messages)
+	for _, message := range kept {
+		if message != nil && message.Role == schema.AgenticRoleTypeSystem {
+			t.Fatal("initialize filter left a system message")
+		}
+	}
+	blob := messagesBlob(kept)
+	for _, fact := range []string{themeToolName, themeStaffID, themeFriday} {
+		if !strings.Contains(blob, fact) {
+			t.Fatalf("after initialize() system drop, lost theme fact %q in:\n%s", fact, blob)
+		}
 	}
 }
 

@@ -1,14 +1,12 @@
 agent:
-  max_steps: 8
-  context_tokens: 24000
+  max_steps: 6
+  context_tokens: 8000
 
 database:
-  driver: postgres # memory 可用于无数据库的开发模式
+  driver: memory
   dsn: "{DATABASE_URL}"
   max_conns: 16
 
-# Dedicated database for user-level long-term memory. It is deliberately not
-# the conversation database; grant this DSN only to the memory runtime.
 memory:
   enabled: true
   dsn: "{MEMORY_DATABASE_URL}"
@@ -17,14 +15,14 @@ memory:
   timezone: "Asia/Shanghai"
   batch_turns: 20
   top_k: 5
-  storage_root: "Storage/Long-term Memory/User profile"
+  storage_root: "Storage/Long-term Memory/Eval"
 
 http:
   address: "127.0.0.1:8080"
 
 queue:
   max_pending: 100
-  max_workers: 4
+  max_workers: 1
   poll_interval: 250ms
   lease_ttl: 30s
 
@@ -38,10 +36,10 @@ sandbox:
 model:
   name: deepseek-flash
   base_url: "https://api.deepseek.com"
-  timeout: 120s
+  timeout: 180s
   apikey: "{MODEL_API_KEY}"
 subagent:
   name: deepseek-flash
   base_url: "https://api.deepseek.com"
-  timeout: 120s
-  apikey: "{SUBMODEL_API_KEY}"
+  timeout: 180s
+  apikey: "{MODEL_API_KEY}"

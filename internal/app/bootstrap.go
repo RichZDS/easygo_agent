@@ -12,6 +12,9 @@ import (
 	"easygo-agent/internal/config"
 	"easygo-agent/internal/conversation"
 	"easygo-agent/internal/logger"
+	"easygo-agent/internal/maze"
+	"easygo-agent/internal/prompt"
+	"easygo-agent/internal/skill"
 	"easygo-agent/internal/tools"
 	"easygo-agent/internal/usermemory"
 
@@ -108,6 +111,15 @@ func (app *application) buildAgent(ctx context.Context) error {
 			MaxOutputBytes: app.cfg.Sandbox.MaxOutputBytes,
 		})
 	}
+	instruction := prompt.SystemPrompt
+	lib, skillErr := skill.Open(skill.DefaultRoot)
+	if skillErr != nil {
+		logger.Info("skill catalog not loaded", zap.Error(skillErr))
+	} else {
+		agentTools = agentTools.WithSkills(lib)
+		instruction = prompt.WithSkillCatalog(instruction, lib.CatalogPrompt())
+	}
+	agentTools = agentTools.WithHiddenMaze(maze.NewStore(maze.DefaultDir))
 	allTools, err := agentTools.AllTools(ctx)
 	if err != nil {
 		wrappedErr := fmt.Errorf("initialize tools: %w", err)
@@ -130,6 +142,7 @@ func (app *application) buildAgent(ctx context.Context) error {
 		SummaryModel: summaryModel,
 		Tools:        allTools,
 		Agent:        app.cfg.Agent,
+		Instruction:  instruction,
 	})
 	if err != nil {
 		wrappedErr := fmt.Errorf("initialize agent: %w", err)

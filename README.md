@@ -95,12 +95,12 @@ agent:
   max_steps: 8
   context_tokens: 24000
 model:
-  name: deepseek-v4-pro
+  name: deepseek-flash
   base_url: https://api.deepseek.com
   timeout: 120s
   apikey: "{MODEL_API_KEY}"
 subagent:
-  name: deepseek-v4-flash
+  name: deepseek-flash
   base_url: https://api.deepseek.com
   timeout: 120s
   apikey: "{SUBMODEL_API_KEY}"

@@ -4,7 +4,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -22,6 +21,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"easygo-agent/internal/sandboxapi"
 
 	"github.com/google/uuid"
 	dockerclient "github.com/moby/moby/client"
@@ -133,10 +134,8 @@ type benchmarkReport struct {
 }
 
 type controllerClient struct {
-	baseURL string
-	token   string
-	http    *http.Client
-	engine  benchmarkObserver
+	api    sandboxapi.Client
+	engine benchmarkObserver
 }
 
 type applicationEnvelope struct {
@@ -147,13 +146,6 @@ type applicationEnvelope struct {
 	ID              string  `json:"id"`
 	ApplicationID   string  `json:"application_id"`
 	QueueDurationMS float64 `json:"queue_duration_ms"`
-}
-
-type benchmarkErrorEnvelope struct {
-	Error struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	} `json:"error"`
 }
 
 // phaseObservation is returned by the Docker-side observer. Missing is not an
@@ -245,10 +237,13 @@ func runWithObserverFactory(ctx context.Context, args []string, getenv func(stri
 	}
 	defer observer.Close()
 	client := &controllerClient{
-		baseURL: cfg.BaseURL,
-		token:   token,
-		http:    &http.Client{Timeout: 11 * time.Minute},
-		engine:  observer,
+		api: sandboxapi.Client{
+			BaseURL:      cfg.BaseURL,
+			Token:        token,
+			HTTP:         &http.Client{Timeout: 11 * time.Minute},
+			MaxBodyBytes: sandboxapi.DefaultMaxBody,
+		},
+		engine: observer,
 	}
 
 	for warmup := 0; warmup < cfg.Warmups; warmup++ {
@@ -624,49 +619,7 @@ func normalizedHostObservation(observation hostObservation) hostObservation {
 }
 
 func (client *controllerClient) request(ctx context.Context, method, path, sessionID, runID string, body any, output any) error {
-	var reader io.Reader
-	if body != nil {
-		encoded, err := json.Marshal(body)
-		if err != nil {
-			return err
-		}
-		reader = bytes.NewReader(encoded)
-	}
-	request, err := http.NewRequestWithContext(ctx, method, client.baseURL+path, reader)
-	if err != nil {
-		return err
-	}
-	request.Header.Set("Authorization", "Bearer "+client.token)
-	request.Header.Set("X-EasyGo-Session-ID", sessionID)
-	request.Header.Set("X-EasyGo-Run-ID", runID)
-	if body != nil {
-		request.Header.Set("Content-Type", "application/json")
-	}
-	response, err := client.http.Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	responseBody, err := io.ReadAll(io.LimitReader(response.Body, 4*1024*1024))
-	if err != nil {
-		return err
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		var envelope benchmarkErrorEnvelope
-		_ = json.Unmarshal(responseBody, &envelope)
-		message := strings.TrimSpace(envelope.Error.Message)
-		if message == "" {
-			message = strings.TrimSpace(string(responseBody))
-		}
-		return fmt.Errorf("controller returned %d %s: %s", response.StatusCode, envelope.Error.Code, message)
-	}
-	if output == nil || response.StatusCode == http.StatusNoContent {
-		return nil
-	}
-	if err := json.Unmarshal(responseBody, output); err != nil {
-		return fmt.Errorf("decode controller response: %w", err)
-	}
-	return nil
+	return client.api.Do(ctx, method, path, sessionID, runID, body, output)
 }
 
 func (application applicationEnvelope) applicationID() string {

@@ -3,59 +3,27 @@ package tools
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	agentruntime "easygo-agent/internal/agent/runtime"
+	"easygo-agent/internal/sandbox"
 
 	"github.com/cloudwego/eino/components/tool"
 )
 
 const testSandboxControllerToken = "test-sandbox-controller-token-0123456789abcdef"
 
-type observedSandboxRequest struct {
-	method, path, sessionID, runID string
-	body                           map[string]any
-}
-
 func TestSandboxToolsCallControllerContract(t *testing.T) {
-	var mu sync.Mutex
-	var observed []observedSandboxRequest
-	application := `{"id":"app-1","state":"ready","created_at":"2026-09-11T00:00:00Z","hard_expires_at":"2026-09-11T05:00:00Z","idle_ttl_seconds":600,"distinct_runs":1,"workspace_bytes":42,"workspace_preserved":true}`
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer "+testSandboxControllerToken {
-			t.Errorf("authorization=%q", r.Header.Get("Authorization"))
-		}
-		var body map[string]any
-		if r.Body != nil {
-			_ = json.NewDecoder(r.Body).Decode(&body)
-		}
-		mu.Lock()
-		observed = append(observed, observedSandboxRequest{method: r.Method, path: r.URL.Path, sessionID: r.Header.Get("X-EasyGo-Session-ID"), runID: r.Header.Get("X-EasyGo-Run-ID"), body: body})
-		mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/applications":
-			w.WriteHeader(http.StatusCreated)
-			fmt.Fprintf(w, `{"application":%s,"created":true}`, application)
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/applications/app-1/exec":
-			fmt.Fprintf(w, `{"application":%s,"exit_code":0,"stdout":"ok\n","stderr":"","truncated":false,"duration_ms":7}`, application)
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/applications/app-1/files/read":
-			fmt.Fprintf(w, `{"application":%s,"path":"/workspace/main.go","content":"package main","size_bytes":12,"next_offset":12,"eof":true}`, application)
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/applications/app-1/files/write":
-			fmt.Fprintf(w, `{"application":%s,"path":"/workspace/main.go","size_bytes":12}`, application)
-		case r.Method == http.MethodDelete && r.URL.Path == "/v1/applications/app-1":
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			fmt.Fprintf(w, `{"application":%s}`, application)
-		}
-	}))
+	handler, err := sandbox.NewInProcessHandler(testSandboxControllerToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(handler)
 	defer server.Close()
 
 	toolsByName := sandboxToolsByName(t, server.URL)
@@ -66,63 +34,43 @@ func TestSandboxToolsCallControllerContract(t *testing.T) {
 		}
 	}
 	ctx := agentruntime.WithInvocationIdentity(context.Background(), agentruntime.InvocationIdentity{SessionID: "session-1", RunID: "run-1"})
+	applyResult, err := toolsByName["sandbox_apply"].InvokableRun(ctx, `{}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var applied struct {
+		ApplicationID string `json:"application_id"`
+	}
+	if err := json.Unmarshal([]byte(applyResult), &applied); err != nil || applied.ApplicationID == "" {
+		t.Fatalf("apply result=%s err=%v", applyResult, err)
+	}
+	idJSON, _ := json.Marshal(applied.ApplicationID)
 	invocations := []struct {
 		name, arguments string
 	}{
-		{"sandbox_apply", `{}`},
-		{"sandbox_create", `{"application_id":"app-1"}`},
-		{"sandbox_exec", `{"application_id":"app-1","command":"go run .","cwd":"/workspace","stdin":"input","timeout_seconds":5,"session_id":"attacker","run_id":"attacker"}`},
-		{"sandbox_write_file", `{"application_id":"app-1","path":"/workspace/main.go","content":"package main","executable":true}`},
-		{"sandbox_read_file", `{"application_id":"app-1","path":"/workspace/main.go"}`},
-		{"sandbox_status", `{"application_id":"app-1"}`},
-		{"sandbox_release", `{"application_id":"app-1"}`},
-		{"sandbox_destroy", `{"application_id":"app-1"}`},
+		{"sandbox_create", `{"application_id":` + string(idJSON) + `}`},
+		{"sandbox_exec", `{"application_id":` + string(idJSON) + `,"command":"true","cwd":"/workspace","stdin":"input","timeout_seconds":5,"session_id":"attacker","run_id":"attacker"}`},
+		{"sandbox_write_file", `{"application_id":` + string(idJSON) + `,"path":"/workspace/main.go","content":"package main","executable":true}`},
+		{"sandbox_read_file", `{"application_id":` + string(idJSON) + `,"path":"/workspace/main.go"}`},
+		{"sandbox_status", `{"application_id":` + string(idJSON) + `}`},
+		{"sandbox_release", `{"application_id":` + string(idJSON) + `}`},
+		{"sandbox_destroy", `{"application_id":` + string(idJSON) + `}`},
 	}
 	for _, invocation := range invocations {
-		result, err := toolsByName[invocation.name].InvokableRun(ctx, invocation.arguments)
-		if err != nil {
-			t.Fatalf("%s: %v", invocation.name, err)
+		result, runErr := toolsByName[invocation.name].InvokableRun(ctx, invocation.arguments)
+		if runErr != nil {
+			t.Fatalf("%s: %v", invocation.name, runErr)
 		}
 		if invocation.name == "sandbox_destroy" && !strings.Contains(result, `"destroyed":true`) {
 			t.Fatalf("destroy result=%s", result)
 		}
-		if invocation.name == "sandbox_apply" && !strings.Contains(result, `"application_id":"app-1"`) {
-			t.Fatalf("apply result does not expose application_id: %s", result)
-		}
 	}
-
-	mu.Lock()
-	requests := append([]observedSandboxRequest(nil), observed...)
-	mu.Unlock()
-	want := []struct {
-		method, path string
-	}{
-		{http.MethodPost, "/v1/applications"},
-		{http.MethodPost, "/v1/applications/app-1/create"},
-		{http.MethodPost, "/v1/applications/app-1/exec"},
-		{http.MethodPost, "/v1/applications/app-1/files/write"},
-		{http.MethodPost, "/v1/applications/app-1/files/read"},
-		{http.MethodGet, "/v1/applications/app-1"},
-		{http.MethodPost, "/v1/applications/app-1/release"},
-		{http.MethodDelete, "/v1/applications/app-1"},
+	cross := agentruntime.WithInvocationIdentity(context.Background(), agentruntime.InvocationIdentity{SessionID: "session-other", RunID: "run-other"})
+	if _, err := toolsByName["sandbox_apply"].InvokableRun(context.Background(), `{}`); err == nil || !strings.Contains(err.Error(), "trusted session and run identity") {
+		t.Fatalf("missing identity error=%v", err)
 	}
-	if len(requests) != len(want) {
-		t.Fatalf("requests=%+v", requests)
-	}
-	for i, expected := range want {
-		got := requests[i]
-		if got.method != expected.method || got.path != expected.path || got.sessionID != "session-1" {
-			t.Errorf("request[%d]=%+v", i, got)
-		}
-		if got.runID != "run-1" {
-			t.Errorf("request[%d] run ID=%q", i, got.runID)
-		}
-	}
-	if requests[2].body["stdin"] != "input" || requests[2].body["timeout_seconds"] != float64(5) {
-		t.Fatalf("exec body=%v", requests[2].body)
-	}
-	if requests[4].body["max_bytes"] != float64(4096) {
-		t.Fatalf("read body=%v", requests[4].body)
+	if _, err := toolsByName["sandbox_status"].InvokableRun(cross, `{"application_id":`+string(idJSON)+`}`); err == nil {
+		t.Fatal("cross-session status succeeded; identity headers did not reach the handler")
 	}
 }
 

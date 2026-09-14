@@ -168,7 +168,7 @@ func runCase(ctx context.Context, store *conversation.Memory, spec caseSpec) cas
 		return result
 	}
 	started := time.Now()
-	run, err := agentruntime.NewStored(ctx, spec.Mode.Agent, store, "eval-maze", session.ID).Start(spec.Prompt)
+	run, err := agentruntime.ClaimQueuedRun(ctx, store, spec.Mode.Agent, "eval-maze", session.ID, spec.Prompt)
 	if err != nil {
 		result.Error = err.Error()
 		return result

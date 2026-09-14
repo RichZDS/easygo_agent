@@ -168,7 +168,7 @@ func trace(ctx context.Context, configPath, userPrompt string) (pageData, error)
 	}
 	fmt.Fprintf(os.Stderr, "maze-trace prompt: %s\n", userPrompt)
 	started := time.Now()
-	run, err := agentruntime.NewStored(ctx, agent, memory, "maze-trace", session.ID).Start(userPrompt)
+	run, err := agentruntime.ClaimQueuedRun(ctx, memory, agent, "maze-trace", session.ID, userPrompt)
 	if err != nil {
 		return pageData{}, err
 	}

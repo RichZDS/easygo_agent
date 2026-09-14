@@ -80,6 +80,7 @@ func run() int {
 type evaluator struct {
 	cfg        config.Config
 	store      *conversation.Memory
+	memories   conversation.MemoryStore
 	typedAgent adk.TypedAgent[*schema.AgenticMessage]
 	memory     *usermemory.Service
 	model      string
@@ -179,11 +180,12 @@ func newEvaluator(ctx context.Context, cfg config.Config, store *conversation.Me
 	if err != nil {
 		return nil, err
 	}
-	service, err := usermemory.NewService(store, store, memoryAgent, writer, cfg.Memory)
+	memories := conversation.NewMemoryLongTerm()
+	service, err := usermemory.NewService(memories, store, memoryAgent, writer, cfg.Memory)
 	if err != nil {
 		return nil, err
 	}
-	return &evaluator{cfg: cfg, store: store, typedAgent: typed, memory: service, model: cfg.Model.Name, started: time.Now().UTC()}, nil
+	return &evaluator{cfg: cfg, store: store, memories: memories, typedAgent: typed, memory: service, model: cfg.Model.Name, started: time.Now().UTC()}, nil
 }
 
 func (e *evaluator) shortTerm(ctx context.Context) caseResult {
@@ -227,7 +229,7 @@ func (e *evaluator) singleRoundLongTerm(ctx context.Context) caseResult {
 	if err != nil {
 		return fail(result, err)
 	}
-	result.Profile = profileTexts(ctx, e.store, user)
+	result.Profile = profileTexts(ctx, e.memories, user)
 	if !containsAll(strings.Join(result.Profile, "\n"), []string{"白羽豆荚"}) {
 		result.Notes = append(result.Notes, "长期档案未写入关键过敏原，后续回答只能依赖模型临场猜测")
 	}
@@ -281,7 +283,7 @@ func (e *evaluator) ultraLongLongTerm(ctx context.Context) caseResult {
 	if err != nil {
 		return fail(result, err)
 	}
-	result.Profile = profileTexts(ctx, e.store, user)
+	result.Profile = profileTexts(ctx, e.memories, user)
 	probed := e.probe(ctx, result, user, fresh.ID, "这是一个新会话。根据长期记忆回答：我的工号、内部工具名称，以及周五能否把变更推到生产？")
 	if !result.Compressed && !windowBroken {
 		probed.Notes = append(probed.Notes, "本轮未观察到 compressing 事件；可能已靠启发式 skill/tool 收缩装进预算")
@@ -318,8 +320,7 @@ type turnResult struct {
 
 func (e *evaluator) chat(ctx context.Context, user, sessionID, input string) (turnResult, error) {
 	fmt.Fprintf(os.Stderr, "run %s %s: %s\n", user, sessionID[:8], clip(input, 48))
-	session := agentruntime.NewStored(ctx, e.typedAgent, e.store, user, sessionID, e.store)
-	run, err := session.Start(input)
+	run, err := agentruntime.ClaimQueuedRun(ctx, e.store, e.typedAgent, user, sessionID, input, e.memories)
 	if err != nil {
 		return turnResult{}, err
 	}
@@ -349,7 +350,7 @@ func (e *evaluator) chat(ctx context.Context, user, sessionID, input string) (tu
 
 func (e *evaluator) probe(ctx context.Context, result caseResult, user, sessionID, prompt string) caseResult {
 	started := time.Now()
-	recalled, err := e.store.Recall(ctx, user, conversation.MaxProfileMemories)
+	recalled, err := e.memories.Recall(ctx, user, conversation.MaxProfileMemories)
 	if err != nil {
 		return fail(result, err)
 	}

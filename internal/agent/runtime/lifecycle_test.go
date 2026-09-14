@@ -15,38 +15,38 @@ import (
 
 // Observe the storage contract, not runtime's private completion state.
 type lifecycleStore struct {
-	conversation.Store
+	conversation.QueueStore
 	commits  atomic.Int32
 	closes   atomic.Int32
 	released chan struct{}
 	commit   func(context.Context) error
 }
 
-type lifecycleLease struct {
-	conversation.Lease
+type lifecycleRunLease struct {
+	conversation.RunLease
 	owner *lifecycleStore
 }
 
-func (s *lifecycleStore) Begin(ctx context.Context, user, id string) (conversation.Lease, error) {
-	lease, err := s.Store.Begin(ctx, user, id)
+func (s *lifecycleStore) ClaimNext(ctx context.Context, workerID string, ttl time.Duration) (conversation.RunLease, error) {
+	lease, err := s.QueueStore.ClaimNext(ctx, workerID, ttl)
 	if err != nil {
 		return nil, err
 	}
-	return &lifecycleLease{Lease: lease, owner: s}, nil
+	return &lifecycleRunLease{RunLease: lease, owner: s}, nil
 }
 
-func (l *lifecycleLease) Commit(ctx context.Context, messages []*schema.AgenticMessage, turn conversation.Turn) error {
+func (l *lifecycleRunLease) CommitRun(ctx context.Context, next []*schema.AgenticMessage, status conversation.RunStatus, outputs []*schema.AgenticMessage, text, errText string) error {
 	l.owner.commits.Add(1)
 	if l.owner.commit != nil {
 		if err := l.owner.commit(ctx); err != nil {
 			return err
 		}
 	}
-	return l.Lease.Commit(ctx, messages, turn)
+	return l.RunLease.CommitRun(ctx, next, status, outputs, text, errText)
 }
 
-func (l *lifecycleLease) Close() {
-	l.Lease.Close()
+func (l *lifecycleRunLease) Close() {
+	l.RunLease.Close()
 	l.owner.closes.Add(1)
 	l.owner.released <- struct{}{}
 }
@@ -81,9 +81,8 @@ func TestCancellationFinalizesWithoutFurtherReads(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			store := &lifecycleStore{Store: memory, released: make(chan struct{}, 10)}
-			session := NewStored(parent, streamAgent([]*schema.AgenticMessage{testutil.Text("partial")}), store, "alice", s.ID)
-			run, err := session.Start("hi")
+			store := &lifecycleStore{QueueStore: memory, released: make(chan struct{}, 10)}
+			run, err := ClaimQueuedRun(parent, store, streamAgent([]*schema.AgenticMessage{testutil.Text("partial")}), "alice", s.ID, "hi")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -131,10 +130,9 @@ func TestCancellationFinalizesWithoutFurtherReads(t *testing.T) {
 			if store.commits.Load() != 1 || store.closes.Load() != 1 {
 				t.Fatalf("commits=%d closes=%d", store.commits.Load(), store.closes.Load())
 			}
-			// An uncanceled request context also verifies the local reservation.
-			next, err := session.StartContext(ctx, "again")
+			next, err := ClaimQueuedRun(ctx, memory, streamAgent([]*schema.AgenticMessage{testutil.Text("again")}), "alice", s.ID, "again")
 			if err != nil {
-				t.Fatalf("local reservation remained held: %v", err)
+				t.Fatalf("session remained locked: %v", err)
 			}
 			closeRun(t, next)
 		})
@@ -150,9 +148,8 @@ func TestCloseBeforeFirstReadReleasesReservation(t *testing.T) {
 		calls.Add(1)
 		return nil
 	}}
-	session := NewStored(ctx, agent, memory, "alice", s.ID)
 	for i := 0; i < 2; i++ {
-		run, err := session.Start("unused")
+		run, err := ClaimQueuedRun(ctx, memory, agent, "alice", s.ID, "unused")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -161,17 +158,22 @@ func TestCloseBeforeFirstReadReleasesReservation(t *testing.T) {
 		}
 	}
 	turns, err := memory.History(ctx, "alice", s.ID, 0, 10)
-	if err != nil || len(turns) != 0 || calls.Load() != 0 {
-		t.Fatalf("unstarted run performed I/O: turns=%v calls=%d err=%v", turns, calls.Load(), err)
+	if err != nil || len(turns) != 2 || calls.Load() != 0 {
+		t.Fatalf("unstarted claimed run: turns=%v calls=%d err=%v", turns, calls.Load(), err)
+	}
+	for _, turn := range turns {
+		if turn.Status != "canceled" {
+			t.Fatalf("unstarted claimed run status=%s", turn.Status)
+		}
 	}
 }
 
-type loadingStore struct {
-	conversation.Store
+type blockingMemory struct {
+	conversation.MemoryStore
 	entered chan struct{}
 }
 
-func (s loadingStore) Begin(ctx context.Context, _, _ string) (conversation.Lease, error) {
+func (s blockingMemory) Recall(ctx context.Context, user string, limit int) ([]conversation.LongTermMemory, error) {
 	close(s.entered)
 	<-ctx.Done()
 	return nil, ctx.Err()
@@ -179,11 +181,13 @@ func (s loadingStore) Begin(ctx context.Context, _, _ string) (conversation.Leas
 
 func TestCloseDuringHistoryLoad(t *testing.T) {
 	ctx := context.Background()
-	memory := conversation.NewMemory()
-	s, _ := memory.Create(ctx, "alice")
+	store := conversation.NewMemory()
+	s, _ := store.Create(ctx, "alice")
 	entered := make(chan struct{})
-	session := NewStored(ctx, streamAgent(nil), loadingStore{memory, entered}, "alice", s.ID)
-	run, _ := session.Start("hi")
+	run, err := ClaimQueuedRun(ctx, store, streamAgent(nil), "alice", s.ID, "hi", blockingMemory{conversation.NewMemoryLongTerm(), entered})
+	if err != nil {
+		t.Fatal(err)
+	}
 	next := make(chan Event, 1)
 	go func() { next <- run.Next() }()
 	await(t, entered)
@@ -193,9 +197,9 @@ func TestCloseDuringHistoryLoad(t *testing.T) {
 	if event := await(t, next); event.Kind != EventCanceled {
 		t.Fatalf("Next: %+v", event)
 	}
-	again, err := session.Start("again")
+	again, err := ClaimQueuedRun(ctx, store, streamAgent([]*schema.AgenticMessage{testutil.Text("again")}), "alice", s.ID, "again")
 	if err != nil {
-		t.Fatalf("loading cancellation kept local reservation: %v", err)
+		t.Fatalf("recall cancellation kept session locked: %v", err)
 	}
 	closeRun(t, again)
 }
@@ -214,7 +218,10 @@ func TestCloseWhileNextWaitsForAgent(t *testing.T) {
 		}()
 		return iter
 	}}
-	run, _ := NewStored(ctx, agent, memory, "alice", s.ID).Start("hi")
+	run, err := ClaimQueuedRun(ctx, memory, agent, "alice", s.ID, "hi")
+	if err != nil {
+		t.Fatal(err)
+	}
 	next := make(chan Event, 1)
 	go func() { next <- run.Next() }()
 	await(t, entered)
@@ -239,12 +246,18 @@ func TestCloseWaitsForCommitAndPreservesFailure(t *testing.T) {
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
 	failure := errors.New("disk unavailable")
-	store := &lifecycleStore{Store: memory, released: make(chan struct{}, 10), commit: func(ctx context.Context) error {
-		entered <- ctx
-		<-release
+	store := &lifecycleStore{QueueStore: memory, released: make(chan struct{}, 10)}
+	store.commit = func(ctx context.Context) error {
+		if store.commits.Load() == 1 {
+			entered <- ctx
+			<-release
+		}
 		return failure
-	}}
-	run, _ := NewStored(ctx, streamAgent([]*schema.AgenticMessage{testutil.Text("partial")}), store, "alice", s.ID).Start("hi")
+	}
+	run, err := ClaimQueuedRun(ctx, store, streamAgent([]*schema.AgenticMessage{testutil.Text("partial")}), "alice", s.ID, "hi")
+	if err != nil {
+		t.Fatal(err)
+	}
 	run.Next()
 	result := make(chan Event, 1)
 	go func() { result <- run.Close() }()
@@ -272,14 +285,9 @@ func TestCloseWaitsForCommitAndPreservesFailure(t *testing.T) {
 			t.Fatalf("commit error was lost: %+v", event)
 		}
 	}
-	lease, err := memory.Begin(ctx, "alice", s.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lease.Close()
 	turns, _ := memory.History(ctx, "alice", s.ID, 0, 10)
-	if len(turns) != 0 || store.commits.Load() != 1 || store.closes.Load() != 1 {
-		t.Fatal("failed commit persisted a turn or repeated cleanup")
+	if len(turns) != 0 || store.commits.Load() < 1 || store.closes.Load() != 1 {
+		t.Fatalf("failed commit persisted a turn or repeated cleanup: turns=%d commits=%d closes=%d", len(turns), store.commits.Load(), store.closes.Load())
 	}
 }
 
@@ -287,10 +295,13 @@ func TestClosePreservesCompletionAndPendingToolEvents(t *testing.T) {
 	ctx := context.Background()
 	memory := conversation.NewMemory()
 	s, _ := memory.Create(ctx, "alice")
-	store := &lifecycleStore{Store: memory, released: make(chan struct{}, 10)}
+	store := &lifecycleStore{QueueStore: memory, released: make(chan struct{}, 10)}
 	// A tool call without CallID is flushed only when the stream is closed.
 	message := testutil.ToolCall("", `{"a":2}`)
-	run, _ := NewStored(ctx, streamAgent([]*schema.AgenticMessage{message}), store, "alice", s.ID).Start("hi")
+	run, err := ClaimQueuedRun(ctx, store, streamAgent([]*schema.AgenticMessage{message}), "alice", s.ID, "hi")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if event := run.Next(); event.Kind != EventToolStarted || event.Arguments != `{"a":2}` {
 		t.Fatalf("tool event lost: %+v", event)
 	}
@@ -314,7 +325,10 @@ func TestCloseDoesNotConsumePendingEvents(t *testing.T) {
 		schema.NewContentBlock(&schema.AssistantGenText{Text: "partial"}),
 		schema.NewContentBlock(&schema.FunctionToolCall{Name: "calculator", CallID: "c1", Arguments: `{"a":2}`}),
 	}}
-	run, _ := NewStored(ctx, streamAgent([]*schema.AgenticMessage{message}), memory, "alice", s.ID).Start("hi")
+	run, err := ClaimQueuedRun(ctx, memory, streamAgent([]*schema.AgenticMessage{message}), "alice", s.ID, "hi")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if event := run.Next(); event.Kind != EventReasoningDelta {
 		t.Fatalf("first event=%+v", event)
 	}

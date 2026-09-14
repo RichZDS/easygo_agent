@@ -186,6 +186,7 @@ type MemoryStore interface {
 	TryAcquireMemoryJob(context.Context, string) (MemoryJobLease, bool, error)
 	MemoryCheckpoint(context.Context, string) (time.Time, bool, error)
 	SetMemoryCheckpoint(context.Context, string, time.Time) error
+	Close()
 }
 
 // MemoryJobLease provides cross-process mutual exclusion for one user's daily

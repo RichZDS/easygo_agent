@@ -3,8 +3,11 @@ package conversation
 import (
 	"context"
 	"math"
+	"os"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 func TestRankMemoriesUsesEqualFreshnessAndCallWeights(t *testing.T) {
@@ -24,25 +27,32 @@ func TestRankMemoriesUsesEqualFreshnessAndCallWeights(t *testing.T) {
 	}
 }
 
-func TestMemoryProfileIsCappedAtFiveAndRecallCountsOnlySelected(t *testing.T) {
+func TestMemoryDoesNotImplementMemoryStore(t *testing.T) {
+	var store any = NewMemory()
+	if _, ok := store.(MemoryStore); ok {
+		t.Fatal("*Memory still implements MemoryStore")
+	}
+}
+
+func testMemoryStore(t *testing.T, store MemoryStore, user string) {
+	t.Helper()
 	ctx := context.Background()
-	store := NewMemory()
 	drafts := make([]MemoryDraft, 0, MaxProfileMemories)
 	for i := 0; i < MaxProfileMemories; i++ {
 		drafts = append(drafts, MemoryDraft{Kind: MemoryKindPreference, Content: string(rune('a' + i)), Importance: .8, Confidence: .9, SourceSessions: []string{"s"}, SourceTurnIDs: []int64{1}})
 	}
-	profile, err := store.ReplaceProfile(ctx, "alice", drafts)
+	profile, err := store.ReplaceProfile(ctx, user, drafts)
 	if err != nil || len(profile) != MaxProfileMemories {
 		t.Fatalf("replace profile=%+v err=%v", profile, err)
 	}
-	if _, err = store.ReplaceProfile(ctx, "alice", append(drafts, drafts[0])); err != ErrTooManyProfileMemories {
+	if _, err = store.ReplaceProfile(ctx, user, append(drafts, drafts[0])); err != ErrTooManyProfileMemories {
 		t.Fatalf("six profile rows err=%v", err)
 	}
-	recalled, err := store.Recall(ctx, "alice", 2)
+	recalled, err := store.Recall(ctx, user, 2)
 	if err != nil || len(recalled) != 2 {
 		t.Fatalf("recall=%+v err=%v", recalled, err)
 	}
-	active, _ := store.ActiveProfile(ctx, "alice")
+	active, _ := store.ActiveProfile(ctx, user)
 	called := 0
 	for _, memory := range active {
 		if memory.CallCount == 1 {
@@ -54,22 +64,38 @@ func TestMemoryProfileIsCappedAtFiveAndRecallCountsOnlySelected(t *testing.T) {
 	if called != 2 {
 		t.Fatalf("selected recall was not counted exactly twice: %+v", active)
 	}
-}
-
-func TestMemoryJobLeasePreventsDuplicateConsolidation(t *testing.T) {
-	ctx := context.Background()
-	store := NewMemory()
-	first, acquired, err := store.TryAcquireMemoryJob(ctx, "alice")
+	first, acquired, err := store.TryAcquireMemoryJob(ctx, user)
 	if err != nil || !acquired {
 		t.Fatalf("first lease acquired=%v err=%v", acquired, err)
 	}
-	if second, acquired, err := store.TryAcquireMemoryJob(ctx, "alice"); err != nil || acquired || second != nil {
+	if second, acquired, err := store.TryAcquireMemoryJob(ctx, user); err != nil || acquired || second != nil {
 		t.Fatalf("duplicate lease=%v acquired=%v err=%v", second, acquired, err)
 	}
 	first.Close()
-	last, acquired, err := store.TryAcquireMemoryJob(ctx, "alice")
+	last, acquired, err := store.TryAcquireMemoryJob(ctx, user)
 	if err != nil || !acquired {
 		t.Fatalf("lease was not released: acquired=%v err=%v", acquired, err)
 	}
 	last.Close()
+}
+
+func TestMemoryLongTermContract(t *testing.T) {
+	store := NewMemoryLongTerm()
+	t.Cleanup(store.Close)
+	testMemoryStore(t, store, "alice")
+}
+
+func TestMemoryPostgresContract(t *testing.T) {
+	dsn := os.Getenv("EASYGO_TEST_MEMORY_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("set EASYGO_TEST_MEMORY_DATABASE_URL for memory PostgreSQL integration")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	store, err := NewMemoryPostgres(ctx, dsn, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(store.Close)
+	testMemoryStore(t, store, "mem-"+uuid.NewString())
 }

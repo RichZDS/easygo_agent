@@ -99,9 +99,8 @@ func Run(ctx context.Context, configPath string, options ...Options) (resultErr 
 		return err
 	}
 	app.buildQueue(ctx)
-	agent := app.agent
 	if opts.Mode == "gateway" {
-		server := &http.Server{Addr: cfg.HTTP.Address, Handler: gateway.New(store, agent, app.memoryStore, app.queue), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
+		server := &http.Server{Addr: cfg.HTTP.Address, Handler: gateway.New(store, app.queue), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
 		return serve(ctx, server)
 	}
 	if opts.SessionID == "" && !opts.NewSession {

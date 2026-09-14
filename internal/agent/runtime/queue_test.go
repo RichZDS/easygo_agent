@@ -405,7 +405,9 @@ func TestQueueManagerInjectsUserLongTermMemory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	profile, err := store.ReplaceProfile(ctx, "alice", []conversation.MemoryDraft{{
+	memories := conversation.NewMemoryLongTerm()
+	defer memories.Close()
+	profile, err := memories.ReplaceProfile(ctx, "alice", []conversation.MemoryDraft{{
 		Kind: conversation.MemoryKindStyle, Content: "始终优先使用简洁中文", Importance: .9, Confidence: .95,
 		SourceSessions: []string{session.ID}, SourceTurnIDs: []int64{1},
 	}})
@@ -430,7 +432,7 @@ func TestQueueManagerInjectsUserLongTermMemory(t *testing.T) {
 		}()
 		return iterator
 	}}
-	manager := NewQueueManager(ctx, store, agent, QueueConfig{MaxWorkers: 1, PollInterval: time.Millisecond, LeaseTTL: time.Second}, store)
+	manager := NewQueueManager(ctx, store, agent, QueueConfig{MaxWorkers: 1, PollInterval: time.Millisecond, LeaseTTL: time.Second}, memories)
 	defer manager.Close()
 	record, _, err := manager.Submit(ctx, "alice", session.ID, "你好", "")
 	if err != nil {
@@ -450,7 +452,7 @@ func TestQueueManagerInjectsUserLongTermMemory(t *testing.T) {
 	if terminal.Kind != EventCompleted || terminal.Text != "收到" {
 		t.Fatalf("terminal event: %+v", terminal)
 	}
-	updated, err := store.ActiveProfile(ctx, "alice")
+	updated, err := memories.ActiveProfile(ctx, "alice")
 	if err != nil || len(updated) != 1 || updated[0].CallCount != 1 {
 		t.Fatalf("injected memory was not counted exactly once: %+v err=%v", updated, err)
 	}

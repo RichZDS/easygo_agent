@@ -1,14 +1,12 @@
 package sandboxintegration_test
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -19,6 +17,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"easygo-agent/internal/sandboxapi"
 )
 
 const (
@@ -33,11 +33,9 @@ const (
 )
 
 type apiClient struct {
-	baseURL   string
-	token     string
+	api       sandboxapi.Client
 	sessionID string
 	runID     string
-	http      *http.Client
 }
 
 type applicationEnvelope struct {
@@ -124,13 +122,7 @@ func TestDockerSandboxContract(t *testing.T) {
 		t.Fatalf("Docker daemon is required; the test never starts it: %v\n%s", err, output)
 	}
 
-	client := &apiClient{
-		baseURL:   baseURL,
-		token:     token,
-		sessionID: "sandbox-it-" + randomHex(t, 12),
-		runID:     "run-" + randomHex(t, 12),
-		http:      &http.Client{Timeout: 11 * time.Minute},
-	}
+	client := newAPIClient(baseURL, token, "sandbox-it-"+randomHex(t, 12), "run-"+randomHex(t, 12), &http.Client{Timeout: 11 * time.Minute})
 
 	applicationID := client.apply(t)
 	destroyed := false
@@ -407,13 +399,7 @@ func TestDockerSandboxHundredApplicationCap(t *testing.T) {
 	for index := 0; index < applicationCount; index++ {
 		go func(index int) {
 			defer workers.Done()
-			client := &apiClient{
-				baseURL:   baseURL,
-				token:     token,
-				sessionID: fmt.Sprintf("sandbox-stress-%03d-%s", index, randomHexValue(8)),
-				runID:     "run-" + randomHexValue(8),
-				http:      sharedHTTP,
-			}
+			client := newAPIClient(baseURL, token, fmt.Sprintf("sandbox-stress-%03d-%s", index, randomHexValue(8)), "run-"+randomHexValue(8), sharedHTTP)
 			var envelope applicationEnvelope
 			err := client.request(ctx, http.MethodPost, "/v1/applications", map[string]any{}, &envelope)
 			if err != nil {
@@ -544,13 +530,7 @@ func TestDockerSandboxCanceledWaiterDoesNotLeak(t *testing.T) {
 	clients := make([]*apiClient, 4)
 	applicationIDs := make([]string, 4)
 	for index := range clients {
-		clients[index] = &apiClient{
-			baseURL:   baseURL,
-			token:     token,
-			sessionID: fmt.Sprintf("sandbox-cancel-%d-%s", index, randomHex(t, 8)),
-			runID:     "run-" + randomHex(t, 8),
-			http:      sharedHTTP,
-		}
+		clients[index] = newAPIClient(baseURL, token, fmt.Sprintf("sandbox-cancel-%d-%s", index, randomHex(t, 8)), "run-"+randomHex(t, 8), sharedHTTP)
 		applicationIDs[index] = clients[index].apply(t)
 	}
 	t.Cleanup(func() {
@@ -784,55 +764,21 @@ func (client *apiClient) delete(t *testing.T, path string) {
 	}
 }
 
+func newAPIClient(baseURL, token, sessionID, runID string, httpClient *http.Client) *apiClient {
+	return &apiClient{
+		api:       sandboxapi.Client{BaseURL: baseURL, Token: token, HTTP: httpClient, MaxBodyBytes: sandboxapi.DefaultMaxBody},
+		sessionID: sessionID,
+		runID:     runID,
+	}
+}
+
 func (client *apiClient) request(ctx context.Context, method, path string, body any, output any) error {
-	var requestBody io.Reader
-	if body != nil {
-		encoded, err := json.Marshal(body)
-		if err != nil {
-			return err
-		}
-		requestBody = bytes.NewReader(encoded)
+	err := client.api.Do(ctx, method, path, client.sessionID, client.runID, body, output)
+	var contractErr *sandboxapi.Error
+	if errors.As(err, &contractErr) {
+		return &apiError{StatusCode: contractErr.StatusCode, Code: contractErr.Code, Message: contractErr.Message}
 	}
-	request, err := http.NewRequestWithContext(ctx, method, client.baseURL+path, requestBody)
-	if err != nil {
-		return err
-	}
-	request.Header.Set("Authorization", "Bearer "+client.token)
-	request.Header.Set("X-EasyGo-Session-ID", client.sessionID)
-	request.Header.Set("X-EasyGo-Run-ID", client.runID)
-	if body != nil {
-		request.Header.Set("Content-Type", "application/json")
-	}
-	response, err := client.http.Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	responseBody, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
-	if err != nil {
-		return err
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		var envelope struct {
-			Error struct {
-				Code    string `json:"code"`
-				Message string `json:"message"`
-			} `json:"error"`
-		}
-		_ = json.Unmarshal(responseBody, &envelope)
-		message := strings.TrimSpace(envelope.Error.Message)
-		if message == "" {
-			message = strings.TrimSpace(string(responseBody))
-		}
-		return &apiError{StatusCode: response.StatusCode, Code: envelope.Error.Code, Message: message}
-	}
-	if output == nil || response.StatusCode == http.StatusNoContent {
-		return nil
-	}
-	if err := json.Unmarshal(responseBody, output); err != nil {
-		return fmt.Errorf("decode %s %s response: %w", method, path, err)
-	}
-	return nil
+	return err
 }
 
 type dockerCLI struct{ binary string }
@@ -923,7 +869,11 @@ func (docker dockerCLI) forceRemoveApplication(ctx context.Context, applicationI
 }
 
 func applicationPath(applicationID string) string {
-	return "/v1/applications/" + applicationID
+	path, err := sandboxapi.ApplicationPath(applicationID, "")
+	if err != nil {
+		return sandboxapi.ApplicationsPath + "/" + applicationID
+	}
+	return path
 }
 
 func envOrDefault(name, fallback string) string {

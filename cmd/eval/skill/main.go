@@ -148,7 +148,7 @@ func runCase(ctx context.Context, store *conversation.Memory, agent adk.TypedAge
 		return result
 	}
 	started := time.Now()
-	run, err := agentruntime.NewStored(ctx, agent, store, "eval-skill", session.ID).Start(spec.Prompt)
+	run, err := agentruntime.ClaimQueuedRun(ctx, store, agent, "eval-skill", session.ID, spec.Prompt)
 	if err != nil {
 		result.Error = err.Error()
 		return result

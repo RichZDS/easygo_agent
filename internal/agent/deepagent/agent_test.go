@@ -15,6 +15,7 @@ import (
 	"easygo-agent/internal/conversation"
 	"easygo-agent/internal/testutil"
 	"easygo-agent/internal/tools"
+	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
@@ -42,6 +43,15 @@ func collect(t *testing.T, run agentruntime.Run) []agentruntime.Event {
 	}
 	t.Fatal("run did not terminate")
 	return nil
+}
+
+func startRun(t *testing.T, ctx context.Context, store *conversation.Memory, agent adk.TypedAgent[*schema.AgenticMessage], user, sessionID, input string, memory ...conversation.MemoryStore) agentruntime.Run {
+	t.Helper()
+	run, err := agentruntime.ClaimQueuedRun(ctx, store, agent, user, sessionID, input, memory...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return run
 }
 func TestLoopPreservesNativeMessagesAcrossSessions(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -91,11 +101,7 @@ func TestLoopPreservesNativeMessagesAcrossSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, input := range []string{"2+3?", "remember the result?"} {
-		runtime := agentruntime.NewStored(ctx, agent, store, "alice", s.ID)
-		run, err := runtime.Start(input)
-		if err != nil {
-			t.Fatal(err)
-		}
+		run := startRun(t, ctx, store, agent, "alice", s.ID, input)
 		events := collect(t, run)
 		last := events[len(events)-1]
 		if last.Kind != agentruntime.EventCompleted {
@@ -154,7 +160,7 @@ func TestCompressionAfterToolResultPersistsNativeState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, _ := agentruntime.NewStored(ctx, agent, store, "alice", s.ID).Start("2*4?")
+	run := startRun(t, ctx, store, agent, "alice", s.ID, "2*4?")
 	events := collect(t, run)
 	if last := events[len(events)-1]; last.Kind != agentruntime.EventCompleted {
 		t.Fatalf("terminal=%+v", last)
@@ -176,7 +182,7 @@ func TestCompressionAfterToolResultPersistsNativeState(t *testing.T) {
 		t.Fatalf("want system + summary + final, got %d", len(lease.Messages()))
 	}
 	lease.Close()
-	run, _ = agentruntime.NewStored(ctx, agent, store, "alice", s.ID).Start("continue")
+	run = startRun(t, ctx, store, agent, "alice", s.ID, "continue")
 	events = collect(t, run)
 	if last := events[len(events)-1]; last.Kind != agentruntime.EventCompleted {
 		t.Fatalf("resume terminal=%+v", last)
@@ -209,7 +215,7 @@ func TestSummaryFailureAndIterationLimitDoNotCommitPartialContext(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
-			run, _ := agentruntime.NewStored(ctx, agent, store, "alice", s.ID).Start("calculate")
+			run := startRun(t, ctx, store, agent, "alice", s.ID, "calculate")
 			events := collect(t, run)
 			if last := events[len(events)-1]; last.Kind != agentruntime.EventFailed {
 				t.Fatalf("terminal=%+v", last)
@@ -250,7 +256,7 @@ func TestSharedAgentRunsIndependentUsersConcurrently(t *testing.T) {
 	results := make(chan agentruntime.Event, 2)
 	for _, user := range []string{"alice", "bob"} {
 		s, _ := store.Create(ctx, user)
-		run, _ := agentruntime.NewStored(ctx, agent, store, user, s.ID).Start(user)
+		run := startRun(t, ctx, store, agent, user, s.ID, user)
 		go func() {
 			for {
 				event := run.Next()
@@ -296,7 +302,9 @@ func TestDeepAgentReceivesUserLongTermMemory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	profile, err := store.ReplaceProfile(ctx, "alice", []conversation.MemoryDraft{{
+	memories := conversation.NewMemoryLongTerm()
+	defer memories.Close()
+	profile, err := memories.ReplaceProfile(ctx, "alice", []conversation.MemoryDraft{{
 		Kind: conversation.MemoryKindStyle, Content: "始终优先使用简洁中文", Importance: .9, Confidence: .95,
 		SourceSessions: []string{session.ID}, SourceTurnIDs: []int64{1},
 	}})
@@ -320,15 +328,12 @@ func TestDeepAgentReceivesUserLongTermMemory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := agentruntime.NewStored(ctx, agent, store, "alice", session.ID, store).Start("你好")
-	if err != nil {
-		t.Fatal(err)
-	}
+	run := startRun(t, ctx, store, agent, "alice", session.ID, "你好", memories)
 	events := collect(t, run)
 	if last := events[len(events)-1]; last.Kind != agentruntime.EventCompleted || last.Text != "收到" {
 		t.Fatalf("terminal=%+v", last)
 	}
-	updated, _ := store.ActiveProfile(ctx, "alice")
+	updated, _ := memories.ActiveProfile(ctx, "alice")
 	if updated[0].CallCount != 1 {
 		t.Fatalf("injected memory was not counted exactly once: %+v", updated[0])
 	}
@@ -341,6 +346,8 @@ func TestDeepAgentReceivesUserLongTermMemory(t *testing.T) {
 func TestUserMemoryEndToEndAcceptanceAtLeastNinetyFivePercent(t *testing.T) {
 	ctx := context.Background()
 	store := conversation.NewMemory()
+	memories := conversation.NewMemoryLongTerm()
+	defer memories.Close()
 	model := &testutil.Model{GenerateFunc: func(_ context.Context, messages []*schema.AgenticMessage) (*schema.AgenticMessage, error) {
 		var requested, remembered string
 		for _, message := range messages {
@@ -382,17 +389,14 @@ func TestUserMemoryEndToEndAcceptanceAtLeastNinetyFivePercent(t *testing.T) {
 			t.Fatal(createErr)
 		}
 		preference := fmt.Sprintf("preference-%03d", i)
-		_, replaceErr := store.ReplaceProfile(ctx, user, []conversation.MemoryDraft{{
+		_, replaceErr := memories.ReplaceProfile(ctx, user, []conversation.MemoryDraft{{
 			Kind: conversation.MemoryKindPreference, Content: preference, Importance: .9, Confidence: .99,
 			SourceSessions: []string{session.ID}, SourceTurnIDs: []int64{1},
 		}})
 		if replaceErr != nil {
 			t.Fatal(replaceErr)
 		}
-		run, startErr := agentruntime.NewStored(ctx, agent, store, user, session.ID, store).Start(fmt.Sprintf("case-%03d", i))
-		if startErr != nil {
-			t.Fatal(startErr)
-		}
+		run := startRun(t, ctx, store, agent, user, session.ID, fmt.Sprintf("case-%03d", i), memories)
 		events := collect(t, run)
 		last := events[len(events)-1]
 		if last.Kind == agentruntime.EventCompleted && last.Text == preference {

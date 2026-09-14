@@ -30,7 +30,7 @@ func TestAsyncRunProtocol(t *testing.T) {
 	}
 	manager := agentruntime.NewQueueManager(ctx, store, agent, agentruntime.QueueConfig{MaxWorkers: 1, PollInterval: time.Millisecond, LeaseTTL: time.Second})
 	defer manager.Close()
-	handler := New(store, agent, manager)
+	handler := New(store, manager)
 
 	create := httptest.NewRecorder()
 	handler.ServeHTTP(create, httptest.NewRequest(http.MethodPost, "/v1/users/alice/sessions", nil))

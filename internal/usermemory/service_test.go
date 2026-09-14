@@ -30,6 +30,8 @@ func (a *scriptedAgent) Reconcile(_ context.Context, _ string, current []convers
 func TestServiceConsolidatesBatchesIntoFiveSlotProfileAndStorage(t *testing.T) {
 	ctx := context.Background()
 	store := conversation.NewMemory()
+	memories := conversation.NewMemoryLongTerm()
+	defer memories.Close()
 	session, err := store.Create(ctx, "alice")
 	if err != nil {
 		t.Fatal(err)
@@ -54,7 +56,7 @@ func TestServiceConsolidatesBatchesIntoFiveSlotProfileAndStorage(t *testing.T) {
 	}}
 	agent.extract = []Candidate{{Kind: conversation.MemoryKindStyle, Content: "用户偏好简洁中文回答", Tags: []string{"zh", "concise"}, Importance: .9, Confidence: .95, SourceSessions: []string{session.ID}, SourceTurnIDs: []int64{1}}}
 	cfg := DefaultConfig()
-	service, err := NewService(store, store, agent, writer, cfg)
+	service, err := NewService(memories, store, agent, writer, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,11 +67,11 @@ func TestServiceConsolidatesBatchesIntoFiveSlotProfileAndStorage(t *testing.T) {
 	if agent.batches != 1 {
 		t.Fatalf("memory agent batches=%d", agent.batches)
 	}
-	profile, err := store.ActiveProfile(ctx, "alice")
+	profile, err := memories.ActiveProfile(ctx, "alice")
 	if err != nil || len(profile) != 1 || profile[0].ProfileSlot != 1 || profile[0].Kind != conversation.MemoryKindStyle {
 		t.Fatalf("profile=%+v err=%v", profile, err)
 	}
-	if _, ok, err := store.MemoryCheckpoint(ctx, "alice"); err != nil || !ok {
+	if _, ok, err := memories.MemoryCheckpoint(ctx, "alice"); err != nil || !ok {
 		t.Fatalf("checkpoint not committed: ok=%v err=%v", ok, err)
 	}
 	entries, err := os.ReadDir(writer.root)

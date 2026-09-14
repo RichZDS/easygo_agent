@@ -9,38 +9,21 @@ import (
 	"io"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	agentruntime "easygo-agent/internal/agent/runtime"
 	"easygo-agent/internal/conversation"
-	"github.com/cloudwego/eino/adk"
-	"github.com/cloudwego/eino/schema"
 )
 
 type Handler struct {
-	store  conversation.Store
-	memory conversation.MemoryStore
-	agent  adk.TypedAgent[*schema.AgenticMessage]
-	queue  agentruntime.QueueManager
+	store conversation.Store
+	queue agentruntime.QueueManager
 }
 
-// New keeps the legacy synchronous mode when no manager is supplied. The
-// application passes its shared QueueManager, which enables the durable 202
-// protocol without changing the low-level handler tests and embedders that
-// still use the direct runtime. Optional extras may be a MemoryStore and/or a
-// QueueManager so both long-term memory injection and queued execution remain
-// available on the same constructor.
-func New(store conversation.Store, agent adk.TypedAgent[*schema.AgenticMessage], extras ...any) http.Handler {
-	h := &Handler{store: store, agent: agent}
-	for _, extra := range extras {
-		switch v := extra.(type) {
-		case conversation.MemoryStore:
-			h.memory = v
-		case agentruntime.QueueManager:
-			h.queue = v
-		}
-	}
+// New serves the durable queue protocol. Production CLI, TUI, and HTTP all
+// submit through the same QueueManager; there is no Session/Lease fallback.
+func New(store conversation.Store, queue agentruntime.QueueManager) http.Handler {
+	h := &Handler{store: store, queue: queue}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
 	mux.HandleFunc("POST /v1/users/{user}/sessions", h.create)
@@ -59,11 +42,6 @@ func New(store conversation.Store, agent adk.TypedAgent[*schema.AgenticMessage],
 	})
 }
 
-// NewWithQueue is the explicit asynchronous constructor used by application
-// bootstrap and embedders that share one QueueManager across modes.
-func NewWithQueue(store conversation.QueueStore, manager agentruntime.QueueManager) http.Handler {
-	return New(store, nil, manager)
-}
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	s, err := h.store.Create(r.Context(), r.PathValue("user"))
 	if err != nil {
@@ -116,82 +94,10 @@ func (h *Handler) history(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"turns": turns, "next_after": next})
 }
 func (h *Handler) run(w http.ResponseWriter, r *http.Request) {
-	if h.queue != nil {
-		h.enqueueRun(w, r)
+	if h.queue == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "run queue is unavailable"})
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
-	var input struct {
-		Input string `json:"input"`
-	}
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&input); err != nil {
-		writeJSON(w, 400, map[string]string{"error": "expected JSON object with input (maximum 64 KiB)"})
-		return
-	}
-	if err := dec.Decode(new(any)); err != io.EOF {
-		writeJSON(w, 400, map[string]string{"error": "expected one JSON object"})
-		return
-	}
-	session := agentruntime.NewStored(r.Context(), h.agent, h.store, r.PathValue("user"), r.PathValue("id"), h.memory)
-	run, err := session.StartContext(r.Context(), input.Input)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	defer run.Close()
-	streaming := strings.Contains(r.Header.Get("Accept"), "text/event-stream")
-	if !streaming {
-		terminal, consumeErr := agentruntime.Consume(run, nil)
-		if consumeErr != nil {
-			writeError(w, consumeErr)
-			return
-		}
-		if terminal.Kind != agentruntime.EventCompleted {
-			if terminal.Kind == agentruntime.EventFailed && terminal.Err != nil {
-				writeError(w, terminal.Err)
-				return
-			}
-			writeError(w, context.Canceled)
-			return
-		}
-		writeJSON(w, 200, eventPayload(terminal))
-		return
-	}
-
-	initialized := false
-	terminal, consumeErr := agentruntime.Consume(run, func(event agentruntime.Event) error {
-		if !initialized {
-			if event.Kind == agentruntime.EventFailed {
-				if event.Err != nil {
-					return event.Err
-				}
-				return errors.New("agent run failed")
-			}
-			w.Header().Set("Content-Type", "text/event-stream")
-			w.Header().Set("Cache-Control", "no-cache")
-			w.Header().Set("X-Accel-Buffering", "no")
-			initialized = true
-		}
-		controller := http.NewResponseController(w)
-		_ = controller.SetWriteDeadline(time.Now().Add(15 * time.Second))
-		data, _ := json.Marshal(eventPayload(event))
-		if _, err = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.Kind, data); err != nil {
-			return err
-		}
-		return controller.Flush()
-	})
-	if consumeErr != nil && !initialized {
-		if terminal.Err != nil {
-			writeError(w, terminal.Err)
-		} else {
-			writeError(w, consumeErr)
-		}
-	}
-}
-
-func (h *Handler) enqueueRun(w http.ResponseWriter, r *http.Request) {
 	if err := conversation.ValidateUser(r.PathValue("user")); err != nil {
 		writeError(w, err)
 		return

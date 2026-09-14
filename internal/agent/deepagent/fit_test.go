@@ -8,9 +8,7 @@ import (
 	"unicode/utf8"
 
 	agentruntime "easygo-agent/internal/agent/runtime"
-	"easygo-agent/internal/testutil"
 
-	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/middlewares/summarization"
 	"github.com/cloudwego/eino/schema"
 )
@@ -75,49 +73,35 @@ func TestFitShrinksHeuristicBeforeDialogueAndKeepsThemeFacts(t *testing.T) {
 	}
 }
 
-func TestBeforeModelRewriteStateUsesFitNotWholesaleSummary(t *testing.T) {
+func TestFitTokenCounterAgreesWithMeasure(t *testing.T) {
 	req := themedOverBudgetRequest(t)
-	summarizerCalled := false
-	summary := &testutil.Model{GenerateFunc: func(context.Context, []*schema.AgenticMessage) (*schema.AgenticMessage, error) {
-		summarizerCalled = true
-		return testutil.Text("wholesale summary should not run"), nil
-	}}
-	ctx := context.Background()
-	mw, err := newCompression(ctx, summary, req.Limit)
+	before, err := Measure(req.Messages, req.Tools)
 	if err != nil {
 		t.Fatal(err)
 	}
-	native, err := summarization.NewTyped(ctx, &summarization.TypedConfig[*schema.AgenticMessage]{
-		Model: summary, Trigger: &summarization.TriggerCondition{ContextTokens: req.Limit}, TokenCounter: countInputTokens,
-	})
+	counted, err := countInputTokens(context.Background(), &summarization.TypedTokenCounterInput[*schema.AgenticMessage]{Messages: req.Messages, Tools: req.Tools})
 	if err != nil {
 		t.Fatal(err)
 	}
-	guard := mw.(*compressionBudget)
-	guard.TypedChatModelAgentMiddleware = native
-	state := &adk.TypedChatModelAgentState[*schema.AgenticMessage]{Messages: req.Messages, ToolInfos: req.Tools}
-	_, next, err := guard.BeforeModelRewriteState(ctx, state, nil)
+	if counted != max(before.Total, providerUsage(req.Messages)) {
+		t.Fatalf("token counter %d disagrees with Measure %d (usage=%d)", counted, before.Total, providerUsage(req.Messages))
+	}
+	opt, err := Fit(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summarizerCalled {
-		t.Fatal("summarizer ran; skill/tool shrink should have avoided wholesale dialogue dump")
-	}
-	tokens, err := countInputTokens(ctx, &summarization.TypedTokenCounterInput[*schema.AgenticMessage]{Messages: next.Messages, Tools: next.ToolInfos})
+	afterCounted, err := countInputTokens(context.Background(), &summarization.TypedTokenCounterInput[*schema.AgenticMessage]{Messages: opt.Messages, Tools: opt.Tools})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tokens > req.Limit {
-		t.Fatalf("rewritten context %d exceeds budget %d", tokens, req.Limit)
+	if afterCounted != max(opt.After.Total, providerUsage(opt.Messages)) {
+		t.Fatalf("fitted token counter %d disagrees with Fit.After %d", afterCounted, opt.After.Total)
 	}
-	blob := messagesBlob(next.Messages)
-	for _, fact := range []string{themeToolName, themeStaffID, themeFriday} {
-		if !strings.Contains(blob, fact) {
-			t.Fatalf("rewrite lost %q", fact)
-		}
+	if !opt.Fitted {
+		t.Fatal("expected Fit to bring the themed fixture under budget without a summarizer")
 	}
-	if containsTool(next.ToolInfos, heuristicLoadSkill) || containsTool(next.ToolInfos, heuristicCallTool) {
-		t.Fatalf("heuristic tools still bound: %v", toolNames(next.ToolInfos))
+	if containsTool(opt.Tools, heuristicLoadSkill) || containsTool(opt.Tools, heuristicCallTool) {
+		t.Fatalf("heuristic tools still bound: %v", opt.KeptTools)
 	}
 }
 

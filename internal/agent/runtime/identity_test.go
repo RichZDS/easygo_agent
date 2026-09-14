@@ -43,16 +43,15 @@ func TestInvocationIdentityContext(t *testing.T) {
 	}
 }
 
-func TestDirectRunCarriesGeneratedInvocationIdentity(t *testing.T) {
+func TestClaimedRunCarriesDurableInvocationIdentity(t *testing.T) {
 	ctx := context.Background()
 	store := conversation.NewMemory()
-	record, err := store.Create(ctx, "alice")
+	session, err := store.Create(ctx, "alice")
 	if err != nil {
 		t.Fatal(err)
 	}
 	agent := &identityCaptureAgent{identities: make(chan InvocationIdentity, 1)}
-	session := NewStored(ctx, agent, store, "alice", record.ID)
-	run, err := session.StartContext(ctx, "hello")
+	run, err := ClaimQueuedRun(ctx, store, agent, "alice", session.ID, "hello")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +59,7 @@ func TestDirectRunCarriesGeneratedInvocationIdentity(t *testing.T) {
 		t.Fatalf("terminal=%+v", event)
 	}
 	identity := <-agent.identities
-	if identity.SessionID != record.ID {
+	if identity.SessionID != session.ID {
 		t.Fatalf("identity=%+v", identity)
 	}
 	if _, err := uuid.Parse(identity.RunID); err != nil {

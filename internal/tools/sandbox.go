@@ -1,21 +1,18 @@
 package tools
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
 	pathpkg "path"
-	"regexp"
 	"strings"
 	"time"
 
 	agentruntime "easygo-agent/internal/agent/runtime"
+	"easygo-agent/internal/sandboxapi"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
@@ -27,8 +24,6 @@ const (
 	maxSandboxStdinBytes   = 1024 * 1024
 	maxSandboxTimeoutSecs  = 10 * 60
 )
-
-var sandboxApplicationIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 // SandboxControllerConfig configures the single internal controller client
 // shared by all sandbox tools.
@@ -142,17 +137,8 @@ type SandboxDestroyResult struct {
 	Destroyed     bool   `json:"destroyed"`
 }
 
-type sandboxControllerErrorEnvelope struct {
-	Error struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	} `json:"error"`
-}
-
 type sandboxControllerClient struct {
-	baseURL        string
-	authToken      string
-	client         *http.Client
+	api            sandboxapi.Client
 	maxOutputBytes int
 }
 
@@ -223,13 +209,16 @@ func newSandboxControllerClient(cfg SandboxControllerConfig) (*sandboxController
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	return &sandboxControllerClient{
-		baseURL:   baseURL,
-		authToken: authToken,
-		client: &http.Client{
-			Timeout:   cfg.RequestTimeout,
-			Transport: transport,
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
+		api: sandboxapi.Client{
+			BaseURL:      baseURL,
+			Token:        authToken,
+			MaxBodyBytes: cfg.MaxOutputBytes*12 + 128*1024,
+			HTTP: &http.Client{
+				Timeout:   cfg.RequestTimeout,
+				Transport: transport,
+				CheckRedirect: func(*http.Request, []*http.Request) error {
+					return http.ErrUseLastResponse
+				},
 			},
 		},
 		maxOutputBytes: cfg.MaxOutputBytes,
@@ -348,71 +337,11 @@ func (client *sandboxControllerClient) do(ctx context.Context, method, endpoint 
 	if !ok {
 		return errors.New("sandbox tool requires trusted session and run identity")
 	}
-	var reader io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return fmt.Errorf("encode sandbox controller request: %w", err)
-		}
-		reader = bytes.NewReader(data)
-	}
-	request, err := http.NewRequestWithContext(ctx, method, client.baseURL+endpoint, reader)
-	if err != nil {
-		return fmt.Errorf("create sandbox controller request: %w", err)
-	}
-	request.Header.Set("Authorization", "Bearer "+client.authToken)
-	request.Header.Set("X-EasyGo-Session-ID", identity.SessionID)
-	request.Header.Set("X-EasyGo-Run-ID", identity.RunID)
-	if body != nil {
-		request.Header.Set("Content-Type", "application/json")
-	}
-	response, err := client.client.Do(request)
-	if err != nil {
-		return fmt.Errorf("call sandbox controller: %w", err)
-	}
-	defer response.Body.Close()
-	maxBodyBytes := int64(client.maxOutputBytes*12 + 128*1024)
-	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxBodyBytes+1))
-	if err != nil {
-		return fmt.Errorf("read sandbox controller response: %w", err)
-	}
-	if int64(len(responseBody)) > maxBodyBytes {
-		return errors.New("sandbox controller response exceeds configured output limit")
-	}
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		var envelope sandboxControllerErrorEnvelope
-		_ = json.Unmarshal(responseBody, &envelope)
-		message := strings.TrimSpace(envelope.Error.Message)
-		if message == "" {
-			message = http.StatusText(response.StatusCode)
-		}
-		code := strings.TrimSpace(envelope.Error.Code)
-		if code != "" {
-			message = code + ": " + message
-		}
-		if retryAfter := strings.TrimSpace(response.Header.Get("Retry-After")); retryAfter != "" {
-			message += " (retry after " + retryAfter + ")"
-		}
-		return fmt.Errorf("sandbox controller returned %d: %s", response.StatusCode, message)
-	}
-	if output == nil {
-		return nil
-	}
-	if len(responseBody) == 0 {
-		return errors.New("sandbox controller returned an empty response")
-	}
-	if err := json.Unmarshal(responseBody, output); err != nil {
-		return fmt.Errorf("decode sandbox controller response: %w", err)
-	}
-	return nil
+	return client.api.Do(ctx, method, endpoint, identity.SessionID, identity.RunID, body, output)
 }
 
 func applicationEndpoint(applicationID, suffix string) (string, error) {
-	applicationID = strings.TrimSpace(applicationID)
-	if !sandboxApplicationIDPattern.MatchString(applicationID) {
-		return "", errors.New("sandbox application_id must contain 1 to 128 letters, digits, dots, underscores, or hyphens")
-	}
-	return "/v1/applications/" + url.PathEscape(applicationID) + suffix, nil
+	return sandboxapi.ApplicationPath(applicationID, suffix)
 }
 
 func validateSandboxPath(value string, optional bool) error {

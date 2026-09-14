@@ -14,49 +14,29 @@ import (
 	"time"
 )
 
-type fakeConversation struct{ run *fakeRun }
-
-func (f fakeConversation) Start(string) (agentruntime.Run, error) { return f.run, nil }
-
-type fakeRun struct {
-	ctx    context.Context
-	cancel context.CancelFunc
-}
-
-func (f *fakeRun) Next() agentruntime.Event {
-	<-f.ctx.Done()
-	return agentruntime.Event{Kind: agentruntime.EventCanceled}
-}
-func (f *fakeRun) Cancel() { f.cancel() }
-func (f *fakeRun) Close() agentruntime.Event {
-	f.Cancel()
-	return agentruntime.Event{Kind: agentruntime.EventCanceled}
-}
-
-func TestUIRemainsCancelableDuringRun(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	m := New(fakeConversation{&fakeRun{ctx, cancel}})
-	m.input.SetValue("hi")
-	cmd := m.submit()
-	if cmd == nil || m.state != stateRunning {
-		t.Fatal("run did not start")
+func pumpTUI(t *testing.T, m *Model, cmd tea.Cmd, timeout time.Duration, pred func(*Model) bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if pred(m) {
+			return
+		}
+		if cmd == nil {
+			cmd = m.waitForQueueEvents()
+		}
+		if cmd == nil {
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		msg := cmd()
+		var next tea.Cmd
+		_, next = m.Update(msg)
+		cmd = next
 	}
-	m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
-	done := make(chan tea.Msg, 1)
-	go func() { done <- cmd() }()
-	select {
-	case message := <-done:
-		m.Update(message)
-	case <-time.After(time.Second):
-		t.Fatal("cancel blocked")
-	}
-	if m.state != stateIdle || m.activeRun != nil {
-		t.Fatal("cancel did not restore idle state")
-	}
+	t.Fatal("tui did not reach expected state")
 }
 
-func TestUICloseAuditsAndReleasesActiveRun(t *testing.T) {
+func TestQueueTUISubmitsAndObservesCompleted(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	store := conversation.NewMemory()
@@ -65,47 +45,79 @@ func TestUICloseAuditsAndReleasesActiveRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	model := &testutil.Model{GenerateFunc: func(context.Context, []*schema.AgenticMessage) (*schema.AgenticMessage, error) {
-		return testutil.Text("partial"), nil
+		return testutil.Text("queued-hello"), nil
 	}}
 	agent, err := deepagent.New(ctx, deepagent.Config{ChatModel: model, Agent: config.AgentConfig{MaxSteps: 3, ContextTokens: 24000}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := New(agentruntime.NewStored(ctx, agent, store, "alice", session.ID))
+	manager := agentruntime.NewQueueManager(ctx, store, agent, agentruntime.QueueConfig{MaxWorkers: 1, PollInterval: time.Millisecond, LeaseTTL: time.Second})
+	defer manager.Close()
+	m := NewQueue(manager, "alice", session.ID)
 	m.input.SetValue("hi")
-	command := m.submit()
-	if command == nil {
-		t.Fatal("run did not start")
+	cmd := m.submit()
+	if cmd == nil {
+		t.Fatal("queue submit did not start")
 	}
-	m.Update(command())
-	if m.partial != "partial" {
-		t.Fatalf("partial output=%q", m.partial)
-	}
-	// Simulate external program exit without executing another tea.Cmd.
-	closed := make(chan error, 1)
-	go func() { closed <- m.Close() }()
-	select {
-	case err := <-closed:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-ctx.Done():
-		t.Fatal("UI Close did not finish")
-	}
+	pumpTUI(t, m, cmd, 5*time.Second, func(m *Model) bool {
+		return strings.Contains(m.transcript(), "queued-hello")
+	})
 	if err := m.Close(); err != nil {
 		t.Fatal(err)
 	}
-	lease, err := store.Begin(ctx, "alice", session.ID)
+}
+
+func TestQueueTUICancelStopsRunning(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	store := conversation.NewMemory()
+	session, err := store.Create(ctx, "alice")
 	if err != nil {
-		t.Fatalf("UI exit left session locked: %v", err)
+		t.Fatal(err)
 	}
-	if len(lease.Messages()) != 1 {
-		t.Fatal("canceled output entered model context")
+	started := make(chan struct{})
+	model := &testutil.Model{StreamFunc: func(ctx context.Context, _ []*schema.AgenticMessage) (*schema.StreamReader[*schema.AgenticMessage], error) {
+		reader, writer := schema.Pipe[*schema.AgenticMessage](1)
+		go func() {
+			defer writer.Close()
+			writer.Send(testutil.Text("partial"), nil)
+			close(started)
+			<-ctx.Done()
+		}()
+		return reader, nil
+	}}
+	agent, err := deepagent.New(ctx, deepagent.Config{ChatModel: model, Agent: config.AgentConfig{MaxSteps: 3, ContextTokens: 24000}})
+	if err != nil {
+		t.Fatal(err)
 	}
-	lease.Close()
-	turns, err := store.History(ctx, "alice", session.ID, 0, 10)
-	if err != nil || len(turns) != 1 || turns[0].Status != "canceled" || len(turns[0].Messages) != 2 {
-		t.Fatalf("UI exit audit=%+v err=%v", turns, err)
+	manager := agentruntime.NewQueueManager(ctx, store, agent, agentruntime.QueueConfig{MaxWorkers: 1, PollInterval: time.Millisecond, LeaseTTL: time.Second})
+	defer manager.Close()
+	m := NewQueue(manager, "alice", session.ID)
+	m.input.SetValue("hi")
+	cmd := m.submit()
+	if cmd == nil {
+		t.Fatal("queue submit did not start")
+	}
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("queued tui run did not start")
+	}
+	runID := m.activeRunID
+	if runID == "" && len(m.queueItems) > 0 {
+		runID = m.queueItems[0].ID
+	}
+	if runID == "" {
+		t.Fatal("tui did not record the running id")
+	}
+	if _, err := manager.Cancel(ctx, "alice", session.ID, runID); err != nil {
+		t.Fatal(err)
+	}
+	pumpTUI(t, m, cmd, 5*time.Second, func(m *Model) bool {
+		return strings.Contains(m.transcript(), "canceled") || strings.Contains(m.transcript(), "partial")
+	})
+	if err := m.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

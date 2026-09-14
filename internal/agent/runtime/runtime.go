@@ -17,7 +17,6 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
-	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
@@ -82,12 +81,6 @@ type Event struct {
 	Err error
 }
 
-// Conversation 持有对话历史，并保证同一时刻最多运行一个请求。
-type Conversation interface {
-	// Start 把用户输入加入历史，并启动一条启用流式输出的运行。
-	Start(input string) (Run, error)
-}
-
 // Run 是一条正在进行的 Agent 运行。
 // Next 串行交付事件，最后交付一次终态；Cancel 和 Close 可与 Next 并发调用。
 // 取消会自动完成持久化与资源释放，无需调用方继续消费事件。
@@ -101,83 +94,21 @@ type Run interface {
 	Close() Event
 }
 
-// Session binds an Eino Agent to a user-scoped Store; it owns no second history cache.
-type Session struct {
-	mu       sync.Mutex                             // 保护 active
-	parent   context.Context                        // 每次 Run 的父 context；取消后后续运行一并停止
-	agent    adk.TypedAgent[*schema.AgenticMessage] // 实际执行推理的 Eino Agent
-	active   bool                                   // 是否已有一次尚未结束的运行
-	store    conversation.Store
-	memory   conversation.MemoryStore
-	username string
-	id       string
-}
-
-// NewStored binds a runtime to a durable, user-scoped conversation.
-func NewStored(parent context.Context, agent adk.TypedAgent[*schema.AgenticMessage], store conversation.Store, username, id string, memory ...conversation.MemoryStore) *Session {
-	session := &Session{parent: parent, agent: agent, store: store, username: username, id: id}
-	if len(memory) > 0 {
-		session.memory = memory[0]
-	}
-	return session
-}
-
-// Start 把用户输入加入历史，并启动一条启用流式输出的 Eino 运行。
-func (session *Session) Start(input string) (Run, error) {
-	return session.StartContext(session.parent, input)
-}
-
-// StartContext only reserves this runtime. I/O and inference happen in Next,
-// so the CLI remains responsive and Cancel also works during history loading.
-func (session *Session) StartContext(parent context.Context, input string) (Run, error) {
-	content := strings.TrimSpace(input)
-	if content == "" {
-		logger.Error("start agent run failed", zap.Error(ErrEmptyInput))
-		return nil, ErrEmptyInput
-	}
-
-	session.mu.Lock()
-	if session.store == nil {
-		session.mu.Unlock()
+// ClaimQueuedRun enqueues input, claims the resulting row, and returns the
+// same Run QueueManager workers construct. Tests and one-shot evals use this
+// so persist always goes through RunLease.
+func ClaimQueuedRun(ctx context.Context, store conversation.QueueStore, agent adk.TypedAgent[*schema.AgenticMessage], user, sessionID, input string, memory ...conversation.MemoryStore) (Run, error) {
+	if store == nil {
 		return nil, ErrStoreUnavailable
 	}
-	if session.agent == nil {
-		session.mu.Unlock()
-		logger.Error("start agent run failed", zap.Error(ErrAgentUnavailable))
-		return nil, ErrAgentUnavailable
+	if _, err := store.Enqueue(ctx, user, sessionID, input, ""); err != nil {
+		return nil, err
 	}
-	if session.active {
-		session.mu.Unlock()
-		logger.Error("start agent run failed", zap.Error(ErrRunInProgress))
-		return nil, ErrRunInProgress
+	lease, err := store.ClaimNext(ctx, "claimed-run", time.Minute)
+	if err != nil {
+		return nil, err
 	}
-	session.active = true
-	session.mu.Unlock()
-	if parent == nil {
-		parent = context.Background()
-	}
-	runContext, cancel := context.WithCancel(parent)
-	runContext = WithInvocationIdentity(runContext, InvocationIdentity{SessionID: session.id, RunID: uuid.NewString()})
-	capture := &stateCapture{}
-	run := &agentRun{
-		context:       context.WithValue(runContext, captureKey{}, capture),
-		cancel:        cancel,
-		input:         content,
-		agent:         session.agent,
-		capture:       capture,
-		done:          make(chan struct{}),
-		session:       session,
-		startedTools:  make(map[string]struct{}),
-		finishedTools: make(map[string]struct{}),
-	}
-	// Cancellation must release the reservation and lease even when the caller
-	// stops reading. Serialize cleanup with any in-flight Next or store load.
-	context.AfterFunc(run.context, func() {
-		run.nextMu.Lock()
-		defer run.nextMu.Unlock()
-		run.finalize(EventCanceled, nil)
-	})
-	return run, nil
+	return NewClaimed(ctx, agent, lease, memory...), nil
 }
 
 // NewClaimed constructs a run from a lease already claimed by QueueManager.
@@ -190,12 +121,13 @@ func NewClaimed(parent context.Context, agent adk.TypedAgent[*schema.AgenticMess
 	if lease == nil {
 		cancel := func() {}
 		return &agentRun{
-			agent:    agent,
-			context:  parent,
-			cancel:   cancel,
-			done:     closedRunChannel(),
-			finished: true,
-			terminal: Event{Kind: EventFailed, Err: ErrStoreUnavailable},
+			agent:     agent,
+			context:   parent,
+			cancel:    cancel,
+			done:      closedRunChannel(),
+			finished:  true,
+			projector: newEventProjector(),
+			terminal:  Event{Kind: EventFailed, Err: ErrStoreUnavailable},
 		}
 	}
 	record := lease.Run()
@@ -203,16 +135,15 @@ func NewClaimed(parent context.Context, agent adk.TypedAgent[*schema.AgenticMess
 	runContext = WithInvocationIdentity(runContext, InvocationIdentity{SessionID: record.SessionID, RunID: record.ID})
 	capture := &stateCapture{}
 	run := &agentRun{
-		context:       context.WithValue(runContext, captureKey{}, capture),
-		cancel:        cancel,
-		input:         record.Input,
-		agent:         agent,
-		queueLease:    lease,
-		record:        record,
-		capture:       capture,
-		done:          make(chan struct{}),
-		startedTools:  make(map[string]struct{}),
-		finishedTools: make(map[string]struct{}),
+		context:    context.WithValue(runContext, captureKey{}, capture),
+		cancel:     cancel,
+		input:      record.Input,
+		agent:      agent,
+		queueLease: lease,
+		record:     record,
+		capture:    capture,
+		done:       make(chan struct{}),
+		projector:  newEventProjector(),
 	}
 	if len(memory) > 0 {
 		run.memory = memory[0]
@@ -231,20 +162,12 @@ func closedRunChannel() chan struct{} {
 	return done
 }
 
-// release releases the local run reservation after persistence has finished.
-func (session *Session) release() {
-	session.mu.Lock()
-	session.active = false
-	session.mu.Unlock()
-}
-
 // agentRun 把 Eino 迭代器与消息流投影为语义事件，并实现 Run。
 type agentRun struct {
 	input         string
 	inputMessages []*schema.AgenticMessage
 	outputs       []*schema.AgenticMessage
 	chunks        []*schema.AgenticMessage
-	lease         conversation.Lease
 	queueLease    conversation.RunLease
 	record        conversation.RunRecord
 	agent         adk.TypedAgent[*schema.AgenticMessage]
@@ -254,25 +177,13 @@ type agentRun struct {
 	cancel        context.CancelFunc                                               // 取消本次运行
 	iterator      *adk.AsyncIterator[*adk.TypedAgentEvent[*schema.AgenticMessage]] // Eino 运行事件迭代器
 	messageStream *schema.StreamReader[*schema.AgenticMessage]                     // 当前正在消费的流式消息；非流式事件为 nil
-	session       *Session                                                         // 所属会话，用于提交或丢弃历史
-	pending       []Event                                                          // 已投影但尚未被 Next 取出的事件
-	text          strings.Builder                                                  // 本次运行累计的完整助手文本
-	startedTools  map[string]struct{}                                              // 已发出 EventToolStarted 的 CallID
-	finishedTools map[string]struct{}                                              // 已发出 EventToolFinished 的 CallID
-	finished      bool                                                             // 是否已完成持久化与资源释放
-	terminal      Event                                                            // finished 后不可变，供 Close 重复读取
-	terminalRead  bool                                                             // Next 是否已交付终态
-	done          chan struct{}                                                    // terminal 就绪、资源释放后关闭
-	streamLog     logger.StreamChunkLog                                            // 当前消息流的 chunk，结束后再聚合打印
-	toolDraft     toolCallDraft                                                    // 正在聚合的流式 tool call
+	projector     *EventProjector
+	finished      bool                  // 是否已完成持久化与资源释放
+	terminal      Event                 // finished 后不可变，供 Close 重复读取
+	terminalRead  bool                  // Next 是否已交付终态
+	done          chan struct{}         // terminal 就绪、资源释放后关闭
+	streamLog     logger.StreamChunkLog // 当前消息流的 chunk，结束后再聚合打印
 	memory        conversation.MemoryStore
-}
-
-// toolCallDraft 在内存中拼接流式 FunctionToolCall 的 name、call_id 与 arguments。
-type toolCallDraft struct {
-	name      string
-	callID    string
-	arguments strings.Builder
 }
 
 // Cancel requests cancellation; runtime owns cleanup independently of Next.
@@ -298,14 +209,14 @@ func (run *agentRun) Next() Event {
 
 // next 在持锁前提下消费 Eino 输出并返回下一条语义事件。
 func (run *agentRun) next() Event {
-	if event, ok := run.popPending(); ok {
+	if event, ok := run.projector.popPending(); ok {
 		return event
 	}
 	if run.finished {
 		return run.readTerminal()
 	}
 	for {
-		if event, ok := run.popPending(); ok {
+		if event, ok := run.projector.popPending(); ok {
 			return event
 		}
 		if run.context.Err() != nil {
@@ -339,7 +250,7 @@ func (run *agentRun) next() Event {
 			continue
 		}
 		logger.DebugEinoEvent(event)
-		if projected, ok := compressionEvent(event); ok {
+		if projected, ok := run.projector.ProjectCompression(event); ok {
 			return projected
 		}
 		if event.Err != nil {
@@ -360,8 +271,8 @@ func (run *agentRun) next() Event {
 		if output.Message != nil {
 			logger.DebugAgenticMessage(output.Message)
 			run.outputs = append(run.outputs, output.Message)
-			run.projectMessage(output.Message)
-			run.flushToolDraft()
+			run.projector.ProjectMessage(output.Message)
+			run.projector.flushToolDraft()
 		}
 	}
 }
@@ -395,142 +306,15 @@ func (run *agentRun) receiveMessageChunk() *Event {
 	if message != nil {
 		run.chunks = append(run.chunks, message)
 		run.streamLog.Append(message)
-		run.projectMessage(message)
+		run.projector.ProjectMessage(message)
 	}
 	return nil
-}
-
-// projectMessage 把 AgenticMessage 内容块转成文本、reasoning 与 Tool 生命周期事件。
-func (run *agentRun) projectMessage(message *schema.AgenticMessage) {
-	for _, block := range message.ContentBlocks {
-		if block == nil {
-			continue
-		}
-		if block.Reasoning != nil && block.Reasoning.Text != "" {
-			run.pending = append(run.pending, Event{Kind: EventReasoningDelta, Text: block.Reasoning.Text})
-		}
-		if block.AssistantGenText != nil && block.AssistantGenText.Text != "" {
-			text := block.AssistantGenText.Text
-			run.text.WriteString(text)
-			run.pending = append(run.pending, Event{Kind: EventTextDelta, Text: text})
-		}
-		if block.FunctionToolCall != nil {
-			run.projectToolCall(block.FunctionToolCall)
-		}
-		if block.FunctionToolResult != nil {
-			run.flushToolDraft()
-			run.projectToolResult(block.FunctionToolResult)
-		}
-	}
-}
-
-// projectToolCall 把流式 tool call chunk 拼进草稿，完整参数在 flush 时发出。
-func (run *agentRun) projectToolCall(call *schema.FunctionToolCall) {
-	if call == nil {
-		return
-	}
-	if call.CallID != "" && run.toolDraft.callID != "" && call.CallID != run.toolDraft.callID {
-		run.flushToolDraft()
-	}
-	if call.CallID != "" {
-		run.toolDraft.callID = call.CallID
-	}
-	if call.Name != "" {
-		run.toolDraft.name = call.Name
-	}
-	if call.Arguments != "" {
-		run.toolDraft.arguments.WriteString(call.Arguments)
-	}
-}
-
-// flushToolDraft 把已聚合的 tool call 作为一条 EventToolStarted 发出。
-func (run *agentRun) flushToolDraft() {
-	if run.toolDraft.name == "" && run.toolDraft.callID == "" && run.toolDraft.arguments.Len() == 0 {
-		return
-	}
-	name := run.toolDraft.name
-	callID := run.toolDraft.callID
-	arguments := run.toolDraft.arguments.String()
-	run.toolDraft = toolCallDraft{}
-	run.emitToolEvent(EventToolStarted, name, callID, arguments, "")
-}
-
-// projectToolResult 把完整 tool result 作为一条 EventToolFinished 发出。
-func (run *agentRun) projectToolResult(result *schema.FunctionToolResult) {
-	if result == nil {
-		return
-	}
-	run.emitToolEvent(EventToolFinished, result.Name, result.CallID, "", toolResultText(result))
-}
-
-// emitToolEvent 按 CallID 去重后追加一条工具生命周期事件。
-func (run *agentRun) emitToolEvent(kind EventKind, name, callID, arguments, result string) {
-	if callID == "" && name == "" {
-		return
-	}
-	key := callID
-	if key == "" {
-		// Some providers omit CallID. Keep each completed call visible instead
-		// of collapsing separate invocations of the same named tool; the
-		// sequence suffix is local to this run and only serves de-duplication.
-		key = fmt.Sprintf("%s#%d", name, len(run.startedTools)+len(run.finishedTools)+1)
-	}
-	seen := run.startedTools
-	if kind == EventToolFinished {
-		seen = run.finishedTools
-	}
-	if _, ok := seen[key]; ok {
-		return
-	}
-	seen[key] = struct{}{}
-	if name == "" {
-		name = key
-	}
-	run.pending = append(run.pending, Event{
-		Kind:      kind,
-		Tool:      name,
-		CallID:    callID,
-		Arguments: arguments,
-		Result:    result,
-	})
-}
-
-// toolResultText 提取 FunctionToolResult 中可供展示的完整结果文本。
-func toolResultText(result *schema.FunctionToolResult) string {
-	if result == nil {
-		return ""
-	}
-	parts := make([]string, 0, len(result.Content))
-	for _, block := range result.Content {
-		if block == nil {
-			continue
-		}
-		if block.Text != nil && block.Text.Text != "" {
-			parts = append(parts, block.Text.Text)
-			continue
-		}
-		if text := strings.TrimSpace(block.String()); text != "" {
-			parts = append(parts, text)
-		}
-	}
-	return strings.Join(parts, "\n")
-}
-
-// popPending 取出最早一条已投影、尚未交付的事件。
-func (run *agentRun) popPending() (Event, bool) {
-	if len(run.pending) == 0 {
-		return Event{}, false
-	}
-	event := run.pending[0]
-	run.pending[0] = Event{}
-	run.pending = run.pending[1:]
-	return event, true
 }
 
 // finish 释放本次运行资源，先交付尚未发出的 tool 事件，再返回终态事件。
 func (run *agentRun) finish(kind EventKind, err error) Event {
 	run.finalize(kind, err)
-	if event, ok := run.popPending(); ok {
+	if event, ok := run.projector.popPending(); ok {
 		return event
 	}
 	return run.readTerminal()
@@ -560,7 +344,7 @@ func (run *agentRun) finalize(kind EventKind, err error) {
 		run.chunks = nil
 	}
 	run.closeMessageStream()
-	text := run.text.String()
+	text := run.projector.Text()
 	if run.queueLease != nil && run.inputMessages == nil {
 		run.inputMessages = append(slices.Clone(run.queueLease.Messages()), schema.UserAgenticMessage(run.input))
 	}
@@ -569,18 +353,6 @@ func (run *agentRun) finalize(kind EventKind, err error) {
 		next = run.capture.get()
 		if next == nil {
 			next = append(slices.Clone(run.inputMessages), run.outputs...)
-		}
-	}
-	if run.lease != nil {
-		// Canceled requests still get an audit record, using a bounded cleanup context.
-		commitCtx, cancel := context.WithTimeout(context.WithoutCancel(run.context), 10*time.Second)
-		commitErr := conversation.CommitRun(commitCtx, run.lease, next, string(kind), run.input, run.outputs)
-		cancel()
-		run.lease.Close()
-		if commitErr != nil {
-			kind = EventFailed
-			err = fmt.Errorf("persist conversation: %w", commitErr)
-			logger.Error("persist conversation failed", zap.Error(err))
 		}
 	}
 	if run.queueLease != nil {
@@ -631,9 +403,6 @@ func (run *agentRun) finalize(kind EventKind, err error) {
 		}
 		run.queueLease.Close()
 	}
-	if run.session != nil {
-		run.session.release()
-	}
 	run.cancel()
 	run.terminal = Event{Kind: kind, Text: text, Err: err}
 	run.finished = true
@@ -641,44 +410,22 @@ func (run *agentRun) finalize(kind EventKind, err error) {
 }
 
 func (run *agentRun) initialize() error {
-	if run.queueLease != nil {
-		run.inputMessages = append(slices.Clone(run.queueLease.Messages()), schema.UserAgenticMessage(run.input))
-		memoryContext, recallErr := recallMemoryPrompt(run.context, run.memory, run.record.Username)
-		if recallErr != nil {
-			return recallErr
-		}
-		modelInput := make([]*schema.AgenticMessage, 0, len(run.inputMessages)+1)
-		if memoryContext != "" {
-			modelInput = append(modelInput, schema.SystemAgenticMessage(memoryContext))
-		}
-		modelInput = append(modelInput, DropPersistedSystemMessages(run.inputMessages)...)
-		if run.agent == nil {
-			return ErrAgentUnavailable
-		}
-		run.iterator = run.agent.Run(run.context, &adk.TypedAgentInput[*schema.AgenticMessage]{Messages: modelInput, EnableStreaming: true})
-		if run.iterator == nil {
-			return ErrAgentUnavailable
-		}
-		return nil
+	if run.queueLease == nil {
+		return ErrStoreUnavailable
 	}
-	lease, err := run.session.store.Begin(run.context, run.session.username, run.session.id)
-	if err != nil {
-		return err
-	}
-	run.lease = lease
-	run.inputMessages = append(slices.Clone(lease.Messages()), schema.UserAgenticMessage(run.input))
-	memoryContext, recallErr := recallMemoryPrompt(run.context, run.session.memory, run.session.username)
+	run.inputMessages = append(slices.Clone(run.queueLease.Messages()), schema.UserAgenticMessage(run.input))
+	memoryContext, recallErr := recallMemoryPrompt(run.context, run.memory, run.record.Username)
 	if recallErr != nil {
-		lease.Close()
-		run.lease = nil
 		return recallErr
 	}
-	// Deep Agent injects the current system instruction on every Run.
-	modelInput := make([]*schema.AgenticMessage, 0, len(run.inputMessages))
+	modelInput := make([]*schema.AgenticMessage, 0, len(run.inputMessages)+1)
 	if memoryContext != "" {
 		modelInput = append(modelInput, schema.SystemAgenticMessage(memoryContext))
 	}
 	modelInput = append(modelInput, DropPersistedSystemMessages(run.inputMessages)...)
+	if run.agent == nil {
+		return ErrAgentUnavailable
+	}
 	run.iterator = run.agent.Run(run.context, &adk.TypedAgentInput[*schema.AgenticMessage]{Messages: modelInput, EnableStreaming: true})
 	if run.iterator == nil {
 		return ErrAgentUnavailable
@@ -738,7 +485,7 @@ func (run *agentRun) decorate(event Event) Event {
 
 // closeMessageStream 关闭当前消息流，发出已聚合的 tool call，并打印完整 AgenticMessage。
 func (run *agentRun) closeMessageStream() {
-	run.flushToolDraft()
+	run.projector.flushToolDraft()
 	run.streamLog.Flush()
 	if run.messageStream == nil {
 		return
@@ -747,8 +494,4 @@ func (run *agentRun) closeMessageStream() {
 	run.messageStream = nil
 }
 
-// 编译期断言 Session 与 agentRun 分别实现 Conversation 与 Run。
-var (
-	_ Conversation = (*Session)(nil)
-	_ Run          = (*agentRun)(nil)
-)
+var _ Run = (*agentRun)(nil)

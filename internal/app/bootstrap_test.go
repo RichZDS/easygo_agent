@@ -29,5 +29,8 @@ func TestAssembleOwnsConfiguredMemoryStore(t *testing.T) {
 	if app.memoryStore == nil {
 		t.Fatal("assembled application dropped long-term memory store")
 	}
+	if any(app.memoryStore) == any(app.store) {
+		t.Fatal("in-memory wiring aliased the queue store as the memory store")
+	}
 	app.close()
 }

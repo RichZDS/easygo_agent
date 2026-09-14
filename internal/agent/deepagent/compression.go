@@ -2,7 +2,6 @@ package deepagent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -82,48 +81,17 @@ func newCompression(ctx context.Context, summary model.AgenticModel, threshold i
 	return &compressionBudget{TypedChatModelAgentMiddleware: middleware, limit: threshold}, nil
 }
 
-// countInputTokens uses Eino's supported TokenCounter extension. Serialized
-// UTF-8 bytes provide a deliberately conservative text/tool estimate across
-// languages, with provider-reported usage as an additional lower bound. This
-// template accepts text only; multimodal tools need a provider-aware counter.
+// countInputTokens is the summarization TokenCounter. Serialized size comes
+// from Measure; provider-reported usage is an additional lower bound.
 func countInputTokens(_ context.Context, input *summarization.TypedTokenCounterInput[*schema.AgenticMessage]) (int, error) {
-	total := 256 // Reserve protocol framing overhead.
-	usage := 0
-	for _, message := range input.Messages {
-		data, err := json.Marshal(message)
-		if err != nil {
-			return 0, err
-		}
-		total += len(data)
-		usage += len(data)
-		if message != nil && message.ResponseMeta != nil && message.ResponseMeta.TokenUsage != nil && message.ResponseMeta.TokenUsage.TotalTokens > 0 {
-			usage = message.ResponseMeta.TokenUsage.TotalTokens
-		}
+	if input == nil {
+		return tokenFraming, nil
 	}
-	for _, tool := range input.Tools {
-		if tool == nil {
-			continue
-		}
-		data, err := json.Marshal(tool)
-		if err != nil {
-			return 0, err
-		}
-		total += len(data)
-		usage += len(data)
-		if tool.ParamsOneOf != nil {
-			parameters, err := tool.ParamsOneOf.ToJSONSchema()
-			if err != nil {
-				return 0, err
-			}
-			data, err = json.Marshal(parameters)
-			if err != nil {
-				return 0, err
-			}
-			total += len(data)
-			usage += len(data)
-		}
+	measured, err := Measure(input.Messages, input.Tools)
+	if err != nil {
+		return 0, err
 	}
-	return max(total, usage), nil
+	return max(measured.Total, providerUsage(input.Messages)), nil
 }
 
 type compressionBudget struct {

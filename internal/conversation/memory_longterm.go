@@ -3,12 +3,32 @@ package conversation
 import (
 	"context"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 )
 
-func (m *Memory) Recall(ctx context.Context, user string, limit int) ([]LongTermMemory, error) {
+// MemoryLongTerm is the in-memory MemoryStore adapter. It is a different
+// object from the conversation/queue store so recall never shares that lock.
+type MemoryLongTerm struct {
+	mu          sync.Mutex
+	longTerms   map[string]map[string]LongTermMemory
+	checkpoints map[string]time.Time
+	memoryJobs  map[string]bool
+}
+
+func NewMemoryLongTerm() *MemoryLongTerm {
+	return &MemoryLongTerm{
+		longTerms:   map[string]map[string]LongTermMemory{},
+		checkpoints: map[string]time.Time{},
+		memoryJobs:  map[string]bool{},
+	}
+}
+
+func (m *MemoryLongTerm) Close() {}
+
+func (m *MemoryLongTerm) Recall(ctx context.Context, user string, limit int) ([]LongTermMemory, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -38,7 +58,7 @@ func (m *Memory) Recall(ctx context.Context, user string, limit int) ([]LongTerm
 	return ranked, nil
 }
 
-func (m *Memory) ActiveProfile(ctx context.Context, user string) ([]LongTermMemory, error) {
+func (m *MemoryLongTerm) ActiveProfile(ctx context.Context, user string) ([]LongTermMemory, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -57,7 +77,7 @@ func (m *Memory) ActiveProfile(ctx context.Context, user string) ([]LongTermMemo
 	return result, nil
 }
 
-func (m *Memory) ReplaceProfile(ctx context.Context, user string, drafts []MemoryDraft) ([]LongTermMemory, error) {
+func (m *MemoryLongTerm) ReplaceProfile(ctx context.Context, user string, drafts []MemoryDraft) ([]LongTermMemory, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -119,66 +139,7 @@ func (m *Memory) ReplaceProfile(ctx context.Context, user string, drafts []Memor
 	return result, nil
 }
 
-func (m *Memory) Transcript(ctx context.Context, user string, after, through time.Time) ([]TranscriptTurn, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if err := ValidateUser(user); err != nil {
-		return nil, err
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	result := []TranscriptTurn{}
-	for id, entry := range m.entries {
-		if entry.session.Username != user {
-			continue
-		}
-		for _, turn := range entry.turns {
-			if turn.Status != "completed" || !turn.CreatedAt.After(after) || turn.CreatedAt.After(through) {
-				continue
-			}
-			copy := turn
-			var err error
-			copy.Messages, err = Clone(turn.Messages)
-			if err != nil {
-				return nil, err
-			}
-			result = append(result, TranscriptTurn{SessionID: id, Turn: copy})
-		}
-	}
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].CreatedAt.Equal(result[j].CreatedAt) {
-			return result[i].ID < result[j].ID
-		}
-		return result[i].CreatedAt.Before(result[j].CreatedAt)
-	})
-	return result, nil
-}
-
-func (m *Memory) UsersWithTranscript(ctx context.Context, after, through time.Time) ([]string, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	users := map[string]struct{}{}
-	for _, entry := range m.entries {
-		for _, turn := range entry.turns {
-			if turn.Status == "completed" && turn.CreatedAt.After(after) && !turn.CreatedAt.After(through) {
-				users[entry.session.Username] = struct{}{}
-				break
-			}
-		}
-	}
-	result := make([]string, 0, len(users))
-	for user := range users {
-		result = append(result, user)
-	}
-	sort.Strings(result)
-	return result, nil
-}
-
-func (m *Memory) MemoryCheckpoint(ctx context.Context, user string) (time.Time, bool, error) {
+func (m *MemoryLongTerm) MemoryCheckpoint(ctx context.Context, user string) (time.Time, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return time.Time{}, false, err
 	}
@@ -188,7 +149,7 @@ func (m *Memory) MemoryCheckpoint(ctx context.Context, user string) (time.Time, 
 	return value, ok, nil
 }
 
-func (m *Memory) SetMemoryCheckpoint(ctx context.Context, user string, through time.Time) error {
+func (m *MemoryLongTerm) SetMemoryCheckpoint(ctx context.Context, user string, through time.Time) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -201,7 +162,7 @@ func (m *Memory) SetMemoryCheckpoint(ctx context.Context, user string, through t
 	return nil
 }
 
-func (m *Memory) TryAcquireMemoryJob(ctx context.Context, user string) (MemoryJobLease, bool, error) {
+func (m *MemoryLongTerm) TryAcquireMemoryJob(ctx context.Context, user string) (MemoryJobLease, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
 	}
@@ -214,15 +175,15 @@ func (m *Memory) TryAcquireMemoryJob(ctx context.Context, user string) (MemoryJo
 		return nil, false, nil
 	}
 	m.memoryJobs[user] = true
-	return &memoryJobLease{store: m, user: user}, true, nil
+	return &memoryLongTermJobLease{store: m, user: user}, true, nil
 }
 
-type memoryJobLease struct {
-	store *Memory
+type memoryLongTermJobLease struct {
+	store *MemoryLongTerm
 	user  string
 }
 
-func (l *memoryJobLease) Close() {
+func (l *memoryLongTermJobLease) Close() {
 	if l.store == nil {
 		return
 	}
@@ -231,3 +192,5 @@ func (l *memoryJobLease) Close() {
 	l.store.mu.Unlock()
 	l.store = nil
 }
+
+var _ MemoryStore = (*MemoryLongTerm)(nil)

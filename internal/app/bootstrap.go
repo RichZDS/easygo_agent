@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -31,7 +30,6 @@ type application struct {
 	cfg          config.Config
 	store        conversation.QueueStore
 	memoryStore  conversation.MemoryStore
-	memoryDB     *conversation.MemoryPostgres
 	summaryModel model.AgenticModel
 	agent        adk.TypedAgent[*schema.AgenticMessage]
 	queue        agentruntime.QueueManager
@@ -74,11 +72,7 @@ func (app *application) openMemory(ctx context.Context) error {
 		return nil
 	}
 	if app.cfg.Database.Driver == "memory" {
-		memoryStore, ok := app.store.(conversation.MemoryStore)
-		if !ok {
-			return errors.New("in-memory conversation store does not support long-term memory")
-		}
-		app.memoryStore = memoryStore
+		app.memoryStore = conversation.NewMemoryLongTerm()
 		return nil
 	}
 	connectCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -87,7 +81,6 @@ func (app *application) openMemory(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("initialize dedicated memory PostgreSQL: %w", err)
 	}
-	app.memoryDB = memoryDB
 	app.memoryStore = memoryDB
 	return nil
 }
@@ -183,8 +176,8 @@ func (app *application) close() {
 	if app.queue != nil {
 		_ = app.queue.Close()
 	}
-	if app.memoryDB != nil {
-		app.memoryDB.Close()
+	if app.memoryStore != nil {
+		app.memoryStore.Close()
 	}
 	if app.store != nil {
 		app.store.Close()

@@ -24,12 +24,9 @@ type memoryEntry struct {
 	busy     bool
 }
 type Memory struct {
-	mu          sync.Mutex
-	entries     map[string]*memoryEntry
-	longTerms   map[string]map[string]LongTermMemory
-	checkpoints map[string]time.Time
-	memoryJobs  map[string]bool
-	maxPending  int
+	mu         sync.Mutex
+	entries    map[string]*memoryEntry
+	maxPending int
 }
 
 func NewMemory() *Memory { return NewMemoryWithQueueLimit(DefaultMaxPendingRuns) }
@@ -39,11 +36,8 @@ func NewMemoryWithQueueLimit(maxPending int) *Memory {
 		maxPending = DefaultMaxPendingRuns
 	}
 	return &Memory{
-		entries:     map[string]*memoryEntry{},
-		longTerms:   map[string]map[string]LongTermMemory{},
-		checkpoints: map[string]time.Time{},
-		memoryJobs:  map[string]bool{},
-		maxPending:  maxPending,
+		entries:    map[string]*memoryEntry{},
+		maxPending: maxPending,
 	}
 }
 
@@ -574,5 +568,4 @@ func (l *memoryRunLease) Close() {
 }
 
 var _ QueueStore = (*Memory)(nil)
-var _ MemoryStore = (*Memory)(nil)
 var _ RunLease = (*memoryRunLease)(nil)

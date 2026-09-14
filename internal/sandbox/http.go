@@ -9,18 +9,19 @@ import (
 	"log"
 	"mime"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
+
+	"easygo-agent/internal/sandboxapi"
 )
 
 const (
-	sessionHeader = "X-EasyGo-Session-ID"
-	runHeader     = "X-EasyGo-Run-ID"
+	sessionHeader = sandboxapi.SessionHeader
+	runHeader     = sandboxapi.RunHeader
 	maxHTTPBody   = int64(8 << 20)
 )
 
-var applicationIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+var applicationIDPattern = sandboxapi.ApplicationIDPattern
 
 type HTTPHandler struct {
 	token   string
@@ -61,11 +62,11 @@ func (handler *HTTPHandler) ServeHTTP(response http.ResponseWriter, request *htt
 		handler.writeError(response, err, http.StatusBadRequest)
 		return
 	}
-	if request.URL.Path == "/v1/applications" {
+	if request.URL.Path == sandboxapi.ApplicationsPath {
 		handler.handleCollection(response, request, identity)
 		return
 	}
-	prefix := "/v1/applications/"
+	prefix := sandboxapi.ApplicationsPath + "/"
 	if !strings.HasPrefix(request.URL.Path, prefix) {
 		handler.writeError(response, notFoundError(), http.StatusNotFound)
 		return

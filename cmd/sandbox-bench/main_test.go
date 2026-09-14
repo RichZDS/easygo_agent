@@ -9,6 +9,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"easygo-agent/internal/sandbox"
+	"easygo-agent/internal/sandboxapi"
 )
 
 func TestRunReportsAllLifecyclePathsAndAlwaysDestroysApplication(t *testing.T) {
@@ -97,6 +100,27 @@ func TestRunReportsAllLifecyclePathsAndAlwaysDestroysApplication(t *testing.T) {
 	}
 }
 
+func TestSharedClientTalksToRealHandler(t *testing.T) {
+	token := "test-sandbox-controller-token-0123456789abcdef"
+	handler, err := sandbox.NewInProcessHandler(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	client := &controllerClient{api: sandboxapi.Client{BaseURL: server.URL, Token: token, HTTP: server.Client()}}
+	var envelope applicationEnvelope
+	if err := client.request(context.Background(), http.MethodPost, sandboxapi.ApplicationsPath, "session-bench", "run-bench", map[string]any{}, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.applicationID() == "" {
+		t.Fatalf("apply omitted id: %+v", envelope)
+	}
+	if err := client.request(context.Background(), http.MethodPost, sandboxapi.ApplicationsPath, "", "run-bench", map[string]any{}, &envelope); err == nil {
+		t.Fatal("missing identity was accepted")
+	}
+}
+
 func TestBenchmarkLifecycleRecordsFallbackCleanupAfterFailure(t *testing.T) {
 	var destroyed atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -116,7 +140,7 @@ func TestBenchmarkLifecycleRecordsFallbackCleanupAfterFailure(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := &controllerClient{baseURL: server.URL, token: "test-token", http: server.Client(), engine: &fakeBenchmarkObserver{}}
+	client := &controllerClient{api: sandboxapi.Client{BaseURL: server.URL, Token: "test-token", HTTP: server.Client()}, engine: &fakeBenchmarkObserver{}}
 	samples := client.benchmarkLifecycle(context.Background(), 1, 0, []string{"noop"})
 	if destroyed.Load() != 1 {
 		t.Fatalf("destroyed=%d", destroyed.Load())

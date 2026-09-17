@@ -1,4 +1,5 @@
-// Package agent 用一层浅封装构造 Eino Deep Agent。
+// Package deepagent composes isolated Eino loops with context budgeting,
+// recoverable tools and provider observation behind one agent interface.
 package deepagent
 
 import (
@@ -9,6 +10,7 @@ import (
 	"sync"
 
 	agentruntime "easygo-agent/internal/agent/runtime"
+	"easygo-agent/internal/agent/telemetry"
 	"easygo-agent/internal/config"
 	"easygo-agent/internal/logger"
 	"easygo-agent/internal/prompt"
@@ -62,7 +64,7 @@ func New(ctx context.Context, cfg Config) (adk.TypedAgent[*schema.AgenticMessage
 	tools := append([]tool.BaseTool(nil), cfg.Tools...)
 	agentConfig := cfg.Agent
 	build := func() (adk.TypedAgent[*schema.AgenticMessage], error) {
-		compression, err := newCompression(ctx, summaryModel, threshold)
+		compression, err := newCompression(ctx, telemetry.Model(summaryModel, "context-compressor"), threshold)
 		if err != nil {
 			return nil, err
 		}
@@ -75,7 +77,7 @@ func New(ctx context.Context, cfg Config) (adk.TypedAgent[*schema.AgenticMessage
 			Instruction:            instruction,
 			WithoutWriteTodos:      true,
 			WithoutGeneralSubAgent: true,
-			ChatModel:              cfg.ChatModel,
+			ChatModel:              telemetry.Model(cfg.ChatModel, "main"),
 			ToolsConfig: adk.ToolsConfig{
 				ToolsNodeConfig: compose.ToolsNodeConfig{
 					Tools:               tools,
@@ -115,8 +117,6 @@ func (a *isolatedAgent) Description(ctx context.Context) string {
 }
 
 func (a *isolatedAgent) Run(ctx context.Context, input *adk.TypedAgentInput[*schema.AgenticMessage], opts ...adk.AgentRunOption) *adk.AsyncIterator[*adk.TypedAgentEvent[*schema.AgenticMessage]] {
-	iterator, generator := adk.NewAsyncIteratorPair[*adk.TypedAgentEvent[*schema.AgenticMessage]]()
-
 	// Build is normally cheap and independent, but serialize only construction
 	// to protect adapters that lazily initialize shared provider clients.  The
 	// returned Eino iterator runs without this lock, so sessions remain parallel.
@@ -124,6 +124,7 @@ func (a *isolatedAgent) Run(ctx context.Context, input *adk.TypedAgentInput[*sch
 	agent, err := a.build()
 	a.mu.Unlock()
 	if err != nil {
+		iterator, generator := adk.NewAsyncIteratorPair[*adk.TypedAgentEvent[*schema.AgenticMessage]]()
 		go func() {
 			generator.Send(&adk.TypedAgentEvent[*schema.AgenticMessage]{Err: err})
 			generator.Close()

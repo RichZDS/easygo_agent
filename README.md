@@ -43,13 +43,13 @@ flowchart TD
 
 失败或取消时，保存已接收的完整/部分原生消息供历史展示；下一轮上下文保留之前的上下文与本轮用户输入，不包含失败轮次的不完整工具链。数据库写入失败会返回 `failed`，不会报告完成。进程被强制终止时，未提交轮次可能丢失；当前不提供中途 checkpoint 恢复或工具副作用的 exactly-once 保证。
 
-PostgreSQL 每轮加载一次上下文，轮次期间由 Eino 内存 state 管理循环，结束时提交一次。队列 claim 使用短事务、`FOR UPDATE SKIP LOCKED`、事务级 advisory lock 和“每会话一条 running”唯一索引共同保证跨进程互斥；claim token 为 heartbeat 与最终提交提供 fencing。`RunLease` 在推理期间占用一条专用连接，但不保持长事务；`max_conns` 因此也约束可并行持有的运行数量。旧的直接运行 seam 继续使用 session advisory lock。
+PostgreSQL 每轮加载一次上下文，轮次期间由 Eino 内存 state 管理循环，结束时提交一次。队列 claim 使用短事务、`FOR UPDATE SKIP LOCKED`、事务级 advisory lock 和“每会话一条 running”唯一索引共同保证跨进程互斥；claim token 为 heartbeat 与最终提交提供 fencing。`RunLease` 在推理期间占用一条专用连接，但不保持长事务；`max_conns` 因此也约束可并行持有的运行数量。`Store.Begin` 仍供直接历史操作使用，采用 session advisory lock。
 
 `database.driver: memory` 使用进程内会话与长期记忆 Store，适合开发和测试；退出即丢失数据。PostgreSQL 模式下，`database.dsn` 只保存会话历史，`memory.dsn` 是**必须独立**的长期记忆数据库。
 
 ## 用户级长期记忆
 
-Gateway 与 TUI 都在同一 `Stored` Runtime 中，在每次模型调用前从独立记忆库检索最多 5 条 active 记忆，并只把这些结构化参考数据注入 Agent。被实际选中的记录会递增 `call_count`。排序严格为 `0.5 * recency + 0.5 * normalized_log_call_count`：recency 使用 `last_seen_at` 的 90 天半衰期。记忆内容不能覆盖系统/开发者策略或当前用户请求。
+Gateway 与 TUI 都使用同一 QueueManager / Run，在每轮运行初始化时从独立记忆库检索最多 5 条 active 记忆，并只把这些结构化参考数据注入 Agent。被实际选中的记录会递增 `call_count`。排序严格为 `0.5 * recency + 0.5 * normalized_log_call_count`：recency 使用 `last_seen_at` 的 90 天半衰期。记忆内容不能覆盖系统/开发者策略或当前用户请求。
 
 长期记忆库的 `user_long_term_memories` 包含类别、内容、标签、重要性、置信度、来源会话/轮次、调用次数、首次/最后观测时间、最后调用时间、过期时间、创建/更新时间、归档时间、状态、版本及 1–5 的 profile slot。部分唯一索引从数据库层保证每个用户最多五条 active 画像；被替换的记录会归档而非静默删除。
 
@@ -67,7 +67,7 @@ Gateway 与 TUI 都在同一 `Stored` Runtime 中，在每次模型调用前从�
 
 ## 启动
 
-需要 Go 1.25+、支持 Tool Calling 的 OpenAI-compatible 模型。默认使用 PostgreSQL；所有命令在 `backend` 目录运行。
+需要 Go 1.25+、支持 Tool Calling 的 OpenAI-compatible 模型。默认使用 PostgreSQL；所有命令在仓库根目录（包含 `go.mod`）运行。
 
 ```powershell
 Copy-Item .env.example .env
@@ -252,6 +252,8 @@ SSE 的每个事件包含 `event: <kind>` 和 JSON `data`，首先是 `queued` �
 - `cmd/eval/`：记忆 / 迷宫 / skill 评测入口，报告写到 `doc/eval/`。
 - `internal/agent/deepagent`：构造 Eino 主 Agent、摘要 Agent、上下文预算中间件。
 - `internal/agent/runtime`：QueueManager、已 claim run 的执行、流合并、运行生命周期和展示事件。
+- `internal/agent/telemetry`：按运行关联阶段日志、模型用量与耗时；不保存消息正文。
+- `internal/logger`：通用 Zap JSON 文件输出和日志级别，不依赖 Eino。
 - `internal/conversation`：PostgreSQL 与内存存储、`agent_runs` 队列和租约提交。
 - `internal/usermemory`：独立记忆库、时间/调用次数 50/50 排名、03:00 consolidation Agent 和 `storage/longterm` 物化。
 - `internal/tui`：banner、队列面板、历史展示、流式输出和取消。
@@ -264,11 +266,33 @@ SSE 的每个事件包含 `event: <kind>` 和 JSON `data`，首先是 `queued` �
 
 ## 运行结束与资源释放
 
-`Start` 只预留当前 runtime，首次 `Next()` 才加载历史并调用 Agent。`Cancel()` 非阻塞地请求取消；runtime 会自动提交已接收的原生审计、关闭消息流并释放会话锁，即使调用方已经停止读取事件。父 context 取消也会触发同样的收尾。
+`QueueManager.Submit` 持久化请求，worker claim 后通过 `NewClaimed` 创建 Run；首次 `Next()` 才准备输入、检索记忆并调用 Agent。`Cancel()` 非阻塞地请求取消；runtime 会自动提交已接收的原生审计、关闭消息流并释放租约，即使调用方已经停止读取事件。父 context 取消也会触发同样的收尾。
 
 退出时调用 `Run.Close()`：它请求取消并等待收尾，返回最终 `Event`，可与 `Next()` 并发或重复调用。`Close()` 不消费展示事件，也不会把已经完成的结果改为取消；提交失败返回 `failed`。HTTP、单次 CLI 与 TUI 共用这一规则，TUI 的关闭错误会返回应用入口。
 
-收尾提交使用独立的 10 秒超时 context；运行中的模型、工具和 Store 应遵守传入 context 的取消信号。成功终态只在提交和释放完成后可见。首次 `Next()` 前取消会释放预留，不调用模型或创建审计轮次。
+收尾提交使用独立的 10 秒超时 context；运行中的模型、工具和 Store 应遵守传入 context 的取消信号。成功终态只在提交和释放完成后可见。已 claim 的 run 即使在首次 `Next()` 前取消，也会提交取消审计并释放租约，不调用模型。尚未 claim 的 queued 任务取消时只更新队列状态。
+
+## Agent loop 日志
+
+默认写入启动当天的 `logs/YYYY-MM-DD.log`，级别为 Info。每个 `agent.phase` 记录包含 `session_id`、`run_id`、`execution_id`、`span_id`、`parent_span_id` 和 `sequence`。同一 run 在租约恢复后有新的 execution ID；模型、工具、记忆检索、预算检查、压缩和持久化各有 `started` / `finished` 记录。终态日志由运行收尾产生，无需客户端继续读取 SSE。
+
+`finished` 包含 `status` 和 `duration_ms`。工具错误被转为模型可读结果时为 `recovered`；取消为 `canceled`；执行错误为 `failed`。主模型与摘要模型分别标记为 `main`、`context-compressor`。模型返回 usage 才记录 token 数，`usage_reported: false` 表示未提供。run 的结束记录汇总模型、工具、压缩调用次数。
+
+在 Bash 中按 run 查看阶段（需要 jq）：
+
+```bash
+jq -c --arg run '替换为 run_id' \
+  'select(.msg == "agent.phase" and .run_id == $run) |
+   {execution_id, sequence, phase, name, event, status, duration_ms, error}' logs/*.log
+
+# 查找失败、取消和工具恢复；phase 日志本身统一为 Info。
+jq -c 'select(.msg == "agent.phase" and .event == "finished" and .status != "completed")' logs/*.log
+
+# 需要原生消息正文、工具参数与结果时显式开启 Debug。
+go run ./cmd/easygo-agent -debug -user alice
+```
+
+阶段日志不写入完整 prompt 或工具结果；`error` 保留原始错误文本，仍可能含供应商返回的内容。Debug 会记录完整原生消息。日志是本地诊断数据，不是数据库持久化事件流；跨进程还原需要收集各进程日志。字段语义、模块分工、性能对比与验证覆盖见[框架优化说明](doc/framework-optimization.md)。
 
 ## 验证
 

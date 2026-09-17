@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"strings"
 
+	"easygo-agent/internal/agent/telemetry"
+
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/middlewares/summarization"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+	"go.uber.org/zap"
 )
 
 // summaryAgentModel adapts an isolated native Agent to summarization's native
@@ -102,7 +105,13 @@ type compressionBudget struct {
 // A summary is not assumed to fit. Shrink unused heuristic skill/tool first,
 // then summarize only as much older dialogue as needed. Reject an oversized
 // result before invoking the main model; never silently truncate history.
-func (m *compressionBudget) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[*schema.AgenticMessage], mc *adk.TypedModelContext[*schema.AgenticMessage]) (context.Context, *adk.TypedChatModelAgentState[*schema.AgenticMessage], error) {
+func (m *compressionBudget) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[*schema.AgenticMessage], mc *adk.TypedModelContext[*schema.AgenticMessage]) (outCtx context.Context, result *adk.TypedChatModelAgentState[*schema.AgenticMessage], resultErr error) {
+	_, budgetSpan := telemetry.Start(ctx, "budget", "fit", zap.Int("input_budget", m.limit))
+	var before, after int
+	var fitFields []zap.Field
+	defer func() {
+		budgetSpan.Finish("", resultErr, append(fitFields, zap.Int("estimate_before", before), zap.Int("estimate_after", after))...)
+	}()
 	if state == nil {
 		return ctx, nil, fmt.Errorf("agent state is required")
 	}
@@ -110,13 +119,19 @@ func (m *compressionBudget) BeforeModelRewriteState(ctx context.Context, state *
 	if err != nil {
 		return ctx, nil, err
 	}
+	before, after = fitted.Before.Total, fitted.After.Total
+	fitFields = []zap.Field{zap.Int("provider_usage_before", providerUsage(state.Messages)), zap.Bool("skill_shrunk", fitted.SkillShrunk), zap.Strings("dropped_tools", fitted.DroppedTools), zap.Int("summarized_messages", fitted.SummarizedMessages)}
 	next := *state
 	next.Messages = fitted.Messages
 	next.ToolInfos = fitted.Tools
 	if fitted.Fitted {
 		return ctx, &next, nil
 	}
-	ctx, summarized, err := m.TypedChatModelAgentMiddleware.BeforeModelRewriteState(ctx, &next, mc)
+	compressionCtx, compressionSpan := telemetry.Start(ctx, "compression", "context-compressor", zap.Int("input_messages", len(next.Messages)))
+	// Eino v0.9.13 returns its input context unchanged. Keep the compression
+	// span scoped to summarization so later main-model calls remain run children.
+	_, summarized, err := m.TypedChatModelAgentMiddleware.BeforeModelRewriteState(compressionCtx, &next, mc)
+	compressionSpan.Finish("", err)
 	if err != nil {
 		return ctx, nil, err
 	}
@@ -124,6 +139,7 @@ func (m *compressionBudget) BeforeModelRewriteState(ctx context.Context, state *
 	if err != nil {
 		return ctx, nil, err
 	}
+	after = tokens
 	if tokens > m.limit {
 		return ctx, nil, fmt.Errorf("compressed context estimate %d exceeds input budget %d; shorten the input or increase agent.context_tokens within the model window", tokens, m.limit)
 	}

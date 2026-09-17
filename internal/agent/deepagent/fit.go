@@ -56,9 +56,7 @@ func Fit(req FitRequest) (FitResult, error) {
 		result.KeptTools = toolNames(req.Tools)
 		return result, nil
 	}
-	if under, underErr := wouldFit(req.Messages, req.Tools, req.Limit); underErr != nil {
-		return FitResult{}, underErr
-	} else if under {
+	if max(before.Total, providerUsage(req.Messages)) <= req.Limit {
 		result.After = before
 		result.Fitted = true
 		result.KeptMessages = len(req.Messages)
@@ -116,10 +114,7 @@ func Fit(req FitRequest) (FitResult, error) {
 		return FitResult{}, err
 	}
 	result.After = after
-	tokens, err := countedTotal(context.Background(), result.Messages, result.Tools)
-	if err != nil {
-		return FitResult{}, err
-	}
+	tokens := max(after.Total, providerUsage(result.Messages))
 	result.Fitted = tokens <= req.Limit
 	return result, nil
 }

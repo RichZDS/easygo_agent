@@ -30,6 +30,7 @@ type Options struct {
 	NewSession bool
 	List       bool
 	Input      string
+	Debug      bool
 }
 
 var (
@@ -59,7 +60,11 @@ func Run(ctx context.Context, configPath string, options ...Options) (resultErr 
 		ctx = context.Background()
 	}
 	// 初始化日志
-	if _, err := logger.New(logger.DefaultPath()); err != nil {
+	level := zap.InfoLevel
+	if opts.Debug {
+		level = zap.DebugLevel
+	}
+	if _, err := logger.New(logger.DefaultPath(), level); err != nil {
 		wrappedErr := fmt.Errorf("initialize logger: %w", err)
 		logger.Error("assemble application failed", zap.String("stage", "logger"), zap.Error(wrappedErr))
 		return wrappedErr

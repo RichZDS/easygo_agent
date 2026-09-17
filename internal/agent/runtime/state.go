@@ -2,11 +2,13 @@ package agentruntime
 
 import (
 	"context"
+	"sync"
+
 	"easygo-agent/internal/conversation"
+
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/middlewares/summarization"
 	"github.com/cloudwego/eino/schema"
-	"sync"
 )
 
 type captureKey struct{}

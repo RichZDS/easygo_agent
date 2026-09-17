@@ -173,7 +173,7 @@ func TestQueueSubscriptionPreservesBurstBeforeTerminal(t *testing.T) {
 		cancel:      cancel,
 		wake:        make(chan struct{}, 1),
 		active:      make(map[string]*activeRun),
-		subscribers: make(map[subscriptionKey]map[*runSubscription]struct{}),
+		subscribers: make(map[string]map[*runSubscription]struct{}),
 	}
 	defer manager.Close()
 	record, err := store.Enqueue(ctx, "queue-user", session.ID, "burst", "")
@@ -213,7 +213,7 @@ func TestQueueCancelPublishesQueuedTerminalEvent(t *testing.T) {
 		cancel:      cancel,
 		wake:        make(chan struct{}, 1),
 		active:      make(map[string]*activeRun),
-		subscribers: make(map[subscriptionKey]map[*runSubscription]struct{}),
+		subscribers: make(map[string]map[*runSubscription]struct{}),
 	}
 	t.Cleanup(func() { _ = manager.Close() })
 	record, _, err := manager.Submit(ctx, "queue-user", session.ID, "cancel", "")
@@ -251,7 +251,7 @@ func TestQueueManagerCloseForceStopsUndrainedTerminalSubscription(t *testing.T) 
 		cancel:      cancel,
 		wake:        make(chan struct{}, 1),
 		active:      make(map[string]*activeRun),
-		subscribers: make(map[subscriptionKey]map[*runSubscription]struct{}),
+		subscribers: make(map[string]map[*runSubscription]struct{}),
 	}
 	record, err := store.Enqueue(ctx, "queue-user", session.ID, "undrained", "")
 	if err != nil {
@@ -306,7 +306,7 @@ func TestQueueSubscriptionPollsDurableTerminalAcrossManagers(t *testing.T) {
 		cfg:         QueueConfig{PollInterval: 5 * time.Millisecond},
 		wake:        make(chan struct{}, 1),
 		active:      make(map[string]*activeRun),
-		subscribers: make(map[subscriptionKey]map[*runSubscription]struct{}),
+		subscribers: make(map[string]map[*runSubscription]struct{}),
 	}
 	t.Cleanup(func() { _ = manager.Close() })
 	subscription, err := manager.Subscribe(ctx, "queue-user", session.ID, record.ID)

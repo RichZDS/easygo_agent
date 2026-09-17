@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 
-	"easygo-agent/internal/logger"
+	"easygo-agent/internal/agent/telemetry"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/tool"
@@ -38,9 +38,15 @@ func (middleware *safeToolMiddleware) WrapInvokableToolCall(
 	name := toolName(toolContext)
 	// invokeWithRecoverableError 把可恢复的工具错误转成结果文本。
 	invokeWithRecoverableError := func(ctx context.Context, args string, opts ...tool.Option) (string, error) {
+		ctx, span := telemetry.Start(ctx, "tool", name, zap.String("call_id", compose.GetToolCallID(ctx)))
 		result, err := endpoint(ctx, args, opts...)
-		if converted, keep := recoverToolError(name, err); keep {
-			logger.Error("tool invocation failed", zap.String("tool", name), zap.Error(err))
+		status := ""
+		if err != nil && !isFatalToolError(err) {
+			status = "recovered"
+		}
+		span.Finish(status, err, zap.Int("result_bytes", len(result)))
+		if converted, keep := recoverToolError(ctx, name, err); keep {
+			telemetry.Logger(ctx).Error("tool invocation failed", zap.String("tool", name), zap.Error(err))
 			return "", err
 		} else if converted != "" {
 			return converted, nil
@@ -59,34 +65,40 @@ func (middleware *safeToolMiddleware) WrapStreamableToolCall(
 	name := toolName(toolContext)
 	// streamWithRecoverableError 把可恢复的流式工具错误转成单 chunk 结果。
 	streamWithRecoverableError := func(ctx context.Context, args string, opts ...tool.Option) (*schema.StreamReader[string], error) {
+		ctx, span := telemetry.Start(ctx, "tool", name, zap.String("call_id", compose.GetToolCallID(ctx)), zap.Bool("streaming", true))
 		reader, err := endpoint(ctx, args, opts...)
-		if converted, keep := recoverToolError(name, err); keep {
-			logger.Error("tool stream failed", zap.String("tool", name), zap.Error(err))
+		if reader == nil && err == nil {
+			err = errors.New("tool returned a nil stream")
+		}
+		if converted, keep := recoverToolError(ctx, name, err); keep {
+			span.Finish("", err)
 			return nil, err
 		} else if converted != "" {
+			span.Finish("recovered", err)
 			return singleChunkReader(converted), nil
 		}
-		return wrapStreamReader(name, reader), nil
+		return wrapStreamReader(ctx, reader, span), nil
 	}
 	return streamWithRecoverableError, nil
 }
 
 // unknownToolResult 把模型幻觉出的未知工具名写成结果文本。
-func unknownToolResult(_ context.Context, name, input string) (string, error) {
+func unknownToolResult(ctx context.Context, name, input string) (string, error) {
 	err := fmt.Errorf("unknown tool %q", name)
-	logger.Error("unknown tool called", zap.String("tool", name), zap.String("arguments", input), zap.Error(err))
+	_, span := telemetry.Start(ctx, "tool", name, zap.String("call_id", compose.GetToolCallID(ctx)))
+	span.Finish("recovered", err)
 	return formatToolError(err), nil
 }
 
 // recoverToolError 判断错误应上抛还是转成结果文本。converted 非空表示已转换。
-func recoverToolError(name string, err error) (converted string, keep bool) {
+func recoverToolError(ctx context.Context, name string, err error) (converted string, keep bool) {
 	if err == nil {
 		return "", false
 	}
 	if isFatalToolError(err) {
 		return "", true
 	}
-	logger.Error("convert tool error to result", zap.String("tool", name), zap.Error(err))
+	telemetry.Logger(ctx).Error("convert tool error to result", zap.String("tool", name), zap.Error(err))
 	return formatToolError(err), false
 }
 
@@ -123,14 +135,14 @@ func singleChunkReader(message string) *schema.StreamReader[string] {
 }
 
 // wrapStreamReader 把流内错误改写成最后一条错误文本，避免管道失败。
-func wrapStreamReader(name string, source *schema.StreamReader[string]) *schema.StreamReader[string] {
+func wrapStreamReader(ctx context.Context, source *schema.StreamReader[string], span *telemetry.Span) *schema.StreamReader[string] {
 	reader, writer := schema.Pipe[string](64)
+	stop := context.AfterFunc(ctx, func() { span.Finish("", ctx.Err()) })
 	// copyStreamChunks 转发成功 chunk，并把流内错误写成结果文本。
 	go func() {
 		defer writer.Close()
-		if source == nil {
-			return
-		}
+		defer stop()
+		defer func() { span.Finish("", ctx.Err()) }()
 		defer source.Close()
 		for {
 			chunk, err := source.Recv()
@@ -139,15 +151,18 @@ func wrapStreamReader(name string, source *schema.StreamReader[string]) *schema.
 			}
 			if err != nil {
 				if isFatalToolError(err) {
-					logger.Error("tool stream chunk failed", zap.String("tool", name), zap.Error(err))
+					span.Finish("", err)
 					_ = writer.Send("", err)
 					return
 				}
-				logger.Error("convert tool stream error to result", zap.String("tool", name), zap.Error(err))
+				span.Finish("recovered", err)
 				_ = writer.Send(formatToolError(err), nil)
 				return
 			}
-			_ = writer.Send(chunk, nil)
+			if writer.Send(chunk, nil) {
+				span.Finish("canceled", io.ErrClosedPipe)
+				return
+			}
 		}
 	}()
 	return reader

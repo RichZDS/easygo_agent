@@ -36,6 +36,7 @@ func run() int {
 	flag.BoolVar(&opts.NewSession, "new", false, "create a new conversation")
 	flag.BoolVar(&opts.List, "list", false, "list this user's conversations")
 	flag.StringVar(&opts.Input, "prompt", "", "run one prompt and exit")
+	flag.BoolVar(&opts.Debug, "debug", false, "include full native messages and tool payloads in local logs")
 	configPath := flag.String("config", config.DefaultPath, "YAML configuration path")
 	flag.Parse()
 	// 载入环境变量

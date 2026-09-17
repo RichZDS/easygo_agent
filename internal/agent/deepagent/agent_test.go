@@ -11,13 +11,17 @@ import (
 
 	"easygo-agent/internal/agent/deepagent"
 	agentruntime "easygo-agent/internal/agent/runtime"
+	"easygo-agent/internal/agent/telemetry"
 	"easygo-agent/internal/config"
 	"easygo-agent/internal/conversation"
 	"easygo-agent/internal/testutil"
 	"easygo-agent/internal/tools"
+
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func TestNewValidatesConstructionConfig(t *testing.T) {
@@ -234,7 +238,8 @@ func TestSummaryFailureAndIterationLimitDoNotCommitPartialContext(t *testing.T) 
 }
 
 func TestSharedAgentRunsIndependentUsersConcurrently(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	core, logs := observer.New(zap.InfoLevel)
+	ctx, cancel := context.WithTimeout(telemetry.WithLogger(context.Background(), zap.New(core)), 5*time.Second)
 	defer cancel()
 	store := conversation.NewMemory()
 	entered := make(chan struct{}, 2)
@@ -254,8 +259,10 @@ func TestSharedAgentRunsIndependentUsersConcurrently(t *testing.T) {
 		t.Fatal(err)
 	}
 	results := make(chan agentruntime.Event, 2)
+	sessions := map[string]bool{}
 	for _, user := range []string{"alice", "bob"} {
 		s, _ := store.Create(ctx, user)
+		sessions[s.ID] = true
 		run := startRun(t, ctx, store, agent, user, s.ID, user)
 		go func() {
 			for {
@@ -289,6 +296,31 @@ func TestSharedAgentRunsIndependentUsersConcurrently(t *testing.T) {
 	}
 	if !seen["alice"] || !seen["bob"] {
 		t.Fatalf("cross-user state leakage: %v", seen)
+	}
+	executions := map[string]string{}
+	models := map[string]int{}
+	for _, entry := range logs.FilterMessage("agent.phase").All() {
+		f := entry.ContextMap()
+		session := f["session_id"].(string)
+		execution := f["execution_id"].(string)
+		if !sessions[session] || execution == "" {
+			t.Fatalf("invalid identity: %v", f)
+		}
+		if prior, ok := executions[execution]; ok && prior != session {
+			t.Fatalf("cross-session trace: %v", f)
+		}
+		executions[execution] = session
+		if f["phase"] == "model" && f["event"] == "finished" {
+			models[session]++
+		}
+	}
+	if len(executions) != 2 {
+		t.Fatalf("executions=%v", executions)
+	}
+	for session := range sessions {
+		if models[session] != 1 {
+			t.Fatalf("model calls=%v", models)
+		}
 	}
 }
 

@@ -27,8 +27,9 @@ func DefaultPath() string {
 
 var closeSink func()
 
-// New 构造写入指定文件的 Zap logger，级别为 Debug，并替换进程全局 logger。
-func New(path string) (*zap.Logger, error) {
+// New installs a JSON file logger at the caller's chosen level. Runtime
+// phase metadata uses Info; full native messages require explicit Debug.
+func New(path string, level zapcore.Level) (*zap.Logger, error) {
 	closeOpenSink()
 	if strings.TrimSpace(path) == "" {
 		err := errors.New("log path cannot be empty")
@@ -51,7 +52,7 @@ func New(path string) (*zap.Logger, error) {
 	core := zapcore.NewCore(
 		zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()),
 		zapcore.AddSync(file),
-		zap.NewAtomicLevelAt(zap.DebugLevel),
+		zap.NewAtomicLevelAt(level),
 	)
 	produced := zap.New(core, zap.AddCaller(), zap.AddStacktrace(zap.ErrorLevel))
 	// syncAndClose 刷新并关闭当前日志文件。

@@ -328,6 +328,8 @@ func (model *Model) applyQueueEvent(message queueEventMessage) tea.Cmd {
 		}
 		if text != "" {
 			model.lines = append(model.lines, "assistant (canceled): "+text)
+		} else {
+			model.lines = append(model.lines, "assistant (canceled)")
 		}
 	case agentruntime.EventFailed:
 		model.commitQueueReasoning(message.runID)

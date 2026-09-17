@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"go.uber.org/zap"
 	"html/template"
 	"os"
 	"path/filepath"
@@ -43,7 +44,7 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "maze-trace: %v\n", err)
 		return 1
 	}
-	if _, err := logger.New(logger.DefaultPath()); err != nil {
+	if _, err := logger.New(logger.DefaultPath(), zap.DebugLevel); err != nil {
 		fmt.Fprintf(os.Stderr, "maze-trace: %v\n", err)
 		return 1
 	}

@@ -67,6 +67,14 @@ func TestQueueTUISubmitsAndObservesCompleted(t *testing.T) {
 	}
 }
 
+func TestQueueCancellationWithoutOutputIsVisible(t *testing.T) {
+	m := New(nil)
+	m.applyQueueEvent(queueEventMessage{runID: "canceled-before-output", ok: true, event: agentruntime.Event{Kind: agentruntime.EventCanceled}})
+	if !strings.Contains(m.transcript(), "canceled") || m.state != stateIdle {
+		t.Fatalf("cancellation was invisible: %q", m.transcript())
+	}
+}
+
 func TestQueueTUICancelStopsRunning(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -114,7 +122,7 @@ func TestQueueTUICancelStopsRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 	pumpTUI(t, m, cmd, 5*time.Second, func(m *Model) bool {
-		return strings.Contains(m.transcript(), "canceled") || strings.Contains(m.transcript(), "partial")
+		return strings.Contains(m.transcript(), "canceled") && len(m.queueSubs) == 0 && m.state == stateIdle
 	})
 	if err := m.Close(); err != nil {
 		t.Fatal(err)

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"go.uber.org/zap"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,7 +53,7 @@ func run() int {
 		fmt.Printf("wrote %s\n", *fitReport)
 		return 0
 	}
-	if _, err := logger.New(logger.DefaultPath()); err != nil {
+	if _, err := logger.New(logger.DefaultPath(), zap.DebugLevel); err != nil {
 		fmt.Fprintf(os.Stderr, "memory-eval: %v\n", err)
 		return 1
 	}

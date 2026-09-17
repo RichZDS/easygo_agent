@@ -6,6 +6,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"go.uber.org/zap"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,7 +38,7 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "maze-eval: %v\n", err)
 		return 1
 	}
-	if _, err := logger.New(logger.DefaultPath()); err != nil {
+	if _, err := logger.New(logger.DefaultPath(), zap.DebugLevel); err != nil {
 		fmt.Fprintf(os.Stderr, "maze-eval: %v\n", err)
 		return 1
 	}

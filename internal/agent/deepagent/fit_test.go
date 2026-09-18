@@ -59,8 +59,8 @@ func TestFitShrinksHeuristicBeforeDialogueAndKeepsThemeFacts(t *testing.T) {
 	if !opt.SkillShrunk {
 		t.Fatal("heuristic skill catalog was not compacted")
 	}
-	if !containsName(opt.DroppedTools, heuristicLoadSkill) || !containsName(opt.DroppedTools, heuristicCallTool) {
-		t.Fatalf("heuristic tools not dropped: %v", opt.DroppedTools)
+	if containsName(opt.DroppedTools, heuristicLoadSkill) || containsName(opt.DroppedTools, heuristicCallTool) {
+		t.Fatalf("discovery tools were dropped: %v", opt.DroppedTools)
 	}
 	if opt.DialogueSummarizedBytes >= base.DialogueSummarizedBytes {
 		t.Fatalf("optimized summarized %d bytes of dialogue, baseline %d; expected less", opt.DialogueSummarizedBytes, base.DialogueSummarizedBytes)
@@ -100,8 +100,8 @@ func TestFitTokenCounterAgreesWithMeasure(t *testing.T) {
 	if !opt.Fitted {
 		t.Fatal("expected Fit to bring the themed fixture under budget without a summarizer")
 	}
-	if containsTool(opt.Tools, heuristicLoadSkill) || containsTool(opt.Tools, heuristicCallTool) {
-		t.Fatalf("heuristic tools still bound: %v", opt.KeptTools)
+	if !containsTool(opt.Tools, heuristicLoadSkill) || !containsTool(opt.Tools, heuristicCallTool) {
+		t.Fatalf("discovery tools lost: %v", opt.KeptTools)
 	}
 }
 
@@ -199,4 +199,25 @@ func containsTool(tools []*schema.ToolInfo, name string) bool {
 		}
 	}
 	return false
+}
+
+func TestCompressionPreservesTaskControlAndUnfinishedSummary(t *testing.T) {
+	names := []string{"list_skills", "load_skill", "read_skill_resource", "call_tool", "spawn_subagent", "get_task", "list_tasks", "resume_task", "cancel_task", "update_plan"}
+	infos := []*schema.ToolInfo{}
+	for _, name := range names {
+		infos = append(infos, &schema.ToolInfo{Name: name, Desc: "capability"})
+	}
+	req := FitRequest{Messages: []*schema.AgenticMessage{schema.SystemAgenticMessage("Unfinished background tasks: task-1 running; preserve acceptance: evidence"), schema.UserAgenticMessage(strings.Repeat("earlier dialogue ", 400)), schema.UserAgenticMessage("hello")}, Tools: infos, Limit: 800}
+	got, err := Fit(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range names {
+		if !containsTool(got.Tools, name) {
+			t.Fatalf("lost %s", name)
+		}
+	}
+	if !strings.Contains(messagesBlob(got.Messages), "task-1 running") {
+		t.Fatal("lost unfinished tasks")
+	}
 }

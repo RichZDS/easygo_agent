@@ -50,7 +50,7 @@ func (run *agentRun) finalize(kind EventKind, err error) {
 	run.closeMessageStream()
 	text := run.projector.Text()
 	if run.queueLease != nil && run.inputMessages == nil {
-		run.inputMessages = append(slices.Clone(run.queueLease.Messages()), schema.UserAgenticMessage(run.input))
+		run.inputMessages = append(slices.Clone(run.queueLease.Messages()), conversation.RunInput(run.record))
 	}
 	next := run.inputMessages
 	if kind == EventCompleted {
@@ -72,7 +72,15 @@ func (run *agentRun) finalize(kind EventKind, err error) {
 		if err != nil {
 			runError = err.Error()
 		}
-		commitErr := run.commit(commitCtx, next, status, text, runError)
+		var commitErr error
+		releaseNotification := false
+		if run.record.Source == "task_notification" && status == conversation.RunCanceled {
+			requested, checkErr := run.queueLease.CancelRequested(commitCtx)
+			releaseNotification = checkErr == nil && !requested
+		}
+		if !releaseNotification {
+			commitErr = run.commit(commitCtx, next, status, text, runError)
+		}
 		cancel()
 		// A cancellation request that wins immediately before the final
 		// transaction must not be silently cleared by a successful completion.

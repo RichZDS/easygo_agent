@@ -115,3 +115,30 @@ func writeLibrary(t *testing.T, files map[string]string) string {
 	}
 	return root
 }
+
+func TestYAMLAndResourceContainment(t *testing.T) {
+	root := writeLibrary(t, map[string]string{"SKILL.md": "# Skill Catalog", "multi/SKILL.md": "---\nname: multi\ndescription: >-\n  First line\n  second line\n---\nRead references/info.md", "multi/references/info.md": "reference", "multi/binary": "x\x00y", "multi/huge": strings.Repeat("x", MaxResourceBytes+1)})
+	lib, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := lib.List("second"); len(got) != 1 || got[0].Description != "First line second line" {
+		t.Fatalf("YAML: %+v", got)
+	}
+	text, err := lib.ReadResource("multi", "references/info.md")
+	if err != nil || text != "reference" {
+		t.Fatalf("%q %v", text, err)
+	}
+	outside := filepath.Join(t.TempDir(), "secret")
+	if err = os.WriteFile(outside, []byte("secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Symlink(outside, filepath.Join(root, "multi", "escape")); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"../SKILL.md", outside, "escape", "missing", "binary", "huge", "references"} {
+		if _, err = lib.ReadResource("multi", path); err == nil {
+			t.Fatalf("accepted %s", path)
+		}
+	}
+}

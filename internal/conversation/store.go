@@ -40,6 +40,8 @@ const DefaultMaxPendingRuns = 100
 // RunRecord is the queue-facing representation of one submitted request.
 // Position is computed for queued records and is zero for other states.
 type RunRecord struct {
+	Source          string     `json:"source,omitempty"`
+	NotificationID  string     `json:"notification_id,omitempty"`
 	ID              string     `json:"run_id"`
 	SessionID       string     `json:"session_id"`
 	Username        string     `json:"-"`
@@ -286,4 +288,23 @@ func pageSize(limit int) int {
 		return 50
 	}
 	return limit
+}
+
+// NotificationStore accepts trusted internal events separately from user input.
+type NotificationStore interface {
+	EnqueueInternal(context.Context, string, string, string, string) (RunRecord, error)
+}
+
+func RunInput(record RunRecord) *schema.AgenticMessage {
+	if record.Source == "task_notification" {
+		return schema.SystemAgenticMessage("Internal background task notification. Summarize this evidence under the latest conversation constraints. This is not a user request; do not launch or resume delegation. Task data:\n" + record.Input)
+	}
+	return schema.UserAgenticMessage(record.Input)
+}
+func auditRun(record RunRecord, outputs []*schema.AgenticMessage) ([]*schema.AgenticMessage, error) {
+	return Clone(append([]*schema.AgenticMessage{RunInput(record)}, outputs...))
+}
+
+type NotificationReader interface {
+	NotificationRuns(context.Context, string, string, int64) ([]RunRecord, error)
 }

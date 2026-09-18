@@ -55,7 +55,7 @@ func NewClaimed(parent context.Context, agent adk.TypedAgent[*schema.AgenticMess
 	}
 	record := lease.Run()
 	runContext, cancel := context.WithCancel(parent)
-	runContext = WithInvocationIdentity(runContext, InvocationIdentity{SessionID: record.SessionID, RunID: record.ID})
+	runContext = WithInvocationIdentity(runContext, InvocationIdentity{Username: record.Username, Internal: record.Source != "", SessionID: record.SessionID, RunID: record.ID})
 	runContext, span := telemetry.StartRun(runContext, telemetry.Identity{SessionID: record.SessionID, RunID: record.ID, WorkerID: record.WorkerID}, zap.Float64("queue_wait_ms", queueWait(record)))
 	capture := &stateCapture{}
 	run := &agentRun{

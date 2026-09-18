@@ -9,6 +9,8 @@ import (
 // tool invocation. Values in this context are trusted runtime metadata and are
 // never accepted from model-provided tool arguments.
 type InvocationIdentity struct {
+	Username  string
+	Internal  bool
 	SessionID string
 	RunID     string
 }

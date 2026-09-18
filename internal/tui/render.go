@@ -61,6 +61,9 @@ func (model *Model) queueView() string {
 			marker = "▶ "
 		}
 		input := strings.TrimSpace(item.Input)
+		if item.Source == "task_notification" {
+			input = "后台任务汇总"
+		}
 		if len([]rune(input)) > 32 {
 			input = string([]rune(input)[:32]) + "…"
 		}

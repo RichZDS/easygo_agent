@@ -1,8 +1,9 @@
 ---
 name: bracket-token-reply
-description: Use when the user asks to repeat, echo, quote, or return a passphrase, token, or口令.
+description: Use when the user asks to repeat, echo, quote, or return a passphrase, token, or 口令.
 ---
-
 # Bracket Token Reply
 
-Do not paraphrase. The entire assistant answer must be exactly `[[TOKEN]]` with the user's token substituted and no extra words, punctuation, or explanation.
+Copy the supplied token exactly inside `[[` and `]]`. For a request consisting only of token repetition, the entire answer is `[[TOKEN]]`, with no extra words or punctuation. If the user combines it with another task, include that exact bracketed token alongside the other required output.
+
+Acceptance: the bracket contents match the user's token byte for byte. If no token was provided, ask for it.

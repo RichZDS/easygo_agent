@@ -8,6 +8,7 @@ import (
 
 	agentruntime "easygo-agent/internal/agent/runtime"
 	"easygo-agent/internal/conversation"
+	"easygo-agent/internal/task"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -30,28 +31,33 @@ type queueEventMessage struct {
 
 // Model 是只处理终端输入、展示状态和运行语义事件的 Bubble Tea 状态机。
 type Model struct {
-	queue        agentruntime.QueueManager
-	username     string
-	sessionID    string
-	queueMode    bool
-	queueItems   []conversation.RunRecord
-	queueFocus   bool
-	selected     int
-	queueOffset  int
-	activeRunID  string
-	queueSubs    map[string]agentruntime.Subscription
-	queueWaiting map[string]bool
-	partials     map[string]string
-	reasonings   map[string]string
-	input        textarea.Model
-	viewport     viewport.Model
-	state        runState
-	lines        []string
-	partial      string
-	reasoning    string
-	status       string
-	width        int
-	height       int
+	tasks             task.Store
+	notifications     conversation.NotificationReader
+	taskSequences     map[string]int64
+	seenNotifications map[string]bool
+	notificationAfter int64
+	queue             agentruntime.QueueManager
+	username          string
+	sessionID         string
+	queueMode         bool
+	queueItems        []conversation.RunRecord
+	queueFocus        bool
+	selected          int
+	queueOffset       int
+	activeRunID       string
+	queueSubs         map[string]agentruntime.Subscription
+	queueWaiting      map[string]bool
+	partials          map[string]string
+	reasonings        map[string]string
+	input             textarea.Model
+	viewport          viewport.Model
+	state             runState
+	lines             []string
+	partial           string
+	reasoning         string
+	status            string
+	width             int
+	height            int
 }
 
 // New 构造 queue-backed TUI。
@@ -106,6 +112,9 @@ func NewQueue(manager agentruntime.QueueManager, username, sessionID string) *Mo
 // Init 启动 textarea 光标闪烁命令。
 func (model *Model) Init() tea.Cmd {
 	commands := []tea.Cmd{textarea.Blink}
+	if model.tasks != nil {
+		commands = append(commands, backgroundWait())
+	}
 	if model.queueMode {
 		if command := model.waitForQueueEvents(); command != nil {
 			commands = append(commands, command)
@@ -128,6 +137,10 @@ func (model *Model) Close() error {
 // Update 在 Bubble Tea 单线程中处理终端输入和 Agent 语义事件。
 func (model *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch message := message.(type) {
+	case backgroundTick:
+		return model, model.backgroundPoll()
+	case backgroundSnapshot:
+		return model, model.backgroundUpdate(message)
 	case tea.WindowSizeMsg:
 		model.resize(message.Width, message.Height)
 		return model, nil
@@ -346,6 +359,9 @@ func (model *Model) applyQueueEvent(message queueEventMessage) tea.Cmd {
 	}
 	terminal := event.IsTerminal()
 	if terminal {
+		if model.seenNotifications != nil {
+			model.seenNotifications[message.runID] = true
+		}
 		if subscription := model.queueSubs[message.runID]; subscription != nil {
 			subscription.Close()
 			delete(model.queueSubs, message.runID)

@@ -148,6 +148,12 @@ func (m *Memory) Begin(ctx context.Context, user, id string) (Lease, error) {
 }
 
 func (m *Memory) Enqueue(ctx context.Context, user, sessionID, input, idempotencyKey string) (RunRecord, error) {
+	return m.enqueue(ctx, user, sessionID, input, idempotencyKey, "", "")
+}
+func (m *Memory) EnqueueInternal(ctx context.Context, user, sessionID, input, id string) (RunRecord, error) {
+	return m.enqueue(ctx, user, sessionID, input, "", "task_notification", id)
+}
+func (m *Memory) enqueue(ctx context.Context, user, sessionID, input, idempotencyKey, source, notificationID string) (RunRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return RunRecord{}, err
 	}
@@ -166,7 +172,7 @@ func (m *Memory) Enqueue(ctx context.Context, user, sessionID, input, idempotenc
 		return RunRecord{}, ErrNotFound
 	}
 	for _, queued := range e.runs {
-		if idempotencyKey != "" && queued.record.IdempotencyKey == idempotencyKey {
+		if (idempotencyKey != "" && queued.record.IdempotencyKey == idempotencyKey) || (notificationID != "" && queued.record.NotificationID == notificationID) {
 			if queued.record.Input != input {
 				return RunRecord{}, ErrIdempotencyConflict
 			}
@@ -189,6 +195,7 @@ func (m *Memory) Enqueue(ctx context.Context, user, sessionID, input, idempotenc
 		}
 	}
 	run := &memoryRun{record: RunRecord{
+		Source: source, NotificationID: notificationID,
 		ID:             uuid.NewString(),
 		SessionID:      sessionID,
 		Input:          input,
@@ -472,7 +479,7 @@ func (l *memoryRunLease) CommitRun(ctx context.Context, nextMessages []*schema.A
 	if err != nil {
 		return err
 	}
-	audit, err := runAudit(l.run.record.Input, outputs)
+	audit, err := auditRun(l.run.record, outputs)
 	if err != nil {
 		return err
 	}
@@ -569,3 +576,19 @@ func (l *memoryRunLease) Close() {
 
 var _ QueueStore = (*Memory)(nil)
 var _ RunLease = (*memoryRunLease)(nil)
+
+func (m *Memory) NotificationRuns(ctx context.Context, user, session string, after int64) ([]RunRecord, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e := m.entries[session]
+	if e == nil || e.session.Username != user {
+		return nil, ErrNotFound
+	}
+	out := []RunRecord{}
+	for _, r := range e.runs {
+		if r.record.Source != "" && r.record.TurnID > after {
+			out = append(out, CloneRunRecord(r.record))
+		}
+	}
+	return out, ctx.Err()
+}

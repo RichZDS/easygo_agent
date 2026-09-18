@@ -13,8 +13,11 @@ func (m *Model) Restore(username, id string, turns []conversation.Turn) {
 	m.sessionID = id
 	m.lines = append(m.lines, fmt.Sprintf("user: %s · session: %s", username, id))
 	for _, turn := range turns {
+		if turn.ID > m.notificationAfter {
+			m.notificationAfter = turn.ID
+		}
 		for _, message := range turn.Messages {
-			if message == nil {
+			if message == nil || message.Role == schema.AgenticRoleTypeSystem {
 				continue
 			}
 			var text strings.Builder

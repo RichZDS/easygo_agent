@@ -45,3 +45,19 @@ subagent:
   base_url: "https://api.deepseek.com"
   timeout: 120s
   apikey: "{SUBMODEL_API_KEY}"
+
+# Background workers are independent of the session FIFO. Old configs default off.
+tasks:
+  enabled: true
+  workers: 2
+  max_steps: 32
+  timeout: 15m
+  lease_ttl: 30s
+  poll_interval: 250ms
+  roles:
+    analyst:
+      instruction: Analyze the supplied materials and return evidence with limitations.
+      tools: [calculator, list_skills, load_skill, read_skill_resource, listmaze, detailmaze, runmaze]
+    executor:
+      instruction: Execute the brief with allowed tools and verify each acceptance criterion.
+      tools: [calculator, list_skills, load_skill, read_skill_resource, listmaze, detailmaze, runmaze, makemaze]

@@ -13,6 +13,7 @@ import (
 
 	agentruntime "easygo-agent/internal/agent/runtime"
 	"easygo-agent/internal/conversation"
+	"easygo-agent/internal/task"
 )
 
 type Handler struct {
@@ -22,7 +23,7 @@ type Handler struct {
 
 // New serves the durable queue protocol. Production CLI, TUI, and HTTP all
 // submit through the same QueueManager; there is no Session/Lease fallback.
-func New(store conversation.Store, queue agentruntime.QueueManager) http.Handler {
+func New(store conversation.Store, queue agentruntime.QueueManager, tasks ...*task.Service) http.Handler {
 	h := &Handler{store: store, queue: queue}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
@@ -34,6 +35,9 @@ func New(store conversation.Store, queue agentruntime.QueueManager) http.Handler
 	mux.HandleFunc("GET /v1/users/{user}/sessions/{id}/runs/{run_id}", h.getRun)
 	mux.HandleFunc("DELETE /v1/users/{user}/sessions/{id}/runs/{run_id}", h.cancelRun)
 	mux.HandleFunc("GET /v1/users/{user}/sessions/{id}/runs/{run_id}/events", h.runEvents)
+	if len(tasks) > 0 && tasks[0] != nil {
+		registerTasks(mux, h, tasks[0])
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)

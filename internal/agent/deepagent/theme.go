@@ -197,8 +197,8 @@ func repeatedRuneBlock(text string, blockRunes, minRepeat int) int {
 }
 
 // NewThemedFitRequest builds the over-budget 玄枢台账 fixture with heuristic
-// skill catalog text and heuristic tool schemas. Limit is one third of the
-// raw composition so the rewrite must fire.
+// skill catalog text and discovery schemas. Reserve the persistent tool cost
+// and half of the remaining composition so the rewrite must fire.
 func NewThemedFitRequest() (FitRequest, error) {
 	instruction := FatHeuristicInstruction()
 	messages := ThemedReleaseMessages(instruction)
@@ -207,7 +207,7 @@ func NewThemedFitRequest() (FitRequest, error) {
 	if err != nil {
 		return FitRequest{}, err
 	}
-	limit := before.Total / 3
+	limit := before.Tools + (before.Total-before.Tools)/2
 	if limit < 4000 {
 		limit = 4000
 	}

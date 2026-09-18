@@ -2,32 +2,21 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
-	"easygo-agent/internal/logger"
 	"easygo-agent/internal/maze"
+	"easygo-agent/internal/toolregistry"
 
 	"github.com/cloudwego/eino/components/tool"
-	"github.com/cloudwego/eino/components/tool/utils"
-	"go.uber.org/zap"
+	"github.com/cloudwego/eino/schema"
 )
 
 // HiddenTool is a specialized tool kept out of the native tool list.
 type HiddenTool struct {
+	Schema      *schema.ToolInfo
 	Name        string
 	Description string
 	Run         func(context.Context, string) (string, error)
-}
-
-type callToolInput struct {
-	Name      string          `json:"name" jsonschema:"required,description=Hidden tool name from a loaded skill, such as listmaze"`
-	Arguments json.RawMessage `json:"arguments,omitempty" jsonschema:"description=JSON object of arguments for that hidden tool"`
-}
-
-type callToolOutput struct {
-	Name   string          `json:"name"`
-	Result json.RawMessage `json:"result"`
 }
 
 // HiddenMazeTools wraps maze tools so they can be reached only through call_tool.
@@ -48,6 +37,7 @@ func HiddenMazeTools(store *maze.Store) ([]HiddenTool, error) {
 		}
 		run := inv.InvokableRun
 		out = append(out, HiddenTool{
+			Schema:      info,
 			Name:        info.Name,
 			Description: info.Desc,
 			Run:         func(ctx context.Context, arguments string) (string, error) { return run(ctx, arguments) },
@@ -58,36 +48,26 @@ func HiddenMazeTools(store *maze.Store) ([]HiddenTool, error) {
 
 // NewCallTool is the public dispatcher. Native context only sees this schema.
 func NewCallTool(hidden []HiddenTool) (tool.InvokableTool, error) {
-	index := map[string]HiddenTool{}
+	registry := toolregistry.New()
 	for _, item := range hidden {
 		if item.Name == "" || item.Run == nil {
 			return nil, fmt.Errorf("hidden tool is missing name or run")
 		}
-		if _, exists := index[item.Name]; exists {
-			return nil, fmt.Errorf("duplicate hidden tool %q", item.Name)
+		if err := registry.Register(context.Background(), hiddenAdapter{item}, "legacy", toolregistry.Unsafe, true); err != nil {
+			return nil, err
 		}
-		index[item.Name] = item
 	}
-	call := func(ctx context.Context, input callToolInput) (callToolOutput, error) {
-		item, ok := index[input.Name]
-		if !ok {
-			err := fmt.Errorf("unknown hidden tool %q; load the matching skill first", input.Name)
-			logger.Error("call_tool failed", zap.String("name", input.Name), zap.Error(err))
-			return callToolOutput{}, err
-		}
-		args := "{}"
-		if len(input.Arguments) > 0 && string(input.Arguments) != "null" {
-			args = string(input.Arguments)
-		}
-		raw, err := item.Run(ctx, args)
-		if err != nil {
-			return callToolOutput{}, err
-		}
-		return callToolOutput{Name: input.Name, Result: json.RawMessage(raw)}, nil
+	return registry.Dispatcher()
+}
+
+type hiddenAdapter struct{ HiddenTool }
+
+func (h hiddenAdapter) Info(context.Context) (*schema.ToolInfo, error) {
+	if h.Schema != nil {
+		return h.Schema, nil
 	}
-	return utils.InferTool(
-		"call_tool",
-		"Call a hidden specialized tool by name after load_skill. Arguments is a JSON object. Maze tools: listmaze, detailmaze, runmaze, makemaze.",
-		call,
-	)
+	return &schema.ToolInfo{Name: h.HiddenTool.Name, Desc: h.Description}, nil
+}
+func (h hiddenAdapter) InvokableRun(ctx context.Context, args string, _ ...tool.Option) (string, error) {
+	return h.HiddenTool.Run(ctx, args)
 }

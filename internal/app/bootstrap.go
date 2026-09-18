@@ -14,6 +14,8 @@ import (
 	"easygo-agent/internal/maze"
 	"easygo-agent/internal/prompt"
 	"easygo-agent/internal/skill"
+	"easygo-agent/internal/task"
+	"easygo-agent/internal/toolregistry"
 	"easygo-agent/internal/tools"
 	"easygo-agent/internal/usermemory"
 
@@ -27,6 +29,7 @@ import (
 // Construction and cleanup stay together so mode code only consumes the
 // assembled runtime.
 type application struct {
+	tasks        *task.Service
 	cfg          config.Config
 	store        conversation.QueueStore
 	memoryStore  conversation.MemoryStore
@@ -86,7 +89,12 @@ func (app *application) openMemory(ctx context.Context) error {
 }
 
 func (app *application) buildQueue(ctx context.Context) {
+	var hooks agentruntime.TaskHooks
+	if app.tasks != nil {
+		hooks = app.tasks
+	}
 	app.queue = agentruntime.NewQueueManager(ctx, app.store, app.agent, agentruntime.QueueConfig{
+		Tasks:        hooks,
 		MaxPending:   app.cfg.Queue.MaxPending,
 		MaxWorkers:   app.cfg.Queue.MaxWorkers,
 		PollInterval: app.cfg.Queue.PollInterval,
@@ -110,10 +118,10 @@ func (app *application) buildAgent(ctx context.Context) error {
 		logger.Info("skill catalog not loaded", zap.Error(skillErr))
 	} else {
 		agentTools = agentTools.WithSkills(lib)
-		instruction = prompt.WithSkillCatalog(instruction, lib.CatalogPrompt())
+		// Append catalog after capability facts so compression can remove only the catalog.
 	}
 	agentTools = agentTools.WithHiddenMaze(maze.NewStore(maze.DefaultDir))
-	allTools, err := agentTools.AllTools(ctx)
+	registry, err := agentTools.Registry(ctx)
 	if err != nil {
 		wrappedErr := fmt.Errorf("initialize tools: %w", err)
 		logger.Error("assemble application failed", zap.String("stage", "tool"), zap.Error(wrappedErr))
@@ -130,6 +138,69 @@ func (app *application) buildAgent(ctx context.Context) error {
 		return fmt.Errorf("initialize summary model: %w", err)
 	}
 	app.summaryModel = summaryModel
+	if app.cfg.Tasks.Enabled {
+		var store task.Store
+		if pg, ok := app.store.(*conversation.Postgres); ok {
+			store, err = task.NewPostgres(ctx, pg.Pool())
+			if err != nil {
+				return fmt.Errorf("initialize tasks: %w", err)
+			}
+		} else {
+			store = task.NewMemory()
+		}
+		workerModel, modelErr := chatmodel.New(ctx, app.cfg.SubAgent)
+		if modelErr != nil {
+			return modelErr
+		}
+		version := "no-skills"
+		if lib != nil {
+			version, err = lib.Version()
+			if err != nil {
+				return err
+			}
+		}
+		engine := &task.Engine{Store: store, Model: workerModel, Registry: registry, Config: app.cfg.Tasks, SkillVersion: version}
+		if err = engine.Validate(ctx); err != nil {
+			return err
+		}
+		app.tasks = &task.Service{Store: store, Engine: engine, Conversations: app.store}
+		taskTools, err := tools.NewTaskTools(app.tasks)
+		if err != nil {
+			return err
+		}
+		for _, item := range taskTools {
+			info, err := item.Info(ctx)
+			if err != nil {
+				return err
+			}
+			retry := toolregistry.Unsafe
+			switch info.Name {
+			case "get_task", "list_tasks":
+				retry = toolregistry.ReadOnly
+			case "spawn_subagent", "cancel_task":
+				retry = toolregistry.Idempotent
+			}
+			if err = registry.Register(ctx, item, "tasks", retry, false); err != nil {
+				return err
+			}
+		}
+	}
+	allTools, err := registry.Native(ctx)
+	if err != nil {
+		return err
+	}
+	names := []string{}
+	for _, item := range allTools {
+		info, err := item.Info(ctx)
+		if err != nil {
+			return err
+		}
+		names = append(names, info.Name)
+	}
+	instruction = prompt.WithTools(instruction, names)
+	if lib != nil {
+		instruction = prompt.WithSkillCatalog(instruction, lib.CatalogPrompt())
+	}
 	app.agent, err = deepagent.New(ctx, deepagent.Config{
 		ChatModel:    mainModel,
 		SummaryModel: summaryModel,
@@ -172,6 +243,9 @@ func (app *application) startMemory(ctx context.Context, opts Options) error {
 func (app *application) close() {
 	if app == nil {
 		return
+	}
+	if app.tasks != nil {
+		app.tasks.Close()
 	}
 	if app.queue != nil {
 		_ = app.queue.Close()

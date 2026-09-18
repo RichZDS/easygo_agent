@@ -5,12 +5,15 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/cloudwego/eino/components/model"
 	"go.uber.org/zap"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"easygo-agent/internal/agent/chatmodel"
@@ -30,8 +33,9 @@ import (
 func main() { os.Exit(run()) }
 
 func run() int {
-	configPath := flag.String("config", "configs/eval/memory.yaml", "YAML configuration path")
-	outPath := flag.String("out", "doc/eval/skill.md", "markdown report path")
+	configPath := flag.String("config", "configs/eval/skill.yaml", "YAML configuration path")
+	outPath := flag.String("out", "doc/eval/skill-framework.md", "markdown report path")
+	baselinePath := flag.String("baseline", "", "optional JSON result from an earlier checkout for comparison")
 	flag.Parse()
 	if err := loadDotEnv(".env"); err != nil {
 		fmt.Fprintf(os.Stderr, "skill-eval: %v\n", err)
@@ -53,8 +57,13 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "skill-eval: %v\n", err)
 		return 1
 	}
-	if err = os.WriteFile(*outPath, []byte(render(report)), 0o644); err != nil {
+	if err = os.WriteFile(*outPath, []byte(render(report)+compareReport(*baselinePath, report)), 0o644); err != nil {
 		fmt.Fprintf(os.Stderr, "skill-eval: %v\n", err)
+		return 1
+	}
+	data, _ := json.MarshalIndent(report, "", "  ")
+	if err = os.WriteFile(*outPath+".json", data, 0644); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
 	fmt.Printf("wrote %s (%d/%d cases passed)\n", *outPath, report.Passed, report.Total)
@@ -65,23 +74,28 @@ func run() int {
 }
 
 type caseSpec struct {
-	Name        string
-	Prompt      string
-	NeedSkill   string
-	NeedTool    string
-	NeedText    string
-	ForbidSkill bool
+	Name         string
+	Prompt       string
+	NeedSkill    string
+	ExtraSkills  []string
+	NeedResource bool
+	NeedTool     string
+	NeedText     string
+	ForbidSkill  bool
 }
 
 type caseResult struct {
-	Name    string
-	Passed  bool
-	Tools   []string
-	Answer  string
-	Error   string
-	Need    string
-	Loaded  bool
-	Latency time.Duration
+	LoadedNames []string
+	ModelCalls  int64
+	InputBytes  int64
+	Name        string
+	Passed      bool
+	Tools       []string
+	Answer      string
+	Error       string
+	Need        string
+	Loaded      bool
+	Latency     time.Duration
 }
 
 type evalReport struct {
@@ -113,8 +127,9 @@ func evaluate(ctx context.Context, configPath string) (evalReport, error) {
 	if err != nil {
 		return evalReport{}, err
 	}
+	meter := &meterModel{AgenticModel: mainModel}
 	agent, err := deepagent.New(ctx, deepagent.Config{
-		ChatModel:    mainModel,
+		ChatModel:    meter,
 		SummaryModel: summaryModel,
 		Tools:        allTools,
 		Agent:        cfg.Agent,
@@ -128,9 +143,16 @@ func evaluate(ctx context.Context, configPath string) (evalReport, error) {
 	for _, spec := range []caseSpec{
 		{Name: "算术走目录再加载", Prompt: "请计算 17 乘以 34。", NeedSkill: "strict-arithmetic", NeedTool: "calculator", NeedText: "CALC:578"},
 		{Name: "口令走目录再加载", Prompt: "请重复口令 ALPHA-ROSE-9", NeedSkill: "bracket-token-reply", NeedText: "[[ALPHA-ROSE-9]]"},
+		{Name: "显式 skill 触发", Prompt: "使用 $strict-arithmetic 算 12 加 7。", NeedSkill: "strict-arithmetic", NeedTool: "calculator", NeedText: "CALC:19"},
+		{Name: "多个 skill 组合", Prompt: "使用 $strict-arithmetic 和 $bracket-token-reply，计算 2 加 3，并重复口令 COMBO-7。", NeedSkill: "strict-arithmetic", ExtraSkills: []string{"bracket-token-reply"}, NeedTool: "calculator", NeedText: "[[COMBO-7]]"},
+		{Name: "按需读取参考", Prompt: "使用 $playing-maze，读取工具参考，告诉我 runmaze 的移动参数；不用执行迷宫。", NeedSkill: "playing-maze", NeedResource: true},
 		{Name: "无关问题不加载", Prompt: "用一句话介绍杭州西湖。", ForbidSkill: true},
 	} {
+		meter.calls.Store(0)
+		meter.bytes.Store(0)
 		result := runCase(ctx, store, agent, spec)
+		result.ModelCalls = meter.calls.Load()
+		result.InputBytes = meter.bytes.Load()
 		report.Cases = append(report.Cases, result)
 		report.Total++
 		if result.Passed {
@@ -161,6 +183,12 @@ func runCase(ctx context.Context, store *conversation.Memory, agent adk.TypedAge
 			result.Tools = append(result.Tools, event.Tool)
 			if event.Tool == "load_skill" {
 				result.Loaded = true
+				var args struct {
+					Name string `json:"name"`
+				}
+				if json.Unmarshal([]byte(event.Arguments), &args) == nil {
+					result.LoadedNames = append(result.LoadedNames, args.Name)
+				}
 			}
 		}
 		if !event.IsTerminal() {
@@ -181,10 +209,18 @@ func runCase(ctx context.Context, store *conversation.Memory, agent adk.TypedAge
 			result.Passed = !loadedNamed && strings.TrimSpace(result.Answer) != ""
 			return result
 		}
-		if spec.NeedSkill != "" && !loadedNamed {
+		if spec.NeedSkill != "" && !containsTool(result.LoadedNames, spec.NeedSkill) {
 			return result
 		}
 		if spec.NeedTool != "" && !containsTool(result.Tools, spec.NeedTool) {
+			return result
+		}
+		for _, name := range spec.ExtraSkills {
+			if !containsTool(result.LoadedNames, name) {
+				return result
+			}
+		}
+		if spec.NeedResource && !containsTool(result.Tools, "read_skill_resource") {
 			return result
 		}
 		result.Passed = spec.NeedText == "" || strings.Contains(result.Answer, spec.NeedText)
@@ -207,13 +243,13 @@ func render(report evalReport) string {
 	fmt.Fprintf(&b, "- 时间：%s\n", report.Started.Format(time.RFC3339))
 	fmt.Fprintf(&b, "- 通过：%d / %d\n\n", report.Passed, report.Total)
 	fmt.Fprintf(&b, "Agent 启动时只注册启发式目录。专门 skill 必须通过 `load_skill` 进入上下文。\n\n")
-	fmt.Fprintf(&b, "| 用例 | 结果 | 工具 | 耗时 |\n| --- | --- | --- | --- |\n")
+	fmt.Fprintf(&b, "| 用例 | 结果 | 工具 | 模型调用 | 输入字节 | 耗时 |\n| --- | --- | --- | --- | --- | --- |\n")
 	for _, item := range report.Cases {
 		status := "未通过"
 		if item.Passed {
 			status = "通过"
 		}
-		fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", item.Name, status, strings.Join(item.Tools, ", "), item.Latency.Round(time.Millisecond))
+		fmt.Fprintf(&b, "| %s | %s | %s | %d | %d | %s |\n", item.Name, status, strings.Join(item.Tools, ", "), item.ModelCalls, item.InputBytes, item.Latency.Round(time.Millisecond))
 	}
 	b.WriteString("\n")
 	for _, item := range report.Cases {
@@ -262,4 +298,48 @@ func loadDotEnv(path string) error {
 		}
 	}
 	return scanner.Err()
+}
+
+// InputBytes measures serialized model messages; it is not billed token usage.
+type meterModel struct {
+	model.AgenticModel
+	calls atomic.Int64
+	bytes atomic.Int64
+}
+
+func (m *meterModel) record(messages []*schema.AgenticMessage) {
+	data, _ := json.Marshal(messages)
+	m.calls.Add(1)
+	m.bytes.Add(int64(len(data)))
+}
+func (m *meterModel) Generate(ctx context.Context, in []*schema.AgenticMessage, opts ...model.Option) (*schema.AgenticMessage, error) {
+	m.record(in)
+	return m.AgenticModel.Generate(ctx, in, opts...)
+}
+func (m *meterModel) Stream(ctx context.Context, in []*schema.AgenticMessage, opts ...model.Option) (*schema.StreamReader[*schema.AgenticMessage], error) {
+	m.record(in)
+	return m.AgenticModel.Stream(ctx, in, opts...)
+}
+func compareReport(path string, current evalReport) string {
+	if path == "" {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "\nBaseline unavailable: " + err.Error() + "\n"
+	}
+	var previous evalReport
+	if err = json.Unmarshal(data, &previous); err != nil {
+		return "\nBaseline could not be decoded: " + err.Error() + "\n"
+	}
+	var b strings.Builder
+	b.WriteString("\n## 同名用例对比\n\n输入字节是序列化消息大小，不是计费 token。\n\n| 用例 | 通过 before → after | 工具调用 before → after | 输入字节 before → after |\n| --- | --- | --- | --- |\n")
+	for _, now := range current.Cases {
+		for _, old := range previous.Cases {
+			if old.Name == now.Name {
+				fmt.Fprintf(&b, "| %s | %v → %v | %d → %d | %d → %d |\n", now.Name, old.Passed, now.Passed, len(old.Tools), len(now.Tools), old.InputBytes, now.InputBytes)
+			}
+		}
+	}
+	return b.String()
 }

@@ -52,6 +52,7 @@ queue:
 		{"missing_sub_key", strings.Replace(content, "SUMMARY_KEY", "MISSING", 1)},
 		{"missing_db", strings.Replace(content, "TEST_DB", "MISSING", 1)},
 		{"tiny_budget", strings.Replace(content, "12000", "0", 1)},
+		{"task_connection_reserve", strings.Replace(content, "driver: postgres", "driver: postgres\n  max_conns: 2", 1) + "tasks:\n  enabled: true\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := os.WriteFile(path, []byte(tc.content), 0600); err != nil {
@@ -133,5 +134,20 @@ sandbox:
 	}
 	if _, err := Load(path, func(string) (string, bool) { return "short", true }); err == nil {
 		t.Fatal("short sandbox auth token accepted")
+	}
+}
+
+func TestTaskConfigurationDefaultsAndValidation(t *testing.T) {
+	cfg, err := taskConfig(rawTaskConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Enabled || cfg.Workers != 2 || cfg.MaxSteps != 32 || cfg.Timeout != 15*time.Minute {
+		t.Fatalf("defaults %+v", cfg)
+	}
+	for _, raw := range []rawTaskConfig{{Workers: -1}, {MaxSteps: -1}, {Timeout: "0s"}, {LeaseTTL: "0s"}, {PollInterval: "invalid"}} {
+		if _, err = taskConfig(raw); err == nil {
+			t.Fatalf("accepted %+v", raw)
+		}
 	}
 }

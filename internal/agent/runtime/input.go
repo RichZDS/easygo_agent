@@ -19,7 +19,7 @@ func (run *agentRun) initialize() error {
 	if run.queueLease == nil {
 		return ErrStoreUnavailable
 	}
-	run.inputMessages = append(slices.Clone(run.queueLease.Messages()), schema.UserAgenticMessage(run.input))
+	run.inputMessages = append(slices.Clone(run.queueLease.Messages()), conversation.RunInput(run.record))
 	recallCtx, recallSpan := telemetry.Start(run.context, "memory", "recall", zap.Bool("enabled", run.memory != nil))
 	memoryContext, recallErr := recallMemoryPrompt(recallCtx, run.memory, run.record.Username)
 	recallSpan.Finish("", recallErr, zap.Int("memory_bytes", len(memoryContext)))
@@ -31,6 +31,12 @@ func (run *agentRun) initialize() error {
 		modelInput = append(modelInput, schema.SystemAgenticMessage(memoryContext))
 	}
 	modelInput = append(modelInput, DropPersistedSystemMessages(run.inputMessages)...)
+	if run.record.Source != "" {
+		modelInput = append(modelInput, conversation.RunInput(run.record))
+	}
+	if summary, _ := run.context.Value(taskSummaryKey{}).(string); summary != "" {
+		modelInput = append([]*schema.AgenticMessage{schema.SystemAgenticMessage(summary)}, modelInput...)
+	}
 	if run.agent == nil {
 		return ErrAgentUnavailable
 	}

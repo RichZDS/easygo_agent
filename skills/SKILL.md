@@ -1,19 +1,7 @@
----
-name: skill-catalog
-description: Use when deciding whether a specialized skill applies before answering, using tools, or changing procedure.
----
-
 # Skill Catalog
 
-This is the only skill registered at startup. Specialized procedures stay on disk.
+Use the Directory descriptions to select procedures. Load every explicitly requested `$skill-name` with `load_skill(name)`; combine relevant skills when the task needs several procedures. For implicit selection, load only descriptions that match the user's request or a tool failure.
 
-## Required sequence
+Follow the loaded instructions and acceptance criteria. Read linked reference files through `read_skill_resource(name, path)` when their stated condition applies. Use `list_skills(query)` to rediscover the full directory after compression; an empty query returns all entries.
 
-1. Read Directory below.
-2. If a row's "Use when" matches the current user request, call `load_skill` with that exact Name before any other tool and before answering.
-3. Follow the loaded skill. If no row matches, answer normally and do not call `load_skill`.
-4. Load at most one skill per user request unless a loaded skill explicitly requires another.
-
-## When writing a new skill
-
-Add `skills/<name>/SKILL.md` with YAML `name` and a "Use when..." `description`. The Directory is rebuilt from those descriptions at process start. Put the triggering condition in the description; put the procedure in the skill body.
+When skills conflict, preserve the user's explicit requirements and explain any remaining conflict. If no skill applies, answer normally without loading one. A failed load is an error to report, not permission to invent its instructions.

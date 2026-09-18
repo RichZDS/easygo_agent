@@ -30,7 +30,7 @@ func run() int {
 	if user, err := osuser.Current(); err == nil {
 		defaultUser = user.Username
 	}
-	flag.StringVar(&opts.Mode, "mode", "cli", "cli or gateway")
+	flag.StringVar(&opts.Mode, "mode", "cli", "cli, gateway or worker")
 	flag.StringVar(&opts.Username, "user", defaultUser, "conversation username")
 	flag.StringVar(&opts.SessionID, "session", "", "resume a session ID (default: latest for user)")
 	flag.BoolVar(&opts.NewSession, "new", false, "create a new conversation")

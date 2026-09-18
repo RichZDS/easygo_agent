@@ -3,12 +3,11 @@ package tools
 import (
 	"context"
 
-	"easygo-agent/internal/logger"
 	"easygo-agent/internal/maze"
 	"easygo-agent/internal/skill"
+	"easygo-agent/internal/toolregistry"
 
 	"github.com/cloudwego/eino/components/tool"
-	"go.uber.org/zap"
 )
 
 // AgentTool 集中构造并持有当前 Agent 可用的全部 Tool。
@@ -57,52 +56,66 @@ func (t *AgentTool) WithBoundMaze(store *maze.Store) *AgentTool {
 
 // AllTools 逐个构造内置 Tool 并收集到切片中，供 Agent 一次性绑定。
 func (t *AgentTool) AllTools(ctx context.Context) ([]tool.BaseTool, error) {
-	var all []tool.BaseTool
-
-	calculator, err := NewCalculator()
+	r, err := t.Registry(ctx)
 	if err != nil {
-		logger.Error("collect all tools failed", zap.String("tool", "calculator"), zap.Error(err))
 		return nil, err
 	}
-	all = append(all, calculator)
+	return r.Native(ctx)
+}
 
-	if t.sandbox != nil {
-		sandboxTools, err := NewSandboxTools(*t.sandbox)
-		if err != nil {
-			logger.Error("collect all tools failed", zap.String("tool", "sandbox"), zap.Error(err))
-			return nil, err
+// Registry is the single registration point for native and skill-disclosed tools.
+func (t *AgentTool) Registry(ctx context.Context) (*toolregistry.Registry, error) {
+	r := toolregistry.New()
+	add := func(items []tool.BaseTool, group string, hidden bool) error {
+		for _, item := range items {
+			info, err := item.Info(ctx)
+			if err != nil {
+				return err
+			}
+			retry := toolregistry.Unsafe
+			switch info.Name {
+			case "calculator", "load_skill", "list_skills", "read_skill_resource", "listmaze", "detailmaze", "runmaze":
+				retry = toolregistry.ReadOnly
+			}
+			if err = r.Register(ctx, item, group, retry, hidden); err != nil {
+				return err
+			}
 		}
-		all = append(all, sandboxTools...)
+		return nil
+	}
+	calculator, err := NewCalculator()
+	if err != nil {
+		return nil, err
+	}
+	if err = add([]tool.BaseTool{calculator}, "calculation", false); err != nil {
+		return nil, err
 	}
 	if t.skills != nil {
-		loadSkill, skillErr := NewLoadSkill(t.skills)
-		if skillErr != nil {
-			logger.Error("collect all tools failed", zap.String("tool", "load_skill"), zap.Error(skillErr))
-			return nil, skillErr
+		items, err := NewSkillTools(t.skills)
+		if err != nil {
+			return nil, err
 		}
-		all = append(all, loadSkill)
+		if err = add(items, "skills", false); err != nil {
+			return nil, err
+		}
 	}
-	if t.mazeStore != nil && t.boundMaze {
-		mazeTools, mazeErr := NewMazeTools(t.mazeStore)
-		if mazeErr != nil {
-			logger.Error("collect all tools failed", zap.String("tool", "maze"), zap.Error(mazeErr))
-			return nil, mazeErr
+	if t.sandbox != nil {
+		items, err := NewSandboxTools(*t.sandbox)
+		if err != nil {
+			return nil, err
 		}
-		all = append(all, mazeTools...)
+		if err = add(items, "sandbox", false); err != nil {
+			return nil, err
+		}
 	}
-	if t.mazeStore != nil && t.hiddenMaze {
-		hidden, hiddenErr := HiddenMazeTools(t.mazeStore)
-		if hiddenErr != nil {
-			logger.Error("collect all tools failed", zap.String("tool", "call_tool"), zap.Error(hiddenErr))
-			return nil, hiddenErr
+	if t.mazeStore != nil && (t.boundMaze || t.hiddenMaze) {
+		items, err := NewMazeTools(t.mazeStore)
+		if err != nil {
+			return nil, err
 		}
-		callTool, callErr := NewCallTool(hidden)
-		if callErr != nil {
-			logger.Error("collect all tools failed", zap.String("tool", "call_tool"), zap.Error(callErr))
-			return nil, callErr
+		if err = add(items, "maze", t.hiddenMaze); err != nil {
+			return nil, err
 		}
-		all = append(all, callTool)
 	}
-
-	return all, nil
+	return r, nil
 }

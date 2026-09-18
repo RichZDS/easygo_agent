@@ -255,6 +255,12 @@ func (l *pgLease) Close() {
 // for the same session. The session lock makes the pending-run limit and the
 // returned position consistent with concurrent submissions.
 func (p *Postgres) Enqueue(ctx context.Context, user, sessionID, input, idempotencyKey string) (RunRecord, error) {
+	return p.enqueue(ctx, user, sessionID, input, idempotencyKey, "", "")
+}
+func (p *Postgres) EnqueueInternal(ctx context.Context, user, sessionID, input, id string) (RunRecord, error) {
+	return p.enqueue(ctx, user, sessionID, input, "", "task_notification", id)
+}
+func (p *Postgres) enqueue(ctx context.Context, user, sessionID, input, idempotencyKey, source, notificationID string) (RunRecord, error) {
 	if err := ValidateUser(user); err != nil {
 		return RunRecord{}, err
 	}
@@ -286,6 +292,19 @@ func (p *Postgres) Enqueue(ctx context.Context, user, sessionID, input, idempote
 	if err = tx.QueryRow(ctx, "SELECT id::text FROM agent_sessions WHERE id=$1 FOR UPDATE", sessionID).Scan(&sessionLock); err != nil {
 		return RunRecord{}, err
 	}
+	if notificationID != "" {
+		var r RunRecord
+		err = tx.QueryRow(ctx, runSelect+" WHERE r.session_id=$1 AND r.notification_id=$2", sessionID, notificationID).Scan(runArgs(&r)...)
+		if err == nil {
+			if r.Input != input {
+				return RunRecord{}, ErrIdempotencyConflict
+			}
+			return r, tx.Commit(ctx)
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return RunRecord{}, err
+		}
+	}
 	if idempotencyKey != "" {
 		var r RunRecord
 		err = tx.QueryRow(ctx, runSelect+" WHERE r.session_id=$1 AND r.idempotency_key=$2", sessionID, idempotencyKey).Scan(runArgs(&r)...)
@@ -313,10 +332,10 @@ func (p *Postgres) Enqueue(ctx context.Context, user, sessionID, input, idempote
 	}
 	id := uuid.NewString()
 	var createdAt time.Time
-	if err = tx.QueryRow(ctx, "INSERT INTO agent_runs(id,session_id,input,status,idempotency_key) VALUES($1,$2,$3,'queued',$4) RETURNING created_at", id, sessionID, input, idempotencyKey).Scan(&createdAt); err != nil {
+	if err = tx.QueryRow(ctx, "INSERT INTO agent_runs(id,session_id,input,status,idempotency_key,source,notification_id) VALUES($1,$2,$3,'queued',$4,$5,$6) RETURNING created_at", id, sessionID, input, idempotencyKey, source, notificationID).Scan(&createdAt); err != nil {
 		return RunRecord{}, err
 	}
-	r := RunRecord{ID: id, SessionID: sessionID, Input: input, Status: RunQueued, IdempotencyKey: idempotencyKey, CreatedAt: createdAt, Position: n + 1}
+	r := RunRecord{Source: source, NotificationID: notificationID, ID: id, SessionID: sessionID, Input: input, Status: RunQueued, IdempotencyKey: idempotencyKey, CreatedAt: createdAt, Position: n + 1}
 	_, err = tx.Exec(ctx, "UPDATE agent_sessions SET updated_at=now() WHERE id=$1", sessionID)
 	if err == nil {
 		err = tx.Commit(ctx)
@@ -327,10 +346,10 @@ func (p *Postgres) Enqueue(ctx context.Context, user, sessionID, input, idempote
 	return p.position(ctx, r)
 }
 
-const runSelect = `SELECT r.id::text,r.session_id::text,r.input,r.status,COALESCE(r.idempotency_key,''),r.cancel_requested,COALESCE(r.result_text,''),COALESCE(r.error,''),COALESCE(r.turn_id,0),r.created_at,r.started_at,r.finished_at,COALESCE(r.worker_id,''),COALESCE(r.lease_expires_at,'epoch'::timestamptz),COALESCE(r.claim_token::text,'') FROM agent_runs r`
+const runSelect = `SELECT r.id::text,r.session_id::text,r.input,r.status,COALESCE(r.idempotency_key,''),r.cancel_requested,COALESCE(r.result_text,''),COALESCE(r.error,''),COALESCE(r.turn_id,0),r.created_at,r.started_at,r.finished_at,COALESCE(r.worker_id,''),COALESCE(r.lease_expires_at,'epoch'::timestamptz),COALESCE(r.claim_token::text,''),r.source,r.notification_id FROM agent_runs r`
 
 func runArgs(r *RunRecord) []any {
-	return []any{&r.ID, &r.SessionID, &r.Input, &r.Status, &r.IdempotencyKey, &r.CancelRequested, &r.ResultText, &r.Error, &r.TurnID, &r.CreatedAt, &r.StartedAt, &r.FinishedAt, &r.WorkerID, &r.LeaseExpiresAt, &r.ClaimToken}
+	return []any{&r.ID, &r.SessionID, &r.Input, &r.Status, &r.IdempotencyKey, &r.CancelRequested, &r.ResultText, &r.Error, &r.TurnID, &r.CreatedAt, &r.StartedAt, &r.FinishedAt, &r.WorkerID, &r.LeaseExpiresAt, &r.ClaimToken, &r.Source, &r.NotificationID}
 }
 
 func normalizeRun(r RunRecord) RunRecord {
@@ -675,7 +694,7 @@ func (l *pgRunLease) CommitRun(ctx context.Context, next []*schema.AgenticMessag
 	if err != nil {
 		return err
 	}
-	auditMessages, err := runAudit(l.run.Input, outputs)
+	auditMessages, err := auditRun(l.run, outputs)
 	if err != nil {
 		return err
 	}
@@ -723,6 +742,11 @@ func (l *pgRunLease) CommitRun(ctx context.Context, next []*schema.AgenticMessag
 	}
 	if cmd.RowsAffected() != 1 {
 		return ErrLeaseLost
+	}
+	if status == RunCompleted && l.run.NotificationID != "" {
+		if _, err = tx.Exec(ctx, "UPDATE agent_task_notifications SET acknowledged=true WHERE id=$1", l.run.NotificationID); err != nil {
+			return err
+		}
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return err
@@ -803,3 +827,23 @@ func (l *pgRunLease) Close() {
 
 var _ QueueStore = (*Postgres)(nil)
 var _ RunLease = (*pgRunLease)(nil)
+
+// Pool supplies the same database to the independent task repository.
+func (p *Postgres) Pool() *pgxpool.Pool { return p.pool }
+
+func (p *Postgres) NotificationRuns(ctx context.Context, user, session string, after int64) ([]RunRecord, error) {
+	rows, err := p.pool.Query(ctx, runSelect+" JOIN agent_sessions s ON s.id=r.session_id WHERE s.username=$1 AND s.id=$2 AND r.source='task_notification' AND r.turn_id>$3 ORDER BY r.turn_id LIMIT 100", user, session, after)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []RunRecord{}
+	for rows.Next() {
+		var r RunRecord
+		if err = rows.Scan(runArgs(&r)...); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}

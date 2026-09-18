@@ -44,8 +44,8 @@ func Run(ctx context.Context, configPath string, options ...Options) (resultErr 
 	if len(options) > 0 {
 		opts = options[0]
 	}
-	if opts.Mode != "cli" && opts.Mode != "gateway" {
-		return errors.New("mode must be cli or gateway")
+	if opts.Mode != "cli" && opts.Mode != "gateway" && opts.Mode != "worker" {
+		return errors.New("mode must be cli, gateway or worker")
 	}
 	if opts.Mode == "cli" {
 		if err := conversation.ValidateUser(opts.Username); err != nil {
@@ -104,8 +104,20 @@ func Run(ctx context.Context, configPath string, options ...Options) (resultErr 
 		return err
 	}
 	app.buildQueue(ctx)
+	if app.tasks != nil && (opts.Mode == "gateway" || opts.Mode == "worker" || (opts.Mode == "cli" && opts.Input == "")) {
+		if err = app.tasks.Start(ctx); err != nil {
+			return err
+		}
+	}
+	if opts.Mode == "worker" {
+		if app.tasks == nil {
+			return errors.New("worker mode requires tasks.enabled")
+		}
+		<-ctx.Done()
+		return nil
+	}
 	if opts.Mode == "gateway" {
-		server := &http.Server{Addr: cfg.HTTP.Address, Handler: gateway.New(store, app.queue), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
+		server := &http.Server{Addr: cfg.HTTP.Address, Handler: gateway.New(store, app.queue, app.tasks), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
 		return serve(ctx, server)
 	}
 	if opts.SessionID == "" && !opts.NewSession {
@@ -167,6 +179,9 @@ func Run(ctx context.Context, configPath string, options ...Options) (resultErr 
 		return errors.New("queued run subscription closed before terminal event")
 	}
 	ui := tui.NewQueue(app.queue, opts.Username, opts.SessionID)
+	if app.tasks != nil {
+		ui.WithTasks(app.tasks.Store, app.store.(conversation.NotificationReader))
+	}
 	defer func() { resultErr = errors.Join(resultErr, ui.Close()) }()
 	// Subscribe to active runs before loading history. A recovered run can
 	// finish while the initial history pages are being read; establishing the

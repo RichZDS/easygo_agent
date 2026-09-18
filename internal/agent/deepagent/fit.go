@@ -236,12 +236,21 @@ func compactSkillMessages(messages []*schema.AgenticMessage, situation string) [
 }
 
 func dropUnusedTools(tools []*schema.ToolInfo, situation string, used map[string]bool) (kept []*schema.ToolInfo, dropped []string) {
+	hasDispatcher := false
+	for _, info := range tools {
+		if info != nil && info.Name == "call_tool" {
+			hasDispatcher = true
+		}
+	}
+	if !hasDispatcher {
+		return tools, nil
+	}
 	sit := foldRunes(situation)
 	for _, tool := range tools {
 		if tool == nil {
 			continue
 		}
-		if used[tool.Name] || toolMentioned(tool.Name, sit) {
+		if persistentCapability(tool.Name) || used[tool.Name] || toolMentioned(tool.Name, sit) {
 			kept = append(kept, tool)
 			continue
 		}
@@ -284,7 +293,7 @@ func dropHeuristicTools(tools []*schema.ToolInfo, situation string, used map[str
 		if tool == nil {
 			continue
 		}
-		if used[tool.Name] {
+		if persistentCapability(tool.Name) || used[tool.Name] {
 			kept = append(kept, tool)
 			continue
 		}
@@ -481,4 +490,14 @@ func foldRunes(text string) string {
 		}
 		return unicode.ToLower(r)
 	}, text)
+}
+
+// Discovery and task control are capabilities, not topical context. Preserve
+// their schemas even when this turn does not mention their names.
+func persistentCapability(name string) bool {
+	switch name {
+	case "list_skills", "load_skill", "read_skill_resource", "call_tool", "spawn_subagent", "get_task", "list_tasks", "resume_task", "cancel_task", "update_plan":
+		return true
+	}
+	return false
 }

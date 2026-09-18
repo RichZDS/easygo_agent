@@ -22,7 +22,13 @@ const (
 )
 
 // QueueConfig controls the application-wide durable run scheduler.
+type TaskHooks interface {
+	Summary(context.Context, string, string) (string, error)
+	CancelChildren(context.Context, string, string, string) error
+}
+type taskSummaryKey struct{}
 type QueueConfig struct {
+	Tasks        TaskHooks
 	MaxPending   int
 	MaxWorkers   int
 	PollInterval time.Duration
@@ -242,6 +248,11 @@ func (manager *queueManager) Cancel(ctx context.Context, user, sessionID, runID 
 	record, err := manager.store.RequestCancel(ctx, user, sessionID, runID)
 	if err != nil {
 		return conversation.RunRecord{}, wrapStoreError(err)
+	}
+	if manager.cfg.Tasks != nil && (record.CancelRequested || record.Status == conversation.RunCanceled) {
+		if err = manager.cfg.Tasks.CancelChildren(ctx, user, sessionID, runID); err != nil {
+			return record, err
+		}
 	}
 	manager.mu.Lock()
 	active := manager.active[runID]

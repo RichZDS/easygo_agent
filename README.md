@@ -311,3 +311,9 @@ go test ./internal/conversation -run TestPostgresContract -v -count=1
 模型测试使用 fake model 或本地 OpenAI-compatible 测试服务器，不调用真实模型。涵盖工具循环、原生流合并、跨轮恢复、摘要成功/失败、摘要超预算、最大迭代、取消、提交失败、会话隔离、分页、HTTP 断连和单次 CLI 启动。PostgreSQL 集成测试未配置 `EASYGO_TEST_DATABASE_URL` 时明确跳过。
 
 Eino 参考：[Summarization middleware](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/eino_adk_chatmodelagentmiddleware/middleware_summarization/)。实际实现以 `go.mod` 固定的 Eino v0.9.13 源码为准。
+
+## 可恢复后台 agent
+
+示例配置启用分层 skill 与后台任务；旧配置默认关闭。Gateway 和 TUI 自动承载后台 worker，也可用 `go run ./cmd/easygo-agent -mode worker` 常驻执行。任务支持跨轮查询、续跑、取消、PostgreSQL 重启恢复和自动汇总，默认每个进程两个 worker，子 agent 不开放沙箱写操作。
+
+配置、恢复决策、HTTP 接口与验证方式见 [分层 skill 与可恢复后台任务](doc/agent-framework.md)。

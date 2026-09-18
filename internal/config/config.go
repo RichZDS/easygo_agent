@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"easygo-agent/internal/logger"
+	"easygo-agent/internal/task"
 	"easygo-agent/internal/usermemory"
 
 	"go.uber.org/zap"
@@ -36,6 +37,7 @@ var envRefPattern = regexp.MustCompile(`^\{([A-Za-z_][A-Za-z0-9_]*)\}$`)
 
 // Config 包含模板的全部运行时配置。
 type Config struct {
+	Tasks    task.Config
 	Agent    AgentConfig
 	Model    ModelConfig
 	SubAgent ModelConfig
@@ -87,6 +89,7 @@ type ModelConfig struct {
 }
 
 type rawConfig struct {
+	Tasks    rawTaskConfig    `yaml:"tasks"`
 	Agent    rawAgentConfig   `yaml:"agent"`
 	Model    rawModelConfig   `yaml:"model"`
 	SubAgent *rawModelConfig  `yaml:"subagent"`
@@ -355,6 +358,14 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 		logger.Error("load config failed", zap.String("path", path), zap.Error(wrappedErr))
 		return Config{}, wrappedErr
 	}
+	cfg.Tasks, err = taskConfig(raw.Tasks)
+	if err != nil {
+		return Config{}, fmt.Errorf("tasks: %w", err)
+	}
+
+	if cfg.Tasks.Enabled && cfg.Database.Driver == "postgres" && int64(cfg.Database.MaxConns) < int64(cfg.Queue.MaxWorkers)+2 {
+		return Config{}, errors.New("tasks require database.max_conns >= queue.max_workers + 2; session leases must leave connections for task persistence and notifications")
+	}
 	return cfg, nil
 }
 
@@ -434,4 +445,47 @@ func validateConfig(cfg Config) error {
 		return err
 	}
 	return nil
+}
+
+type rawTaskConfig struct {
+	Enabled      bool                 `yaml:"enabled"`
+	Workers      int                  `yaml:"workers"`
+	MaxSteps     int                  `yaml:"max_steps"`
+	Timeout      string               `yaml:"timeout"`
+	LeaseTTL     string               `yaml:"lease_ttl"`
+	PollInterval string               `yaml:"poll_interval"`
+	Roles        map[string]task.Role `yaml:"roles"`
+}
+
+func taskConfig(raw rawTaskConfig) (task.Config, error) {
+	c := task.DefaultConfig()
+	c.Enabled = raw.Enabled
+	if raw.Workers != 0 {
+		c.Workers = raw.Workers
+	}
+	if raw.MaxSteps != 0 {
+		c.MaxSteps = raw.MaxSteps
+	}
+	for _, pair := range []struct {
+		value  string
+		target *time.Duration
+	}{{raw.Timeout, &c.Timeout}, {raw.LeaseTTL, &c.LeaseTTL}, {raw.PollInterval, &c.PollInterval}} {
+		if pair.value != "" {
+			d, err := time.ParseDuration(pair.value)
+			if err != nil {
+				return c, err
+			}
+			*pair.target = d
+		}
+	}
+	if raw.Roles != nil {
+		c.Roles = raw.Roles
+	}
+	if c.Workers < 1 || c.MaxSteps < 1 || c.Timeout <= 0 || c.LeaseTTL < 30*time.Millisecond || c.PollInterval <= 0 {
+		return c, errors.New("invalid task worker count or execution budgets")
+	}
+	if len(c.Roles) == 0 {
+		return c, errors.New("at least one task role is required")
+	}
+	return c, nil
 }

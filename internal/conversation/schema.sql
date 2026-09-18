@@ -41,3 +41,14 @@ CREATE INDEX IF NOT EXISTS agent_runs_queue_order
 CREATE UNIQUE INDEX IF NOT EXISTS agent_runs_one_running_per_session
  ON agent_runs(session_id)
  WHERE status = 'running';
+
+ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT '';
+ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS notification_id text NOT NULL DEFAULT '';
+CREATE UNIQUE INDEX IF NOT EXISTS agent_runs_notification ON agent_runs(notification_id) WHERE notification_id <> '';
+-- Kept here so existing run commits work even when task workers are disabled.
+CREATE TABLE IF NOT EXISTS agent_task_notifications (
+ id text PRIMARY KEY, username text NOT NULL,
+ session_id uuid NOT NULL REFERENCES agent_sessions(id), content text NOT NULL,
+ enqueued boolean NOT NULL DEFAULT false, acknowledged boolean NOT NULL DEFAULT false,
+ created_at timestamptz NOT NULL DEFAULT now()
+);

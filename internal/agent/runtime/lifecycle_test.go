@@ -341,3 +341,34 @@ func TestCloseDoesNotConsumePendingEvents(t *testing.T) {
 		}
 	}
 }
+
+func TestShutdownRequeuesInternalNotification(t *testing.T) {
+	ctx := context.Background()
+	store := conversation.NewMemory()
+	session, _ := store.Create(ctx, "alice")
+	record, _ := store.EnqueueInternal(ctx, "alice", session.ID, "task result", "task:1:1")
+	lease, err := store.ClaimNext(ctx, "worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := NewClaimed(ctx, streamAgent([]*schema.AgenticMessage{testutil.Text("partial summary")}), lease)
+	if event := run.Next(); event.Kind != EventTextDelta {
+		t.Fatalf("first %+v", event)
+	}
+	_ = run.Close()
+	got, err := store.GetRun(ctx, "alice", session.ID, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != conversation.RunQueued {
+		t.Fatalf("shutdown lost notification: %+v", got)
+	}
+	recovered, err := store.ClaimNext(ctx, "replacement", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recovered.Close()
+	if recovered.Run().ID != record.ID {
+		t.Fatal("notification ID changed")
+	}
+}

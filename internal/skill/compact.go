@@ -6,7 +6,7 @@ import (
 	"unicode"
 )
 
-const compactStub = "Skill catalog compacted for this turn: no specialized skill matched the current request. Call load_skill only if a later request matches a catalog entry."
+const compactStub = "Skill catalog compacted for this turn: no specialized skill matched the current request. Use list_skills(query) to rediscover all skills, load_skill(name) for instructions, and read_skill_resource(name,path) for references. Explicit $skill-name requests must be loaded; compose multiple relevant skills. Task control tools remain available; query list_tasks for unfinished work."
 
 // CompactInstruction drops unused catalog Directory rows from a system prompt.
 // Matching is from the row's own name/use-when terms into the current situation,

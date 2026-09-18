@@ -88,6 +88,16 @@ func (manager *queueManager) execute(lease conversation.RunLease) {
 		return
 	}
 	runCtx, cancel := context.WithCancel(manager.ctx)
+	if manager.cfg.Tasks != nil {
+		summary, err := manager.cfg.Tasks.Summary(runCtx, record.Username, record.SessionID)
+		if err != nil {
+			manager.mu.Unlock()
+			cancel()
+			lease.Close()
+			return
+		}
+		runCtx = context.WithValue(runCtx, taskSummaryKey{}, summary)
+	}
 	run := NewClaimed(runCtx, manager.agent, lease, manager.memory)
 	active := &activeRun{sessionID: record.SessionID, record: record, lease: lease, run: run}
 	manager.active[record.ID] = active

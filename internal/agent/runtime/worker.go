@@ -98,6 +98,7 @@ func (manager *queueManager) execute(lease conversation.RunLease) {
 		}
 		runCtx = context.WithValue(runCtx, taskSummaryKey{}, summary)
 	}
+	runCtx = withRunPhaseStore(runCtx, manager.store)
 	run := NewClaimed(runCtx, manager.agent, lease, manager.memory)
 	active := &activeRun{sessionID: record.SessionID, record: record, lease: lease, run: run}
 	manager.active[record.ID] = active

@@ -31,7 +31,7 @@ func ClaimQueuedRun(ctx context.Context, store conversation.QueueStore, agent ad
 	if err != nil {
 		return nil, err
 	}
-	return NewClaimed(ctx, agent, lease, memory...), nil
+	return NewClaimed(withRunPhaseStore(ctx, store), agent, lease, memory...), nil
 }
 
 // NewClaimed constructs a run from a lease already claimed by QueueManager.
@@ -56,6 +56,7 @@ func NewClaimed(parent context.Context, agent adk.TypedAgent[*schema.AgenticMess
 	record := lease.Run()
 	runContext, cancel := context.WithCancel(parent)
 	runContext = WithInvocationIdentity(runContext, InvocationIdentity{Username: record.Username, Internal: record.Source != "", SessionID: record.SessionID, RunID: record.ID})
+	runContext = attachPhaseSink(runContext)
 	runContext, span := telemetry.StartRun(runContext, telemetry.Identity{SessionID: record.SessionID, RunID: record.ID, WorkerID: record.WorkerID}, zap.Float64("queue_wait_ms", queueWait(record)))
 	capture := &stateCapture{}
 	run := &agentRun{

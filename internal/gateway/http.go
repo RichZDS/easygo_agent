@@ -35,6 +35,7 @@ func New(store conversation.Store, queue agentruntime.QueueManager, tasks ...*ta
 	mux.HandleFunc("GET /v1/users/{user}/sessions/{id}/runs/{run_id}", h.getRun)
 	mux.HandleFunc("DELETE /v1/users/{user}/sessions/{id}/runs/{run_id}", h.cancelRun)
 	mux.HandleFunc("GET /v1/users/{user}/sessions/{id}/runs/{run_id}/events", h.runEvents)
+	mux.HandleFunc("GET /v1/users/{user}/sessions/{id}/runs/{run_id}/phases", h.runPhases)
 	if len(tasks) > 0 && tasks[0] != nil {
 		registerTasks(mux, h, tasks[0])
 	}
@@ -186,6 +187,29 @@ func (h *Handler) cancelRun(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusAccepted
 	}
 	writeJSON(w, status, record)
+}
+
+func (h *Handler) runPhases(w http.ResponseWriter, r *http.Request) {
+	if err := conversation.ValidateUser(r.PathValue("user")); err != nil {
+		writeError(w, err)
+		return
+	}
+	after, err := strconv.ParseInt(defaultValue(r.URL.Query().Get("after"), "0"), 10, 64)
+	if err != nil || after < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "after must be a nonnegative sequence"})
+		return
+	}
+	phases, ok := h.store.(conversation.PhaseStore)
+	if !ok || phases == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "phase store is unavailable"})
+		return
+	}
+	page, err := phases.ListRunPhases(r.Context(), r.PathValue("user"), r.PathValue("id"), r.PathValue("run_id"), after)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, page)
 }
 
 func (h *Handler) runEvents(w http.ResponseWriter, r *http.Request) {

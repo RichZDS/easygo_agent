@@ -14,6 +14,7 @@ import (
 
 type memoryRun struct {
 	record RunRecord
+	phases []RunPhase
 }
 
 type memoryEntry struct {

@@ -10,7 +10,11 @@ import (
 	"time"
 )
 
-func TestMemoryContract(t *testing.T) { testStore(t, NewMemory()) }
+func TestMemoryContract(t *testing.T) {
+	store := NewMemory()
+	testStore(t, store)
+	testRunPhases(t, store)
+}
 
 // Set EASYGO_TEST_DATABASE_URL to a disposable PostgreSQL database. Tables are
 // additive; the test only cleans up its uniquely named user's records.
@@ -28,6 +32,7 @@ func TestPostgresContract(t *testing.T) {
 	defer store.Close()
 	testStore(t, store)
 	testQueueStore(t, store)
+	testRunPhases(t, store)
 }
 
 func testQueueStore(t *testing.T, store QueueStore) {
@@ -43,6 +48,7 @@ func testQueueStore(t *testing.T, store QueueStore) {
 		t.Cleanup(func() {
 			cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
 			defer stop()
+			_, _ = pg.pool.Exec(cleanup, "DELETE FROM agent_run_phases WHERE run_id IN (SELECT id FROM agent_runs WHERE session_id IN (SELECT id FROM agent_sessions WHERE username=$1))", user)
 			_, _ = pg.pool.Exec(cleanup, "DELETE FROM agent_runs WHERE session_id IN (SELECT id FROM agent_sessions WHERE username=$1)", user)
 			_, _ = pg.pool.Exec(cleanup, "DELETE FROM agent_turns WHERE session_id IN (SELECT id FROM agent_sessions WHERE username=$1)", user)
 			_, _ = pg.pool.Exec(cleanup, "DELETE FROM agent_sessions WHERE username=$1", user)
@@ -86,6 +92,7 @@ func testStore(t *testing.T, store Store) {
 		defer func() {
 			cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
 			defer stop()
+			_, _ = pg.pool.Exec(cleanup, "DELETE FROM agent_run_phases WHERE run_id IN (SELECT id FROM agent_runs WHERE session_id IN (SELECT id FROM agent_sessions WHERE username=$1))", user)
 			_, _ = pg.pool.Exec(cleanup, "DELETE FROM agent_runs WHERE session_id IN (SELECT id FROM agent_sessions WHERE username=$1)", user)
 			_, _ = pg.pool.Exec(cleanup, "DELETE FROM agent_turns WHERE session_id IN (SELECT id FROM agent_sessions WHERE username=$1)", user)
 			_, _ = pg.pool.Exec(cleanup, "DELETE FROM agent_sessions WHERE username=$1", user)

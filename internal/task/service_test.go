@@ -2,6 +2,7 @@ package task
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -130,6 +131,72 @@ func TestCancelParentChildrenAndInternalDelegationDenied(t *testing.T) {
 	defer internal.Close()
 	if _, err = service.Spawn(ctx, Owner{"u", session.ID, notification.ID}, Brief{Role: "analyst", Goal: "recursive", Acceptance: []string{"x"}, Key: "no"}); err == nil {
 		t.Fatal("notification delegated")
+	}
+}
+
+type releaseFailStore struct {
+	*Memory
+	err error
+}
+
+func (s *releaseFailStore) Release(context.Context, string, string) error { return s.err }
+
+func TestReleaseFailureRecordsEventWithoutFailingSuccess(t *testing.T) {
+	ctx := context.Background()
+	conversations := conversation.NewMemory()
+	session, err := conversations.Create(ctx, "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := conversations.Enqueue(ctx, "owner", session.ID, "delegate", "parent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := conversations.ClaimNext(ctx, "parent", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parent.Close()
+	base := NewMemory()
+	releaseErr := errors.New("release disk full")
+	store := &releaseFailStore{Memory: base, err: releaseErr}
+	cfg := DefaultConfig()
+	cfg.Roles = map[string]Role{"executor": {Instruction: "execute"}}
+	engine := &Engine{Store: store, Registry: toolregistry.New(), Config: cfg, SkillVersion: "skills-v1", Model: &testutil.Model{GenerateFunc: func(ctx context.Context, in []*schema.AgenticMessage) (*schema.AgenticMessage, error) {
+		return callMessage("done", "finish_task", `{"summary":"verified","evidence":["ok"]}`), nil
+	}}}
+	service := &Service{Store: store, Engine: engine, Conversations: conversations}
+	owner := Owner{User: "owner", Session: session.ID, Run: run.ID}
+	if _, err = base.Create(ctx, owner, Brief{Role: "executor", Goal: "work", Acceptance: []string{"verified"}, Key: "rel"}); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := base.Claim(ctx, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.execute(ctx, claimed)
+	got, err := base.Get(ctx, owner, claimed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != Completed {
+		t.Fatalf("status=%s reason=%s", got.Status, got.Reason)
+	}
+	var found []Event
+	for _, event := range got.Events {
+		if event.Kind == "lease_release_failed" {
+			found = append(found, event)
+		}
+	}
+	if len(found) != 1 || found[0].Detail != releaseErr.Error() {
+		t.Fatalf("release event: %+v", found)
+	}
+	pending, err := base.Pending(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("outbox: %+v", pending)
 	}
 }
 func waitTasks(t *testing.T, s Store, o Owner, ready func([]Task) bool) {

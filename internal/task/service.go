@@ -133,7 +133,10 @@ func (s *Service) execute(parent context.Context, t Task) {
 		<-done
 		releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer releaseCancel()
-		_ = s.Store.Release(releaseCtx, t.ID, t.Token)
+		if err := s.Store.Release(releaseCtx, t.ID, t.Token); err != nil {
+			// Execution status is already saved. A release error must not replace it.
+			s.noteLeaseReleaseFailure(t, err)
+		}
 	}()
 	go func() {
 		defer close(done)
@@ -181,6 +184,13 @@ func (s *Service) execute(parent context.Context, t Task) {
 
 	if err := s.Engine.Execute(ctx, t); err != nil && ctx.Err() == nil && !errors.Is(err, ErrLeaseLost) {
 		logger.Error("task execution interrupted", zap.String("task_id", t.ID), zap.Error(err))
+	}
+}
+func (s *Service) noteLeaseReleaseFailure(t Task, releaseErr error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.Store.AppendEvent(ctx, t.ID, t.Token, "lease_release_failed", releaseErr.Error()); err != nil {
+		logger.Error("lease release failed", zap.String("task_id", t.ID), zap.Error(releaseErr), zap.String("record_error", err.Error()))
 	}
 }
 func (s *Service) notifications(ctx context.Context) {

@@ -138,6 +138,26 @@ func (m *Memory) Release(ctx context.Context, id, token string) error {
 	m.tasks[id] = t
 	return ctx.Err()
 }
+
+// AppendEvent records history for a worker that still holds the claim token.
+// Status and the notification outbox stay as they are.
+func (m *Memory) AppendEvent(ctx context.Context, id, token, kind, detail string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if token == "" {
+		return ErrLeaseLost
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.tasks[id]
+	if !ok || t.Token != token {
+		return ErrLeaseLost
+	}
+	t.Event(kind, detail)
+	m.tasks[id] = clone(t)
+	return nil
+}
 func (m *Memory) change(ctx context.Context, o Owner, id string, fn func(*Task) error) (Task, error) {
 	if err := ctx.Err(); err != nil {
 		return Task{}, err

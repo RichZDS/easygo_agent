@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -132,6 +133,126 @@ func TestRecoveryBoundaries(t *testing.T) {
 			}
 		})
 	}
+}
+func TestSameBatchReusesSavedResultAndRetriesUnfinishedRead(t *testing.T) {
+	ctx := context.Background()
+	base := NewMemory()
+	var writes, reads atomic.Int32
+	r := toolregistry.New()
+	write, err := utils.InferTool("write_a", "idempotent write", func(ctx context.Context, in struct{}) (string, error) {
+		if toolregistry.IdempotencyKey(ctx) == "" {
+			return "", errors.New("missing idempotency key")
+		}
+		return fmt.Sprintf("persisted-%d", writes.Add(1)), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	read, err := utils.InferTool("read_b", "read only", func(ctx context.Context, in struct{}) (string, error) {
+		return fmt.Sprintf("observed-%d", reads.Add(1)), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = r.Register(ctx, write, "business", toolregistry.Idempotent, false); err != nil {
+		t.Fatal(err)
+	}
+	if err = r.Register(ctx, read, "business", toolregistry.ReadOnly, false); err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultConfig()
+	cfg.Roles = map[string]Role{"executor": {Instruction: "execute", Tools: []string{"write_a", "read_b"}}}
+	fault := &crashStore{Store: base, match: func(task Task) bool {
+		if len(task.Events) == 0 {
+			return false
+		}
+		last := task.Events[len(task.Events)-1]
+		return last.Kind == "tool_result" && strings.HasPrefix(last.Detail, "call-b ")
+	}}
+	engine := &Engine{Store: fault, Registry: r, Config: cfg, SkillVersion: "skills-v1", Model: &testutil.Model{GenerateFunc: func(ctx context.Context, in []*schema.AgenticMessage) (*schema.AgenticMessage, error) {
+		seen := map[string]int{}
+		for _, m := range in {
+			if m == nil {
+				continue
+			}
+			for _, b := range m.ContentBlocks {
+				if b != nil && b.FunctionToolResult != nil {
+					seen[b.FunctionToolResult.CallID]++
+				}
+			}
+		}
+		if seen["call-a"] > 1 || seen["call-b"] > 1 {
+			t.Errorf("tool result paired more than once: %+v", seen)
+		}
+		if seen["call-a"] == 1 && seen["call-b"] == 1 {
+			return callMessage("done", "finish_task", `{"summary":"verified","evidence":["write_a reused","read_b completed"]}`), nil
+		}
+		if seen["call-a"] == 1 || seen["call-b"] == 1 {
+			t.Errorf("model continued before both call IDs were paired: %+v", seen)
+		}
+		return &schema.AgenticMessage{Role: schema.AgenticRoleTypeAssistant, ContentBlocks: []*schema.ContentBlock{
+			schema.NewContentBlock(&schema.FunctionToolCall{CallID: "call-a", Name: "write_a", Arguments: "{}"}),
+			schema.NewContentBlock(&schema.FunctionToolCall{CallID: "call-b", Name: "read_b", Arguments: "{}"}),
+		}}, nil
+	}}}
+	if _, err = base.Create(ctx, Owner{User: "u", Session: "s", Run: "r"}, Brief{Role: "executor", Goal: "work", Acceptance: []string{"verified"}, Key: "batch"}); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := base.Claim(ctx, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = engine.Execute(ctx, claimed); !errors.Is(err, crash) {
+		t.Fatalf("want crash, got %v", err)
+	}
+	mid, err := base.Get(ctx, claimed.Owner, claimed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	savedA, savedB := callByID(mid.Checkpoint.Calls, "call-a"), callByID(mid.Checkpoint.Calls, "call-b")
+	if savedA == nil || savedB == nil || !savedA.Done || savedA.Result == "" || savedB.Done || !savedB.Started {
+		t.Fatalf("pre-crash batch A=%+v B=%+v", savedA, savedB)
+	}
+	savedResult := savedA.Result
+	if err = base.Release(ctx, claimed.ID, claimed.Token); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := base.Claim(ctx, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.Store = base
+	if err = engine.Execute(ctx, recovered); err != nil {
+		t.Fatal(err)
+	}
+	got, err := base.Get(ctx, claimed.Owner, claimed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != Completed {
+		t.Fatalf("status=%s reason=%s", got.Status, got.Reason)
+	}
+	if writes.Load() != 1 || reads.Load() != 2 {
+		t.Fatalf("write_a calls=%d read_b calls=%d", writes.Load(), reads.Load())
+	}
+	finalA, finalB := callByID(got.Calls, "call-a"), callByID(got.Calls, "call-b")
+	if finalA == nil || finalB == nil {
+		t.Fatalf("call audit lost: %+v", got.Calls)
+	}
+	if finalA.Result != savedResult {
+		t.Fatalf("saved result bytes changed: %q -> %q", savedResult, finalA.Result)
+	}
+	if !finalB.Done || finalB.Result == "" {
+		t.Fatalf("read result was not saved: %+v", finalB)
+	}
+}
+func callByID(calls []Call, id string) *Call {
+	for i := range calls {
+		if calls[i].ID == id {
+			return &calls[i]
+		}
+	}
+	return nil
 }
 func TestResumeUncertainWriteWithVerifiedResult(t *testing.T) {
 	ctx := context.Background()

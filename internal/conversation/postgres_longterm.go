@@ -12,7 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const longTermMemoryColumns = `id::text,username,kind,content,tags,importance,confidence,source_sessions,source_turn_ids,call_count,first_seen_at,last_seen_at,last_accessed_at,expires_at,created_at,updated_at,archived_at,COALESCE(profile_slot,0),version,state`
+const longTermMemoryColumns = `id::text,username,kind,content,tags,importance,confidence,source_sessions,source_turn_ids,call_count,first_seen_at,last_seen_at,last_accessed_at,expires_at,created_at,updated_at,archived_at,COALESCE(profile_slot,0),version,state,superseded_by::text`
 
 func (p *MemoryPostgres) Recall(ctx context.Context, user string, limit int) ([]LongTermMemory, error) {
 	if err := ValidateUser(user); err != nil {
@@ -78,25 +78,39 @@ func (p *MemoryPostgres) ReplaceProfile(ctx context.Context, user string, drafts
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	rows, err := tx.Query(ctx, `SELECT id::text FROM user_long_term_memories WHERE username=$1 AND state='active' FOR UPDATE`, user)
+	rows, err := tx.Query(ctx, `SELECT `+longTermMemoryColumns+` FROM user_long_term_memories WHERE username=$1 AND state='active' FOR UPDATE`, user)
 	if err != nil {
 		return nil, err
 	}
-	active := map[string]bool{}
-	for rows.Next() {
-		var id string
-		if err = rows.Scan(&id); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		active[id] = true
-	}
-	if err = rows.Err(); err != nil {
-		rows.Close()
+	currentRows, err := scanLongTermMemories(rows)
+	if err != nil {
 		return nil, err
 	}
-	rows.Close()
+	active := map[string]LongTermMemory{}
+	for _, memory := range currentRows {
+		active[memory.ID] = memory
+	}
+	for _, draft := range drafts {
+		if draft.ID == "" {
+			continue
+		}
+		if _, ok := active[draft.ID]; !ok {
+			return nil, ErrInvalidMemory
+		}
+	}
 	now := time.Now().UTC()
+	for _, draft := range drafts {
+		if draft.ID == "" {
+			continue
+		}
+		current := active[draft.ID]
+		if !longTermIdentityChanged(current, draft) {
+			continue
+		}
+		if err = insertSupersededSnapshot(ctx, tx, current, now); err != nil {
+			return nil, err
+		}
+	}
 	if _, err = tx.Exec(ctx, `UPDATE user_long_term_memories SET state='archived',profile_slot=NULL,archived_at=$2,updated_at=$2 WHERE username=$1 AND state='active'`, user, now); err != nil {
 		return nil, err
 	}
@@ -114,9 +128,6 @@ func (p *MemoryPostgres) ReplaceProfile(ctx context.Context, user string, drafts
 			return nil, marshalErr
 		}
 		if draft.ID != "" {
-			if !active[draft.ID] {
-				return nil, ErrInvalidMemory
-			}
 			_, err = tx.Exec(ctx, `UPDATE user_long_term_memories SET kind=$2,content=$3,tags=$4,importance=$5,confidence=$6,source_sessions=$7,source_turn_ids=$8,last_seen_at=$9,expires_at=$10,updated_at=$9,archived_at=NULL,profile_slot=$11,version=version+1,state='active' WHERE id=$1`, draft.ID, string(draft.Kind), draft.Content, tags, draft.Importance, draft.Confidence, sessions, turns, now, draft.ExpiresAt, slot+1)
 		} else {
 			id := uuid.NewString()
@@ -130,6 +141,34 @@ func (p *MemoryPostgres) ReplaceProfile(ctx context.Context, user string, drafts
 		return nil, err
 	}
 	return p.ActiveProfile(ctx, user)
+}
+
+func (p *MemoryPostgres) History(ctx context.Context, user, id string) ([]LongTermMemory, error) {
+	if err := ValidateUser(user); err != nil {
+		return nil, err
+	}
+	rows, err := p.pool.Query(ctx, `SELECT `+longTermMemoryColumns+` FROM user_long_term_memories WHERE username=$1 AND state='archived' AND superseded_by::text=$2 ORDER BY archived_at ASC, id::text ASC`, user, id)
+	if err != nil {
+		return nil, err
+	}
+	return scanLongTermMemories(rows)
+}
+
+func insertSupersededSnapshot(ctx context.Context, tx pgx.Tx, current LongTermMemory, now time.Time) error {
+	tags, err := json.Marshal(current.Tags)
+	if err != nil {
+		return err
+	}
+	sessions, err := json.Marshal(current.SourceSessions)
+	if err != nil {
+		return err
+	}
+	turns, err := json.Marshal(current.SourceTurnIDs)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO user_long_term_memories(id,username,kind,content,tags,importance,confidence,source_sessions,source_turn_ids,call_count,first_seen_at,last_seen_at,last_accessed_at,expires_at,created_at,updated_at,archived_at,profile_slot,version,state,superseded_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16,NULL,$17,'archived',$18)`, uuid.NewString(), current.Username, string(current.Kind), current.Content, tags, current.Importance, current.Confidence, sessions, turns, current.CallCount, current.FirstSeenAt, current.LastSeenAt, current.LastAccessedAt, current.ExpiresAt, current.CreatedAt, now, current.Version, current.ID)
+	return err
 }
 
 func (p *Postgres) Transcript(ctx context.Context, user string, after, through time.Time) ([]TranscriptTurn, error) {
@@ -250,7 +289,7 @@ func scanLongTermMemory(row longTermRow) (LongTermMemory, error) {
 	var memory LongTermMemory
 	var kind string
 	var tags, sessions, turnIDs []byte
-	if err := row.Scan(&memory.ID, &memory.Username, &kind, &memory.Content, &tags, &memory.Importance, &memory.Confidence, &sessions, &turnIDs, &memory.CallCount, &memory.FirstSeenAt, &memory.LastSeenAt, &memory.LastAccessedAt, &memory.ExpiresAt, &memory.CreatedAt, &memory.UpdatedAt, &memory.ArchivedAt, &memory.ProfileSlot, &memory.Version, &memory.State); err != nil {
+	if err := row.Scan(&memory.ID, &memory.Username, &kind, &memory.Content, &tags, &memory.Importance, &memory.Confidence, &sessions, &turnIDs, &memory.CallCount, &memory.FirstSeenAt, &memory.LastSeenAt, &memory.LastAccessedAt, &memory.ExpiresAt, &memory.CreatedAt, &memory.UpdatedAt, &memory.ArchivedAt, &memory.ProfileSlot, &memory.Version, &memory.State, &memory.SupersededBy); err != nil {
 		return LongTermMemory{}, err
 	}
 	memory.Kind = MemoryKind(kind)

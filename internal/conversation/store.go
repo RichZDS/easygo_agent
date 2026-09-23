@@ -143,6 +143,7 @@ type LongTermMemory struct {
 	ProfileSlot    int        `json:"profile_slot,omitempty"`
 	Version        int        `json:"version"`
 	State          string     `json:"state"`
+	SupersededBy   *string    `json:"superseded_by,omitempty"`
 	Score          float64    `json:"score,omitempty"`
 }
 
@@ -185,6 +186,7 @@ type MemoryStore interface {
 	Recall(context.Context, string, int) ([]LongTermMemory, error)
 	ActiveProfile(context.Context, string) ([]LongTermMemory, error)
 	ReplaceProfile(context.Context, string, []MemoryDraft) ([]LongTermMemory, error)
+	History(context.Context, string, string) ([]LongTermMemory, error)
 	TryAcquireMemoryJob(context.Context, string) (MemoryJobLease, bool, error)
 	MemoryCheckpoint(context.Context, string) (time.Time, bool, error)
 	SetMemoryCheckpoint(context.Context, string, time.Time) error

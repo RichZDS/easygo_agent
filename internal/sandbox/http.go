@@ -16,9 +16,10 @@ import (
 )
 
 const (
-	sessionHeader = sandboxapi.SessionHeader
-	runHeader     = sandboxapi.RunHeader
-	maxHTTPBody   = int64(8 << 20)
+	sessionHeader        = sandboxapi.SessionHeader
+	runHeader            = sandboxapi.RunHeader
+	operatorCapacityPath = "/v1/operator/capacity"
+	maxHTTPBody          = int64(8 << 20)
 )
 
 var applicationIDPattern = sandboxapi.ApplicationIDPattern
@@ -57,6 +58,10 @@ func (handler *HTTPHandler) ServeHTTP(response http.ResponseWriter, request *htt
 		handler.writeError(response, &Error{Code: CodeUnauthorized, Message: "valid bearer token required"}, http.StatusUnauthorized)
 		return
 	}
+	if request.URL.Path == operatorCapacityPath {
+		handler.handleOperatorCapacity(response, request)
+		return
+	}
 	identity := Identity{SessionID: request.Header.Get(sessionHeader), RunID: request.Header.Get(runHeader)}
 	if err := validateIdentity(identity, true); err != nil {
 		handler.writeError(response, err, http.StatusBadRequest)
@@ -78,6 +83,18 @@ func (handler *HTTPHandler) ServeHTTP(response http.ResponseWriter, request *htt
 		return
 	}
 	handler.handleApplication(response, request, identity, parts[0], parts[1:])
+}
+
+func (handler *HTTPHandler) handleOperatorCapacity(response http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		handler.writeError(response, invalidRequest("method not allowed"), http.StatusMethodNotAllowed)
+		return
+	}
+	if len(request.Header.Values(sessionHeader)) > 0 || len(request.Header.Values(runHeader)) > 0 {
+		handler.writeError(response, invalidRequest("operator capacity does not accept a session or run header"), http.StatusBadRequest)
+		return
+	}
+	handler.writeJSON(response, http.StatusOK, handler.manager.OperatorCapacity())
 }
 
 func (handler *HTTPHandler) handleCollection(response http.ResponseWriter, request *http.Request, identity Identity) {

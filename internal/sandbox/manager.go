@@ -403,6 +403,54 @@ func (manager *Manager) Status(ctx context.Context, identity Identity, applicati
 	return ApplicationResult{Application: view}, nil
 }
 
+// OperatorCapacity reports admission limits and per-application failure codes.
+// running uses runningCountLocked. starting counts applications in StateStarting,
+// which can outlive the in-flight start semaphore. Destroyed records stay in
+// by_state and are omitted from the application list.
+func (manager *Manager) OperatorCapacity() OperatorCapacity {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	byState := map[string]int{
+		StateApplied:     0,
+		StateStarting:    0,
+		StateActive:      0,
+		StateBusy:        0,
+		StateWarmIdle:    0,
+		StateHibernating: 0,
+		StateHibernated:  0,
+		StateDestroying:  0,
+		StateDestroyed:   0,
+	}
+	applications := make([]OperatorApplication, 0)
+	for _, application := range manager.applications {
+		byState[application.State]++
+		if application.State == StateDestroyed {
+			continue
+		}
+		row := OperatorApplication{
+			ID:              application.ID,
+			State:           application.State,
+			LastFailureCode: application.LastFailureCode,
+			HardExpiresAt:   application.HardExpiresAt.UTC().Format(time.RFC3339Nano),
+		}
+		if !application.IdleExpiresAt.IsZero() {
+			row.IdleExpiresAt = application.IdleExpiresAt.UTC().Format(time.RFC3339Nano)
+		}
+		applications = append(applications, row)
+	}
+	sort.Slice(applications, func(i, j int) bool { return applications[i].ID < applications[j].ID })
+	return OperatorCapacity{
+		MaxRunning:      manager.cfg.MaxRunning,
+		MaxApplications: manager.cfg.MaxApplications,
+		MaxStarting:     manager.cfg.MaxStarting,
+		Running:         manager.runningCountLocked(),
+		Starting:        byState[StateStarting],
+		Waiters:         len(manager.waiters),
+		ByState:         byState,
+		Applications:    applications,
+	}
+}
+
 func (manager *Manager) Exec(ctx context.Context, identity Identity, applicationID string, request ExecRequest) (ExecResult, error) {
 	if err := validateIdentity(identity, true); err != nil {
 		return ExecResult{}, err
@@ -728,6 +776,9 @@ func (manager *Manager) runOperation(ctx context.Context, application *Applicati
 				manager.touchLocked(application, runID, recoveredState)
 			} else {
 				application.State = recoveredState
+				if recoveredState == StateActive || recoveredState == StateWarmIdle {
+					application.LastFailureCode = ""
+				}
 			}
 			if containerDiscarded {
 				application.IdleExpiresAt = time.Time{}
@@ -753,11 +804,14 @@ func (manager *Manager) runOperation(ctx context.Context, application *Applicati
 		// The container may still be running. Keep the durable Busy state so it
 		// continues to consume a slot; Reap recognizes a Busy application with no
 		// registered exec and retries the stop.
+		wrapped := internalError("stop sandbox after interrupted command", stopErr)
 		manager.mu.Lock()
 		application.State = StateBusy
+		application.LastFailureCode = errorCode(wrapped)
+		_ = manager.persistLocked(application)
 		manager.signalLocked()
 		manager.mu.Unlock()
-		return EngineExecResult{}, internalError("stop sandbox after interrupted command", stopErr)
+		return EngineExecResult{}, wrapped
 	}
 	manager.mu.Lock()
 	application.State = StateHibernated
@@ -816,7 +870,12 @@ func (manager *Manager) cancelExecsForStorage(applicationID string, err error, g
 	}
 }
 
-func (manager *Manager) ensureActive(ctx context.Context, application *Application, queueDuration *time.Duration) error {
+func (manager *Manager) ensureActive(ctx context.Context, application *Application, queueDuration *time.Duration) (err error) {
+	defer func() {
+		if err != nil {
+			manager.recordLastFailure(application, err)
+		}
+	}()
 	manager.mu.Lock()
 	remaining := application.HardExpiresAt.Sub(manager.clock.Now())
 	if remaining <= 0 {
@@ -1050,6 +1109,7 @@ func (manager *Manager) ensureActive(ctx context.Context, application *Applicati
 	}
 	manager.mu.Lock()
 	application.State = StateActive
+	application.LastFailureCode = ""
 	err = manager.persistLocked(application)
 	if err != nil {
 		// The container is confirmed running, while the durable record is still
@@ -1291,16 +1351,18 @@ func (manager *Manager) acquireSlot(ctx context.Context, applicationID string) (
 				}
 				if victim != nil {
 					if err := manager.engine.StopContainer(ctx, victim.ContainerID); err != nil {
+						stopErr := internalError("hibernate least-recently-used sandbox", err)
 						manager.mu.Lock()
 						// Stop was not confirmed. Retain Hibernating so this
 						// container still consumes a slot and Reap retries it.
 						victim.State = StateHibernating
+						victim.LastFailureCode = errorCode(stopErr)
 						_ = manager.persistLocked(victim)
 						manager.signalLocked()
 						manager.mu.Unlock()
 						manager.unlockOperation(victimOperation)
 						manager.rollbackStarting(application, previousState)
-						return "", internalError("hibernate least-recently-used sandbox", err)
+						return "", stopErr
 					}
 					manager.mu.Lock()
 					victim.State = StateHibernated
@@ -1368,7 +1430,9 @@ func (manager *Manager) hibernate(ctx context.Context, application *Application)
 		if err := manager.engine.StopContainer(ctx, containerID); err != nil {
 			// Hibernating is intentionally durable: a failed stop may leave a
 			// running container, so capacity cannot be released and Reap retries.
-			return internalError("stop sandbox container", err)
+			stopErr := internalError("stop sandbox container", err)
+			manager.recordLastFailure(application, stopErr)
+			return stopErr
 		}
 	}
 	manager.mu.Lock()
@@ -1596,11 +1660,38 @@ func (manager *Manager) touchLocked(application *Application, runID, state strin
 		application.SeenRunIDs = append(application.SeenRunIDs, runID)
 	}
 	application.State = state
+	if state == StateActive || state == StateWarmIdle {
+		application.LastFailureCode = ""
+	}
 	application.LastUsedAt = now
 	application.IdleExpiresAt = now.Add(application.IdleTTL)
 	if application.IdleExpiresAt.After(application.HardExpiresAt) {
 		application.IdleExpiresAt = application.HardExpiresAt
 	}
+}
+
+// recordLastFailure stores errorCode(err) on an activation or stop failure.
+// The caller must not hold manager.mu. A missing or destroyed application is
+// left untouched so expiry cleanup does not recreate a deleted record.
+func (manager *Manager) recordLastFailure(application *Application, err error) {
+	if application == nil || err == nil {
+		return
+	}
+	code := errorCode(err)
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	current := manager.applications[application.ID]
+	if current == nil || current.State == StateDestroyed || current.State == StateDestroying {
+		return
+	}
+	if current.LastFailureCode == code {
+		return
+	}
+	current.LastFailureCode = code
+	if persistErr := manager.persistLocked(current); persistErr != nil {
+		return
+	}
+	manager.signalLocked()
 }
 
 func (manager *Manager) persistLocked(application *Application) error {

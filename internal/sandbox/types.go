@@ -73,6 +73,7 @@ type Application struct {
 	VolumeName         string        `json:"volume_name"`
 	ContainerID        string        `json:"container_id,omitempty"`
 	State              string        `json:"state"`
+	LastFailureCode    string        `json:"last_failure_code,omitempty"`
 	CreatedAt          time.Time     `json:"created_at"`
 	LastUsedAt         time.Time     `json:"last_used_at,omitempty"`
 	IdleExpiresAt      time.Time     `json:"idle_expires_at,omitempty"`
@@ -85,6 +86,8 @@ type Application struct {
 }
 
 // ApplicationView is the only lifecycle representation returned to callers.
+// LastFailureCode stays on the persisted record and the operator capacity
+// view; agent Status responses do not include it.
 type ApplicationView struct {
 	ID                 string `json:"id"`
 	State              string `json:"state"`
@@ -96,6 +99,29 @@ type ApplicationView struct {
 	DistinctRuns       int    `json:"distinct_runs"`
 	WorkspaceBytes     int64  `json:"workspace_bytes"`
 	WorkspacePreserved bool   `json:"workspace_preserved"`
+}
+
+// OperatorCapacity is the operator-only snapshot of admission limits and
+// application failure codes. It never includes session, volume, container, or
+// run identifiers.
+type OperatorCapacity struct {
+	MaxRunning      int                   `json:"max_running"`
+	MaxApplications int                   `json:"max_applications"`
+	MaxStarting     int                   `json:"max_starting"`
+	Running         int                   `json:"running"`
+	Starting        int                   `json:"starting"`
+	Waiters         int                   `json:"waiters"`
+	ByState         map[string]int        `json:"by_state"`
+	Applications    []OperatorApplication `json:"applications"`
+}
+
+// OperatorApplication is one row of the operator capacity view.
+type OperatorApplication struct {
+	ID              string `json:"id"`
+	State           string `json:"state"`
+	LastFailureCode string `json:"last_failure_code"`
+	IdleExpiresAt   string `json:"idle_expires_at,omitempty"`
+	HardExpiresAt   string `json:"hard_expires_at"`
 }
 
 type ApplyResult struct {

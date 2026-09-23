@@ -96,6 +96,31 @@ func TestServiceRejectsSensitiveOrUnsupportedEvidence(t *testing.T) {
 	}
 }
 
+func TestValidateCandidatesDropsBearerAndDatabaseURLs(t *testing.T) {
+	batch := []conversation.TranscriptTurn{{SessionID: "s1", Turn: conversation.Turn{ID: 3}}}
+	candidates := validateCandidates([]Candidate{
+		{Kind: conversation.MemoryKindPreference, Content: "password: hunter2", Importance: .5, Confidence: .5, SourceSessions: []string{"s1"}, SourceTurnIDs: []int64{3}},
+		{Kind: conversation.MemoryKindPreference, Content: "Bearer abcdefgh", Importance: .5, Confidence: .5, SourceSessions: []string{"s1"}, SourceTurnIDs: []int64{3}},
+		{Kind: conversation.MemoryKindPreference, Content: "postgres://easygo:easygo@127.0.0.1/easygo", Importance: .5, Confidence: .5, SourceSessions: []string{"s1"}, SourceTurnIDs: []int64{3}},
+		{Kind: conversation.MemoryKindPreference, Content: "postgresql://easygo:easygo@127.0.0.1/easygo", Importance: .5, Confidence: .5, SourceSessions: []string{"s1"}, SourceTurnIDs: []int64{3}},
+		{Kind: conversation.MemoryKindPreference, Content: "postgres://easygo@127.0.0.1/easygo", Importance: .5, Confidence: .5, SourceSessions: []string{"s1"}, SourceTurnIDs: []int64{3}},
+		{Kind: conversation.MemoryKindPreference, Content: "喜欢简短回答", Importance: .5, Confidence: .5, SourceSessions: []string{"s1"}, SourceTurnIDs: []int64{3}},
+	}, batch)
+	if len(candidates) != 2 || candidates[0].Content != "postgres://easygo@127.0.0.1/easygo" || candidates[1].Content != "喜欢简短回答" {
+		t.Fatalf("candidates=%+v", candidates)
+	}
+	err := validateReconciledDraft(conversation.MemoryDraft{
+		Kind: conversation.MemoryKindPreference, Content: "postgres://easygo:easygo@127.0.0.1/easygo",
+		Importance: .5, Confidence: .5, SourceSessions: []string{"s1"}, SourceTurnIDs: []int64{1},
+	}, nil, []Candidate{{
+		Kind: conversation.MemoryKindPreference, Content: "postgres://easygo:easygo@127.0.0.1/easygo",
+		Importance: .5, Confidence: .5, SourceSessions: []string{"s1"}, SourceTurnIDs: []int64{1},
+	}})
+	if err != conversation.ErrInvalidMemory {
+		t.Fatalf("reconciled database url err=%v", err)
+	}
+}
+
 func TestScheduleAlwaysSelectsTheNextThreeAM(t *testing.T) {
 	location := time.FixedZone("CST", 8*60*60)
 	now := time.Date(2026, 9, 9, 3, 0, 0, 0, location)

@@ -47,7 +47,29 @@ func cloneLongTermMemory(in LongTermMemory) LongTermMemory {
 		value := *in.ArchivedAt
 		in.ArchivedAt = &value
 	}
+	if in.SupersededBy != nil {
+		value := *in.SupersededBy
+		in.SupersededBy = &value
+	}
 	return in
+}
+
+func sameStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// longTermIdentityChanged reports whether a kept profile row's kind, content,
+// or tags differ from the draft. Other field edits are not a supersession.
+func longTermIdentityChanged(current LongTermMemory, draft MemoryDraft) bool {
+	return current.Kind != draft.Kind || current.Content != draft.Content || !sameStrings(current.Tags, draft.Tags)
 }
 
 // RankMemories applies the required equal 50/50 weight. Recency decays with a

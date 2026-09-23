@@ -105,6 +105,10 @@ func (m *MemoryLongTerm) ReplaceProfile(ctx context.Context, user string, drafts
 		if draft.ID != "" && !exists {
 			return nil, ErrInvalidMemory
 		}
+		if exists && longTermIdentityChanged(memory, draft) {
+			snapshot := archiveSuperseded(memory, now)
+			m.longTerms[user][snapshot.ID] = snapshot
+		}
 		if !exists {
 			memory = LongTermMemory{ID: uuid.NewString(), Username: user, FirstSeenAt: now, CreatedAt: now, Version: 1}
 		} else {
@@ -123,6 +127,7 @@ func (m *MemoryLongTerm) ReplaceProfile(ctx context.Context, user string, drafts
 		memory.ArchivedAt = nil
 		memory.ProfileSlot = slot + 1
 		memory.State = memoryStateActive
+		memory.SupersededBy = nil
 		m.longTerms[user][memory.ID] = memory
 		selected[memory.ID] = true
 		result = append(result, cloneLongTermMemory(memory))
@@ -133,10 +138,56 @@ func (m *MemoryLongTerm) ReplaceProfile(ctx context.Context, user string, drafts
 			memory.ArchivedAt = &now
 			memory.UpdatedAt = now
 			memory.ProfileSlot = 0
+			memory.SupersededBy = nil
 			m.longTerms[user][id] = memory
 		}
 	}
 	return result, nil
+}
+
+func (m *MemoryLongTerm) History(ctx context.Context, user, id string) ([]LongTermMemory, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := ValidateUser(user); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := []LongTermMemory{}
+	for _, memory := range m.longTerms[user] {
+		if memory.State != memoryStateArchive || memory.SupersededBy == nil || *memory.SupersededBy != id {
+			continue
+		}
+		result = append(result, cloneLongTermMemory(memory))
+	}
+	sort.Slice(result, func(i, j int) bool {
+		left, right := time.Time{}, time.Time{}
+		if result[i].ArchivedAt != nil {
+			left = *result[i].ArchivedAt
+		}
+		if result[j].ArchivedAt != nil {
+			right = *result[j].ArchivedAt
+		}
+		if !left.Equal(right) {
+			return left.Before(right)
+		}
+		return result[i].ID < result[j].ID
+	})
+	return result, nil
+}
+
+func archiveSuperseded(current LongTermMemory, now time.Time) LongTermMemory {
+	snapshot := cloneLongTermMemory(current)
+	survivingID := current.ID
+	snapshot.ID = uuid.NewString()
+	snapshot.ProfileSlot = 0
+	snapshot.State = memoryStateArchive
+	archivedAt := now
+	snapshot.ArchivedAt = &archivedAt
+	snapshot.UpdatedAt = now
+	snapshot.SupersededBy = &survivingID
+	return snapshot
 }
 
 func (m *MemoryLongTerm) MemoryCheckpoint(ctx context.Context, user string) (time.Time, bool, error) {

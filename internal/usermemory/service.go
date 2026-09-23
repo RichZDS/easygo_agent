@@ -186,7 +186,7 @@ func validateReconciledDraft(draft conversation.MemoryDraft, existing []conversa
 	return nil
 }
 
-var sensitiveMemoryPattern = regexp.MustCompile(`(?i)(-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(api[_ -]?key|password|secret|access[_ -]?token)\b\s*[:=]|\bsk-[a-z0-9]{12,})`)
+var sensitiveMemoryPattern = regexp.MustCompile(`(?i)(-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(api[_ -]?key|password|secret|access[_ -]?token)\b\s*[:=]|\bsk-[a-z0-9]{12,}|\bBearer\s+\S{8,}|postgres(?:ql)?://[^\s/@:]+:[^\s/@]+@)`)
 
 func looksSensitive(content string) bool { return sensitiveMemoryPattern.MatchString(content) }
 

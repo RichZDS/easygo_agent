@@ -22,12 +22,14 @@ CREATE TABLE IF NOT EXISTS user_long_term_memories (
  profile_slot smallint,
  version integer NOT NULL DEFAULT 1 CHECK (version > 0),
  state text NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'archived')),
+ superseded_by uuid,
  CHECK ((state = 'active' AND profile_slot BETWEEN 1 AND 5) OR (state = 'archived' AND profile_slot IS NULL))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS user_long_term_memories_active_slot
  ON user_long_term_memories(username, profile_slot) WHERE state = 'active';
 CREATE INDEX IF NOT EXISTS user_long_term_memories_recall
  ON user_long_term_memories(username, state, last_seen_at DESC, call_count DESC);
+ALTER TABLE user_long_term_memories ADD COLUMN IF NOT EXISTS superseded_by uuid;
 
 CREATE TABLE IF NOT EXISTS user_memory_checkpoints (
  username text PRIMARY KEY,

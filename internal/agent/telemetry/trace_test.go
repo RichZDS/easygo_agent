@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -116,6 +117,61 @@ func TestModelStreamPreservesMessagesAndCountsCumulativeUsageOnce(t *testing.T) 
 	}
 	if models != 1 {
 		t.Fatalf("model finishes=%d", models)
+	}
+}
+
+type recordingSink struct {
+	events []telemetry.PhaseEvent
+	err    error
+}
+
+func (r *recordingSink) PersistPhase(_ context.Context, event telemetry.PhaseEvent) error {
+	r.events = append(r.events, event)
+	return r.err
+}
+
+func TestNilPhaseSinkLeavesFinishedLogUnchanged(t *testing.T) {
+	ctx, logs := observed(t)
+	_, root := telemetry.StartRun(ctx, telemetry.Identity{RunID: "r", SessionID: "s"})
+	root.Finish("completed", nil)
+	finished := logs.FilterMessage("agent.phase").FilterField(zap.String("phase", "run")).FilterField(zap.String("event", "finished")).All()
+	if len(finished) != 1 {
+		t.Fatalf("finishes=%d", len(finished))
+	}
+	if _, ok := finished[0].ContextMap()["phase_persist_failures"]; ok {
+		t.Fatalf("nil sink changed the finished log: %v", finished[0].ContextMap())
+	}
+}
+
+func TestPhaseSinkErrorsDoNotFailTheRun(t *testing.T) {
+	ctx, logs := observed(t)
+	secret := "private prompt body"
+	sink := &recordingSink{err: errors.New("phase store unavailable")}
+	ctx = telemetry.WithPhaseSink(ctx, sink)
+	ctx, root := telemetry.StartRun(ctx, telemetry.Identity{RunID: "r", SessionID: "s"}, zap.String("prompt", secret), zap.String("message", secret))
+	_, child := telemetry.Start(ctx, "tool", "calculator", zap.String("arguments", secret))
+	child.Finish("completed", nil)
+	root.Finish("completed", nil)
+	finished := logs.FilterMessage("agent.phase").FilterField(zap.String("phase", "run")).FilterField(zap.String("event", "finished")).All()
+	if len(finished) != 1 {
+		t.Fatalf("finishes=%d", len(finished))
+	}
+	f := finished[0].ContextMap()
+	if f["status"] != "completed" || f["prompt"] != secret {
+		t.Fatalf("run log=%v", f)
+	}
+	failures, ok := f["phase_persist_failures"].(int64)
+	if !ok || failures <= 0 {
+		t.Fatalf("phase_persist_failures=%v (%T)", f["phase_persist_failures"], f["phase_persist_failures"])
+	}
+	if len(sink.events) != 4 {
+		t.Fatalf("events=%d", len(sink.events))
+	}
+	for _, event := range sink.events {
+		text := event.Phase + event.Name + event.Event + event.Status + event.Error + event.RunID + event.ExecutionID
+		if strings.Contains(text, secret) {
+			t.Fatalf("sink stored prompt text: %+v", event)
+		}
 	}
 }
 

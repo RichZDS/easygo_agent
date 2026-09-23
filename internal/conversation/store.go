@@ -205,6 +205,37 @@ type TranscriptStore interface {
 	UsersWithTranscript(context.Context, time.Time, time.Time) ([]string, error)
 }
 
+// RunPhase is one durable execution phase. It carries correlation and outcome
+// only: no prompt, tool arguments, tool result, or message body.
+type RunPhase struct {
+	RunID        string    `json:"run_id"`
+	ExecutionID  string    `json:"execution_id"`
+	Sequence     int64     `json:"sequence"`
+	SpanID       int64     `json:"span_id"`
+	ParentSpanID int64     `json:"parent_span_id"`
+	Phase        string    `json:"phase"`
+	Name         string    `json:"name"`
+	Event        string    `json:"event"`
+	Status       string    `json:"status,omitempty"`
+	DurationMS   *float64  `json:"duration_ms,omitempty"`
+	Error        string    `json:"error,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+// RunPhasePage is one stable page of a run's phases. NextAfter is the sequence
+// cursor: the following call passes it as afterSequence.
+type RunPhasePage struct {
+	Phases    []RunPhase `json:"phases"`
+	NextAfter int64      `json:"next_after"`
+}
+
+// PhaseStore is the durable phase log shared by Memory and PostgreSQL. A reader
+// in another process uses this seam and never the execution that emitted spans.
+type PhaseStore interface {
+	AppendRunPhase(context.Context, RunPhase) error
+	ListRunPhases(context.Context, string, string, string, int64) (RunPhasePage, error)
+}
+
 // QueueStore extends Store with durable submission and worker-claim semantics.
 // It is a real seam because Memory and PostgreSQL both satisfy it.
 type QueueStore interface {

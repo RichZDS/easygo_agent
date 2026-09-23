@@ -222,6 +222,50 @@ func (p *Postgres) Release(ctx context.Context, id, token string) error {
 	}
 	return tx.Commit(ctx)
 }
+
+// AppendEvent records history for a worker that still holds the claim token.
+// Status and the notification outbox stay as they are.
+func (p *Postgres) AppendEvent(ctx context.Context, id, token, kind, detail string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if token == "" {
+		return ErrLeaseLost
+	}
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(context.Background())
+	t, err := read(tx.QueryRow(ctx, "SELECT "+columns+" FROM agent_tasks WHERE id=$1 AND claim_token=$2 FOR UPDATE", id, token))
+	if errors.Is(err, ErrNotFound) {
+		return ErrLeaseLost
+	}
+	if err != nil {
+		return err
+	}
+	t.Event(kind, detail)
+	data, err := json.Marshal(t)
+	if err != nil {
+		return err
+	}
+	tag, err := tx.Exec(ctx, "UPDATE agent_tasks SET state=$2 WHERE id=$1", t.ID, data)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrLeaseLost
+	}
+	event := t.Events[len(t.Events)-1]
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, "INSERT INTO agent_task_events(task_id,seq,version,event) VALUES($1,$2,$3,$4)", t.ID, event.Seq, event.Version, encoded); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
 func (p *Postgres) change(ctx context.Context, o Owner, id string, fn func(*Task) error) (Task, error) {
 	if _, err := uuid.Parse(id); err != nil {
 		return Task{}, ErrNotFound

@@ -237,6 +237,7 @@ type Store interface {
 	Save(context.Context, Task, string) error
 	Heartbeat(context.Context, string, string, time.Duration) error
 	Release(context.Context, string, string) error
+	AppendEvent(context.Context, string, string, string, string) error
 	Cancel(context.Context, Owner, string) (Task, error)
 	Resume(context.Context, Owner, string, Resume) (Task, error)
 	UpdatePlan(context.Context, Owner, string, []PlanStep) (Task, error)

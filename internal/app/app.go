@@ -1,4 +1,4 @@
-// Package app 组装并运行 Eino TUI 模板。
+// Package app assembles the native agent, model gateway, tools and session UI.
 package app
 
 import (

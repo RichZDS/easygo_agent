@@ -2,10 +2,13 @@ package telemetry
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"sync"
 	"time"
+
+	"easygo-agent/pkg/ai"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
@@ -90,11 +93,42 @@ type modelStats struct {
 	prompt     int
 	completion int
 	total      int
+	cacheRead  int64
+	cacheWrite int64
+	cost       ai.Cost
+	model      string
+	responseID string
 }
 
 func (s *modelStats) observe(message *schema.AgenticMessage) {
 	s.chunks++
-	if message == nil || message.ResponseMeta == nil || message.ResponseMeta.TokenUsage == nil {
+	if message == nil || message.ResponseMeta == nil {
+		return
+	}
+	if ext, ok := message.ResponseMeta.Extension.(map[string]any); ok {
+		if value, ok := ext["model"].(string); ok {
+			s.model = value
+		}
+		if value, ok := ext["id"].(string); ok {
+			s.responseID = value
+		}
+		// Extension values may be concrete structs during a run or generic maps
+		// after JSON persistence. Decode both without logging the extension body.
+		if raw, err := json.Marshal(ext["usage"]); err == nil {
+			var usage ai.Usage
+			if json.Unmarshal(raw, &usage) == nil && usage.Known {
+				s.cacheRead = max(s.cacheRead, usage.CacheReadTokens)
+				s.cacheWrite = max(s.cacheWrite, usage.CacheWriteTokens)
+			}
+		}
+		if raw, err := json.Marshal(ext["cost"]); err == nil {
+			var cost ai.Cost
+			if json.Unmarshal(raw, &cost) == nil && cost.Known {
+				s.cost = cost // authoritative/cumulative snapshot, never a sum of chunks
+			}
+		}
+	}
+	if message.ResponseMeta.TokenUsage == nil {
 		return
 	}
 	u := message.ResponseMeta.TokenUsage
@@ -106,8 +140,19 @@ func (s *modelStats) observe(message *schema.AgenticMessage) {
 
 func (s *modelStats) fields() []zap.Field {
 	fields := []zap.Field{zap.Int("chunks", s.chunks), zap.Bool("usage_reported", s.usageKnown)}
+	fields = append(fields, zap.Bool("cost_known", s.cost.Known))
+	if s.model != "" {
+		fields = append(fields, zap.String("model_alias", s.model))
+	}
+	if s.responseID != "" {
+		fields = append(fields, zap.String("response_id", s.responseID))
+	}
+	if s.cost.Known {
+		fields = append(fields, zap.Float64("cost_amount", s.cost.Amount), zap.String("cost_currency", s.cost.Currency))
+	}
 	if s.usageKnown {
 		fields = append(fields, zap.Int("prompt_tokens", s.prompt), zap.Int("completion_tokens", s.completion), zap.Int("total_tokens", s.total))
+		fields = append(fields, zap.Int64("cache_read_tokens", s.cacheRead), zap.Int64("cache_write_tokens", s.cacheWrite))
 	}
 	return fields
 }

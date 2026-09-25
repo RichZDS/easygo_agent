@@ -1,52 +1,73 @@
-// Package chatmodel 构造模板使用的单个 Eino Agentic 聊天模型。
+// Package chatmodel adapts the application's Eino message seam to the gateway.
 package chatmodel
 
 import (
 	"context"
 	"fmt"
-	"net/url"
+	"net/http"
+	"strings"
 
 	"easygo-agent/internal/config"
-	"easygo-agent/internal/logger"
-
-	agenticopenai "github.com/cloudwego/eino-ext/components/model/agenticopenai"
+	"easygo-agent/pkg/gateway"
 	"github.com/cloudwego/eino/components/model"
-	"go.uber.org/zap"
 )
 
-// New 构造 OpenAI 兼容的 Eino AgenticModel，消息载体为 *schema.AgenticMessage。
-func New(ctx context.Context, cfg config.ModelConfig) (model.AgenticModel, error) {
-	chatModel, err := agenticopenai.NewChatModel(ctx, toOpenAIConfig(cfg))
+// New routes every production model call through the provider-neutral gateway.
+// Endpoint is a full URL. The legacy BaseURL shorthand appends the protocol path.
+func New(_ context.Context, cfg config.ModelConfig) (model.AgenticModel, error) {
+	protocol := cfg.Protocol
+	if protocol == "" {
+		protocol = "chat_completions"
+	}
+	if cfg.Streaming != nil && protocol != "easygo" {
+		return nil, fmt.Errorf("model.streaming is only supported for protocol easygo")
+	}
+	if protocol == "easygo" {
+		if err := cfg.ValidateRemoteGateway(); err != nil {
+			return nil, err
+		}
+		remote, err := gateway.NewHTTPClient(gateway.HTTPClientConfig{Endpoint: cfg.Endpoint, BearerToken: cfg.APIKey, HTTPClient: &http.Client{Timeout: cfg.Timeout}})
+		if err != nil {
+			return nil, fmt.Errorf("create remote model gateway: %w", err)
+		}
+		adapter, err := NewAdapter(remote, cfg.Name)
+		if err != nil {
+			return nil, err
+		}
+		adapter.defaults = copyParameters(cfg.Parameters)
+		adapter.streamingDisabled = cfg.Streaming != nil && !*cfg.Streaming
+		return adapter, nil
+	}
+	endpoint := cfg.Endpoint
+	if endpoint == "" {
+		base := strings.TrimRight(cfg.BaseURL, "/")
+		if base == "" {
+			if protocol == "anthropic" {
+				base = "https://api.anthropic.com/v1"
+			} else {
+				base = "https://api.openai.com/v1"
+			}
+		}
+		switch protocol {
+		case "chat_completions":
+			endpoint = base + "/chat/completions"
+		case "responses":
+			endpoint = base + "/responses"
+		case "anthropic":
+			endpoint = base + "/messages"
+		case "custom":
+			return nil, fmt.Errorf("custom protocol requires a full endpoint")
+		default:
+			return nil, fmt.Errorf("unsupported protocol %q", protocol)
+		}
+	}
+	m := gateway.Model{Protocol: protocol, Endpoint: endpoint, APIKey: cfg.APIKey, Model: cfg.Name, Parameters: cfg.Parameters, ParameterMap: cfg.ParameterMap}
+	if p := cfg.Pricing; p != nil {
+		m.Price = &gateway.Pricing{Currency: p.Currency, InputPerMillion: p.InputPerMillion, OutputPerMillion: p.OutputPerMillion, CacheReadPerMillion: p.CacheReadPerMillion, CacheWritePerMillion: p.CacheWritePerMillion}
+	}
+	g, err := gateway.New(gateway.Config{Models: map[string]gateway.Model{cfg.Name: m}, HTTPClient: &http.Client{Timeout: cfg.Timeout}})
 	if err != nil {
-		wrappedErr := fmt.Errorf("create OpenAI-compatible agentic chat model: %w", err)
-		logger.Error("create chat model failed",
-			zap.String("model", cfg.Name),
-			zap.String("base_url_host", safeBaseURLHost(cfg.BaseURL)),
-			zap.Error(wrappedErr),
-		)
-		return nil, wrappedErr
+		return nil, fmt.Errorf("create model gateway: %w", err)
 	}
-	return chatModel, nil
-}
-
-// toOpenAIConfig 映射运行字段，不附加身份或授权策略。
-func toOpenAIConfig(cfg config.ModelConfig) *agenticopenai.ChatConfig {
-	return &agenticopenai.ChatConfig{
-		APIKey:  cfg.APIKey,
-		BaseURL: cfg.BaseURL,
-		Model:   cfg.Name,
-		Timeout: cfg.Timeout,
-	}
-}
-
-// safeBaseURLHost 提取用于诊断的非敏感 endpoint host。
-func safeBaseURLHost(baseURL string) string {
-	if baseURL == "" {
-		return "default"
-	}
-	parsedURL, err := url.Parse(baseURL)
-	if err != nil {
-		return "invalid"
-	}
-	return parsedURL.Hostname()
+	return NewAdapter(g, cfg.Name)
 }

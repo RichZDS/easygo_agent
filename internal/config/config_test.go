@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -79,7 +80,7 @@ func TestMemoryModeAndSummaryFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.SubAgent != cfg.Model || cfg.Database.Driver != "memory" || cfg.Sandbox.Enabled || cfg.Sandbox.BaseURL != defaultSandboxBaseURL || cfg.Sandbox.AuthToken != "" || cfg.Sandbox.RequestTimeout != 11*time.Minute || cfg.Sandbox.MaxOutputBytes != defaultSandboxOutputBytes {
+	if !reflect.DeepEqual(cfg.SubAgent, cfg.Model) || cfg.Database.Driver != "memory" || cfg.Sandbox.Enabled || cfg.Sandbox.BaseURL != defaultSandboxBaseURL || cfg.Sandbox.AuthToken != "" || cfg.Sandbox.RequestTimeout != 11*time.Minute || cfg.Sandbox.MaxOutputBytes != defaultSandboxOutputBytes {
 		t.Fatal("fallback mapping failed")
 	}
 }
@@ -149,5 +150,92 @@ func TestTaskConfigurationDefaultsAndValidation(t *testing.T) {
 		if _, err = taskConfig(raw); err == nil {
 			t.Fatalf("accepted %+v", raw)
 		}
+	}
+}
+
+func TestGatewayModelConfiguration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := `model:
+  name: upstream
+  protocol: anthropic
+  endpoint: https://example.test/v1/messages
+  apikey: "{KEY}"
+  parameters:
+    thinking: {type: enabled, budget_tokens: 1000}
+  parameter_map: {max_output: max_tokens}
+  pricing:
+    currency: USD
+    input_per_million: 3
+    output_per_million: 15
+    cache_read_per_million: 0.3
+database:
+  driver: memory
+memory:
+  enabled: false
+`
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path, func(string) (string, bool) { return "fixture-key", true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Model.Protocol != "anthropic" || cfg.Model.Endpoint != "https://example.test/v1/messages" || cfg.Model.Pricing.InputPerMillion != 3 || string(cfg.Model.Parameters["thinking"]) != `{"budget_tokens":1000,"type":"enabled"}` || !reflect.DeepEqual(cfg.Model, cfg.SubAgent) {
+		t.Fatalf("mapping failed: %+v", cfg.Model)
+	}
+	for _, replace := range [][2]string{{"anthropic", "typo"}, {"https://example.test/v1/messages", "file:///tmp/provider"}, {"input_per_million: 3", "input_per_million: -1"}} {
+		if err := os.WriteFile(path, []byte(strings.Replace(content, replace[0], replace[1], 1)), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(path, func(string) (string, bool) { return "fixture-key", true }); err == nil {
+			t.Fatalf("accepted invalid %s", replace[1])
+		}
+	}
+}
+
+func TestLoadRemoteGatewayConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "remote.yaml")
+	body := `model:
+  protocol: easygo
+  name: custom-alias
+  endpoint: https://gateway.example/v1/generate
+  apikey: "{GATEWAY_KEY}"
+  streaming: false
+  parameters: {seed: 42}
+database:
+  driver: memory
+memory:
+  enabled: false
+`
+	load := func(content string) (Config, error) {
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return Load(path, func(key string) (string, bool) { return "remote-bearer", key == "GATEWAY_KEY" })
+	}
+	cfg, err := load(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Model.Protocol != "easygo" || cfg.Model.Name != "custom-alias" || cfg.Model.APIKey != "remote-bearer" || cfg.Model.Streaming == nil || *cfg.Model.Streaming || string(cfg.Model.Parameters["seed"]) != "42" || !reflect.DeepEqual(cfg.Model, cfg.SubAgent) {
+		t.Fatal("remote configuration lost")
+	}
+	defaults, err := load(strings.Replace(body, "  streaming: false\n", "", 1))
+	if err != nil || defaults.Model.Streaming != nil {
+		t.Fatalf("default streaming changed: %v", err)
+	}
+	for _, tc := range []struct{ name, content, want string }{
+		{"endpoint_required", strings.Replace(body, "  endpoint: https://gateway.example/v1/generate\n", "", 1), "model.endpoint"},
+		{"full_endpoint", strings.Replace(body, "https://gateway.example/v1/generate", "/v1/generate", 1), "model.endpoint"},
+		{"generate_path", strings.Replace(body, "/v1/generate", "/v1/models", 1), "model.endpoint"},
+		{"remote_price", strings.Replace(body, "  parameters:", "  pricing: {currency: USD}\n  parameters:", 1), "model.pricing"},
+		{"remote_map", strings.Replace(body, "  parameters:", "  parameter_map: {}\n  parameters:", 1), "model.parameter_map"},
+		{"native_streaming_flag", strings.Replace(body, "protocol: easygo", "protocol: chat_completions", 1), "model.streaming"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := load(tc.content); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want %s: %v", tc.want, err)
+			}
+		})
 	}
 }

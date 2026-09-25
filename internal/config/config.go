@@ -3,9 +3,11 @@ package config
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -46,6 +48,7 @@ type Config struct {
 	HTTP     HTTPConfig
 	Queue    QueueConfig
 	Sandbox  SandboxConfig
+	Workshop WorkshopConfig
 }
 
 type DatabaseConfig struct {
@@ -74,30 +77,37 @@ type SandboxConfig struct {
 	MaxOutputBytes int
 }
 
-// AgentConfig 控制 Eino ReAct 行为。
+// AgentConfig controls the native loop and its context budget.
 type AgentConfig struct {
 	MaxSteps      int
 	ContextTokens int
 }
 
-// ModelConfig 控制单个 OpenAI 兼容模型。
+// ModelConfig selects a gateway protocol; BaseURL remains a shorthand.
 type ModelConfig struct {
-	Name    string
-	BaseURL string
-	Timeout time.Duration
-	APIKey  string
+	Protocol     string
+	Streaming    *bool
+	Endpoint     string
+	Pricing      *ModelPricing
+	Parameters   map[string]json.RawMessage
+	ParameterMap map[string]string
+	Name         string
+	BaseURL      string
+	Timeout      time.Duration
+	APIKey       string
 }
 
 type rawConfig struct {
-	Tasks    rawTaskConfig    `yaml:"tasks"`
-	Agent    rawAgentConfig   `yaml:"agent"`
-	Model    rawModelConfig   `yaml:"model"`
-	SubAgent *rawModelConfig  `yaml:"subagent"`
-	Database DatabaseConfig   `yaml:"database"`
-	Memory   rawMemoryConfig  `yaml:"memory"`
-	HTTP     HTTPConfig       `yaml:"http"`
-	Queue    rawQueueConfig   `yaml:"queue"`
-	Sandbox  rawSandboxConfig `yaml:"sandbox"`
+	Tasks    rawTaskConfig     `yaml:"tasks"`
+	Agent    rawAgentConfig    `yaml:"agent"`
+	Model    rawModelConfig    `yaml:"model"`
+	SubAgent *rawModelConfig   `yaml:"subagent"`
+	Database DatabaseConfig    `yaml:"database"`
+	Memory   rawMemoryConfig   `yaml:"memory"`
+	HTTP     HTTPConfig        `yaml:"http"`
+	Queue    rawQueueConfig    `yaml:"queue"`
+	Sandbox  rawSandboxConfig  `yaml:"sandbox"`
+	Workshop rawWorkshopConfig `yaml:"workshop"`
 }
 
 type rawAgentConfig struct {
@@ -105,11 +115,25 @@ type rawAgentConfig struct {
 	ContextTokens int `yaml:"context_tokens"`
 }
 
+type ModelPricing struct {
+	Currency             string  `yaml:"currency"`
+	InputPerMillion      float64 `yaml:"input_per_million"`
+	OutputPerMillion     float64 `yaml:"output_per_million"`
+	CacheReadPerMillion  float64 `yaml:"cache_read_per_million"`
+	CacheWritePerMillion float64 `yaml:"cache_write_per_million"`
+}
+
 type rawModelConfig struct {
-	Name    string `yaml:"name"`
-	BaseURL string `yaml:"base_url"`
-	Timeout string `yaml:"timeout"`
-	APIKey  string `yaml:"apikey"`
+	Protocol     string            `yaml:"protocol"`
+	Streaming    *bool             `yaml:"streaming"`
+	Endpoint     string            `yaml:"endpoint"`
+	Pricing      *ModelPricing     `yaml:"pricing"`
+	Parameters   map[string]any    `yaml:"parameters"`
+	ParameterMap map[string]string `yaml:"parameter_map"`
+	Name         string            `yaml:"name"`
+	BaseURL      string            `yaml:"base_url"`
+	Timeout      string            `yaml:"timeout"`
+	APIKey       string            `yaml:"apikey"`
 }
 
 type rawMemoryConfig struct {
@@ -243,7 +267,12 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 		}
 	}
 
+	workshopCfg, err := loadWorkshop(raw.Workshop, lookupEnv)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
+		Workshop: workshopCfg,
 		Agent: AgentConfig{
 			MaxSteps:      raw.Agent.MaxSteps,
 			ContextTokens: raw.Agent.ContextTokens,
@@ -271,6 +300,9 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 			MaxOutputBytes: raw.Sandbox.MaxOutputBytes,
 		},
 	}
+	if err := applyModelOptions(&cfg.Model, raw.Model); err != nil {
+		return Config{}, fmt.Errorf("model: %w", err)
+	}
 	cfg.SubAgent = cfg.Model
 	if raw.SubAgent != nil {
 		sub := raw.SubAgent
@@ -286,6 +318,9 @@ func Load(path string, lookupEnv func(string) (string, bool)) (Config, error) {
 			return Config{}, fmt.Errorf("subagent apikey: %w", subErr)
 		}
 		cfg.SubAgent = ModelConfig{Name: strings.TrimSpace(sub.Name), BaseURL: strings.TrimSpace(sub.BaseURL), Timeout: subTimeout, APIKey: subKey}
+		if subErr = applyModelOptions(&cfg.SubAgent, *sub); subErr != nil {
+			return Config{}, fmt.Errorf("subagent: %w", subErr)
+		}
 		if subErr = validateConfig(Config{Agent: cfg.Agent, Model: cfg.SubAgent}); subErr != nil {
 			return Config{}, fmt.Errorf("subagent: %w", subErr)
 		}
@@ -423,6 +458,36 @@ func validateConfig(cfg Config) error {
 		logger.Error("validate config failed", zap.String("field", "model.name"), zap.Error(err))
 		return err
 	}
+	switch cfg.Model.Protocol {
+	case "", "chat_completions", "responses", "anthropic", "custom", "easygo":
+	default:
+		return fmt.Errorf("unsupported model protocol %q", cfg.Model.Protocol)
+	}
+	if cfg.Model.Streaming != nil && cfg.Model.Protocol != "easygo" {
+		return errors.New("model.streaming is only supported for protocol easygo")
+	}
+	if cfg.Model.Protocol == "easygo" {
+		if err := cfg.Model.ValidateRemoteGateway(); err != nil {
+			return err
+		}
+	}
+	if cfg.Model.Endpoint != "" {
+		u, err := url.ParseRequestURI(cfg.Model.Endpoint)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.Fragment != "" {
+			return errors.New("model endpoint must be a full http or https URL without credentials or fragment")
+		}
+	}
+	if cfg.Model.Pricing != nil {
+		p := cfg.Model.Pricing
+		if strings.TrimSpace(p.Currency) == "" {
+			return errors.New("model pricing currency is required")
+		}
+		for _, v := range []float64{p.InputPerMillion, p.OutputPerMillion, p.CacheReadPerMillion, p.CacheWritePerMillion} {
+			if v < 0 || math.IsNaN(v) || math.IsInf(v, 0) {
+				return errors.New("model pricing must be finite and nonnegative")
+			}
+		}
+	}
 	if cfg.Model.BaseURL != "" {
 		parsedURL, err := url.ParseRequestURI(cfg.Model.BaseURL)
 		if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
@@ -488,4 +553,39 @@ func taskConfig(raw rawTaskConfig) (task.Config, error) {
 		return c, errors.New("at least one task role is required")
 	}
 	return c, nil
+}
+
+func applyModelOptions(dst *ModelConfig, raw rawModelConfig) error {
+	dst.Protocol = strings.TrimSpace(raw.Protocol)
+	dst.Streaming = raw.Streaming
+	dst.Endpoint = strings.TrimSpace(raw.Endpoint)
+	dst.Pricing = raw.Pricing
+	dst.ParameterMap = raw.ParameterMap
+	if raw.Parameters != nil {
+		dst.Parameters = make(map[string]json.RawMessage, len(raw.Parameters))
+		for k, v := range raw.Parameters {
+			b, err := json.Marshal(v)
+			if err != nil {
+				return fmt.Errorf("parameter %s: %w", k, err)
+			}
+			dst.Parameters[k] = b
+		}
+	}
+	return nil
+}
+
+// ValidateRemoteGateway checks settings owned by the canonical HTTP client.
+// Provider mappings and prices belong to the remote gateway, never its caller.
+func (c ModelConfig) ValidateRemoteGateway() error {
+	u, err := url.ParseRequestURI(c.Endpoint)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.Fragment != "" || !strings.HasSuffix(u.Path, "/v1/generate") {
+		return errors.New("model.endpoint for protocol easygo must be a full http or https URL ending in /v1/generate without credentials or fragment")
+	}
+	if c.ParameterMap != nil {
+		return errors.New("model.parameter_map for protocol easygo belongs on the remote gateway")
+	}
+	if c.Pricing != nil {
+		return errors.New("model.pricing for protocol easygo belongs on the remote gateway")
+	}
+	return nil
 }

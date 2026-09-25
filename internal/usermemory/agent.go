@@ -12,7 +12,6 @@ import (
 
 	"easygo-agent/internal/conversation"
 
-	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 )
@@ -38,23 +37,14 @@ type Agent interface {
 }
 
 type ModelAgent struct {
-	agent adk.TypedAgent[*schema.AgenticMessage]
+	model model.AgenticModel
 }
 
-func NewModelAgent(ctx context.Context, model model.AgenticModel) (*ModelAgent, error) {
-	if model == nil {
+func NewModelAgent(_ context.Context, m model.AgenticModel) (*ModelAgent, error) {
+	if m == nil {
 		return nil, errors.New("memory agent model cannot be nil")
 	}
-	agent, err := adk.NewTypedChatModelAgent(ctx, &adk.TypedChatModelAgentConfig[*schema.AgenticMessage]{
-		Name:          "long-term-memory-agent",
-		Description:   "Extract and reconcile durable user memory without tools.",
-		Model:         model,
-		MaxIterations: 1,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("create long-term memory agent: %w", err)
-	}
-	return &ModelAgent{agent: agent}, nil
+	return &ModelAgent{model: m}, nil
 }
 
 func (a *ModelAgent) Extract(ctx context.Context, user string, batch []conversation.TranscriptTurn) ([]Candidate, error) {
@@ -112,25 +102,14 @@ type memoryDraftJSON struct {
 }
 
 func (a *ModelAgent) complete(ctx context.Context, system, input string) (string, error) {
-	iterator := a.agent.Run(ctx, &adk.TypedAgentInput[*schema.AgenticMessage]{Messages: []*schema.AgenticMessage{schema.SystemAgenticMessage(system), schema.UserAgenticMessage(input)}})
-	if iterator == nil {
-		return "", errors.New("memory agent is unavailable")
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
-	var result *schema.AgenticMessage
-	for {
-		event, ok := iterator.Next()
-		if !ok {
-			break
-		}
-		if event == nil {
-			continue
-		}
-		if event.Err != nil {
-			return "", event.Err
-		}
-		if event.Output != nil && event.Output.MessageOutput != nil && event.Output.MessageOutput.Message != nil {
-			result = event.Output.MessageOutput.Message
-		}
+	result, err := a.model.Generate(ctx, []*schema.AgenticMessage{
+		schema.SystemAgenticMessage(system), schema.UserAgenticMessage(input),
+	}, model.WithTools(nil), model.WithToolChoice(schema.ToolChoiceForbidden))
+	if err != nil {
+		return "", err
 	}
 	if err := ctx.Err(); err != nil {
 		return "", err
@@ -140,6 +119,9 @@ func (a *ModelAgent) complete(ctx context.Context, system, input string) (string
 	}
 	var text strings.Builder
 	for _, block := range result.ContentBlocks {
+		if block != nil && block.FunctionToolCall != nil {
+			return "", errors.New("memory model returned an unexpected tool call")
+		}
 		if block != nil && block.AssistantGenText != nil {
 			text.WriteString(block.AssistantGenText.Text)
 		}

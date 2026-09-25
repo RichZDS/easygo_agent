@@ -11,6 +11,7 @@ import (
 
 	"easygo-agent/internal/agent/telemetry"
 	"easygo-agent/internal/testutil"
+	"easygo-agent/pkg/ai"
 
 	"github.com/cloudwego/eino/schema"
 	"go.uber.org/zap"
@@ -75,6 +76,12 @@ func TestModelStreamPreservesMessagesAndCountsCumulativeUsageOnce(t *testing.T) 
 	first, last := testutil.Text("private first"), testutil.Text("private last")
 	first.ResponseMeta = &schema.AgenticResponseMeta{TokenUsage: &schema.TokenUsage{PromptTokens: 10, CompletionTokens: 1, TotalTokens: 11}}
 	last.ResponseMeta = &schema.AgenticResponseMeta{TokenUsage: &schema.TokenUsage{PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12}}
+	first.ResponseMeta.Extension = map[string]any{"cost": ai.Cost{Known: true, Currency: "USD", Amount: 0.3}}
+	last.ResponseMeta.Extension = map[string]any{
+		"model": "configured-alias", "id": "response-1",
+		"cost":  map[string]any{"known": true, "currency": "USD", "amount": 0.5},
+		"usage": ai.Usage{Known: true, InputTokens: 10, OutputTokens: 2, CacheReadTokens: 4, CacheWriteTokens: 2},
+	}
 	input := []*schema.AgenticMessage{schema.UserAgenticMessage("private prompt")}
 	m := telemetry.Model(&testutil.Model{StreamFunc: func(_ context.Context, in []*schema.AgenticMessage) (*schema.StreamReader[*schema.AgenticMessage], error) {
 		if in[0] != input[0] {
@@ -112,6 +119,9 @@ func TestModelStreamPreservesMessagesAndCountsCumulativeUsageOnce(t *testing.T) 
 			}
 			if _, ok := f["first_chunk_ms"]; !ok {
 				t.Fatal("missing first chunk latency")
+			}
+			if f["cost_known"] != true || f["cost_amount"] != 0.5 || f["cost_currency"] != "USD" || f["cache_read_tokens"] != int64(4) || f["cache_write_tokens"] != int64(2) || f["model_alias"] != "configured-alias" {
+				t.Fatalf("lost or double-counted gateway accounting: %v", f)
 			}
 		}
 	}

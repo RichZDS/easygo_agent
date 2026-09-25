@@ -112,6 +112,13 @@ func (app *application) buildAgent(ctx context.Context) error {
 			MaxOutputBytes: app.cfg.Sandbox.MaxOutputBytes,
 		})
 	}
+	if app.cfg.Workshop.Enabled {
+		agentTools = agentTools.WithWorkshop(tools.WorkshopConfig{
+			BaseURL:        app.cfg.Workshop.BaseURL,
+			AuthToken:      app.cfg.Workshop.AuthToken,
+			RequestTimeout: app.cfg.Workshop.RequestTimeout,
+		})
+	}
 	instruction := prompt.SystemPrompt
 	lib, skillErr := skill.Open(skill.DefaultRoot)
 	if skillErr != nil {

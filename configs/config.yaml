@@ -46,6 +46,13 @@ subagent:
   timeout: 120s
   apikey: "{SUBMODEL_API_KEY}"
 
+# Run cmd/workshop separately with the same token environment variable.
+workshop:
+  enabled: false
+  base_url: "http://127.0.0.1:8091"
+  auth_token: "{WORKSHOP_BEARER_TOKEN}"
+  request_timeout: 15s
+
 # Background workers are independent of the session FIFO. Old configs default off.
 tasks:
   enabled: true

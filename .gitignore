@@ -11,3 +11,6 @@ skills/builtin/
 skills/staging/
 skills/workspaces/
 .vscode/
+
+# CLI workshop task state, native sessions and generated artifacts.
+data/workshop/

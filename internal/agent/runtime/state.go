@@ -30,18 +30,24 @@ type StateMiddleware struct {
 }
 
 func (m *StateMiddleware) AfterAgent(ctx context.Context, state *adk.TypedChatModelAgentState[*schema.AgenticMessage]) (context.Context, error) {
+	return ctx, CaptureState(ctx, state.Messages)
+}
+
+// CaptureState records the native loop's actual context at a synchronous
+// barrier. Durable turn publication remains owned by the existing runtime.
+func CaptureState(ctx context.Context, state []*schema.AgenticMessage) error {
 	capture, _ := ctx.Value(captureKey{}).(*stateCapture)
 	if capture == nil {
-		return ctx, nil
+		return nil
 	}
-	messages, err := conversation.Clone(state.Messages)
+	messages, err := conversation.Clone(state)
 	if err != nil {
-		return ctx, err
+		return err
 	}
 	capture.mu.Lock()
 	capture.messages = messages
 	capture.mu.Unlock()
-	return ctx, nil
+	return nil
 }
 
 func compressionEvent(event *adk.TypedAgentEvent[*schema.AgenticMessage]) (Event, bool) {

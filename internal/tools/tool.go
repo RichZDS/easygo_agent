@@ -13,6 +13,7 @@ import (
 // AgentTool 集中构造并持有当前 Agent 可用的全部 Tool。
 type AgentTool struct {
 	sandbox    *SandboxControllerConfig
+	workshop   *WorkshopConfig
 	skills     *skill.Library
 	mazeStore  *maze.Store
 	boundMaze  bool
@@ -33,6 +34,12 @@ func NewAgentTool(sandbox ...SandboxControllerConfig) *AgentTool {
 // belongs in the system prompt. Specialized bodies load only through this tool.
 func (t *AgentTool) WithSkills(lib *skill.Library) *AgentTool {
 	t.skills = lib
+	return t
+}
+
+// WithWorkshop connects independently operated CLI workers to the native loop.
+func (t *AgentTool) WithWorkshop(cfg WorkshopConfig) *AgentTool {
+	t.workshop = &cfg
 	return t
 }
 
@@ -74,8 +81,10 @@ func (t *AgentTool) Registry(ctx context.Context) (*toolregistry.Registry, error
 			}
 			retry := toolregistry.Unsafe
 			switch info.Name {
-			case "calculator", "load_skill", "list_skills", "read_skill_resource", "listmaze", "detailmaze", "runmaze":
+			case "calculator", "load_skill", "list_skills", "read_skill_resource", "listmaze", "detailmaze", "runmaze", "workshop_catalog", "workshop_get", "workshop_list", "workshop_result":
 				retry = toolregistry.ReadOnly
+			case "workshop_submit", "workshop_cancel":
+				retry = toolregistry.Idempotent
 			}
 			if err = r.Register(ctx, item, group, retry, hidden); err != nil {
 				return err
@@ -105,6 +114,15 @@ func (t *AgentTool) Registry(ctx context.Context) (*toolregistry.Registry, error
 			return nil, err
 		}
 		if err = add(items, "sandbox", false); err != nil {
+			return nil, err
+		}
+	}
+	if t.workshop != nil {
+		items, err := NewWorkshopTools(*t.workshop)
+		if err != nil {
+			return nil, err
+		}
+		if err = add(items, "workshop", false); err != nil {
 			return nil, err
 		}
 	}

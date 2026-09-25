@@ -1,6 +1,12 @@
-# EasyGo Eino Agent Template
+# EasyGo Agent
 
-一个可复制的 Go Agent 模板，提供完整 CLI、HTTP 会话接口、PostgreSQL 历史持久化，以及独立数据库支持的用户级长期记忆，无前端。
+一个分为 AI 网关、Agent Loop 和 CLI 工坊的 Go Agent 工程，提供 CLI/TUI、HTTP 会话接口、PostgreSQL 历史持久化和用户级长期记忆。
+
+- **AI 网关**：`pkg/ai` 定义自己的协议，`pkg/gateway` 映射 OpenAI Chat Completions、Responses、Anthropic Messages 和自定义 JSON，处理流式输出、用量、计价和观测。独立入口 `cmd/ai-gateway`，见 [网关配置](doc/ai-gateway.md)。
+- **Agent Loop**：`pkg/agentloop` 执行模型与工具循环，现有应用经消息适配接入；公共 Loop 不依赖 Eino，见 [原生 Loop](doc/agent-loop-native.md)。
+- **CLI 工坊**：`pkg/workshop` 管理工作流、工作区、Claude/Codex 子进程、任务与续跑，独立入口 `cmd/workshop`，见 [工坊配置](doc/workshop.md)。
+
+[架构与源码参考](doc/three-layer-architecture.md)说明各层职责和验证边界。原 `-mode gateway` 仍是会话 HTTP 入口，与新增的 AI 模型网关分别运行。
 
 ## Agent loop
 
@@ -12,24 +18,24 @@ flowchart TD
   Runtime --> Load[获取已 claim 的 lease / 加载上下文 / 加入输入]
   Load --> Recall[独立记忆库: 按时间与调用次数 Top 5]
   Recall --> Check
-  Check[Eino BeforeModelRewriteState: 检查输入预算]
+  Check[BeforeModel: 检查输入预算]
   Check -->|超过预算| Summary[独立 context-compressor Agent]
-  Summary --> Finalize[Eino 原生摘要整理 / 再检查预算]
+  Summary --> Finalize[摘要检查 / 再检查预算]
   Finalize --> Model[主 Agent 调用模型]
   Check -->|预算内| Model
-  Model -->|有工具调用| Tools[Eino 执行工具 / 获取原生结果]
+  Model -->|有工具调用| Tools[Loop 执行工具 / 记录结果]
   Tools --> Check
   Model -->|最终回复| Save[短事务保存原始轮次与最终上下文]
   Save --> Done[原子提交 run、turn、context / completed]
 ```
 
-循环由 Eino `Deep Agent` 执行，模型返回工具调用就继续，返回最终回答就结束；`max_steps` 是推理迭代上限。模板关闭 Deep Agent 的内置 todo 和通用 task 工具，默认业务工具是 Calculator。摘要 Agent 独立调用 `subagent` 模型，不使用工具，也不递归压缩。
+循环由 `pkg/agentloop` 执行，模型返回工具调用就继续，返回最终回答就结束；`max_steps` 限制可使用工具的模型轮数，达到后额外允许一次禁用工具的收尾请求。默认业务工具是 Calculator。摘要独立调用 `subagent` 模型，不使用工具，也不递归压缩。
 
-[实施计划](doc/agent-loop-plan.md)记录了本次拆分和验证范围。每次提交先写入 `agent_runs`，再由共享队列按会话 FIFO 调度；队列元数据不会进入模型上下文。
+[早期实施计划](doc/agent-loop-plan.md)保留了原 Eino 实现的历史记录，当前拆分以三层架构文档为准。每次提交先写入 `agent_runs`，再由共享队列按会话 FIFO 调度；队列元数据不会进入模型上下文。
 
 ## 原生消息与存储
 
-消息统一使用 `*schema.AgenticMessage`，通过标准 JSON 序列化直接写入 JSONB。保留 `role`、`content_blocks`、`response_meta`、`extra` 及其中的工具调用 ID、参数、结果、推理块、usage、供应商扩展。流式片段通过 Eino `schema.ConcatAgenticMessages` 合并，不把展示文本重新包装成历史。
+网关和公共 Loop 使用 `ai.Message`；现有会话存储接口继续使用 `*schema.AgenticMessage`，通过标准 JSON 序列化直接写入 JSONB。保留 `role`、`content_blocks`、`response_meta`、`extra` 及其中的工具调用 ID、参数、结果、推理块、usage 及受支持的供应商续轮状态。流式片段通过 Eino `schema.ConcatAgenticMessages` 合并，不把展示文本重新包装成历史。
 
 | 数据 | 保存方式 |
 | --- | --- |
@@ -39,11 +45,11 @@ flowchart TD
 | 轮次状态 | `completed` / `failed` / `canceled` |
 | 队列请求与租约 | `agent_runs`，状态为 `queued` / `running` / `completed` / `failed` / `canceled` |
 
-成功时，Eino `AfterAgent` 提供最终 state，原始轮次和该 state 在一个短事务里提交。压缩只改变模型上下文，历史接口仍能读取原始工具记录。
+成功时，原生 Loop 的适配器提供最终上下文，原始轮次和该上下文在一个短事务里提交。压缩只改变模型上下文，历史接口仍能读取原始工具记录。
 
 失败或取消时，保存已接收的完整/部分原生消息供历史展示；下一轮上下文保留之前的上下文与本轮用户输入，不包含失败轮次的不完整工具链。数据库写入失败会返回 `failed`，不会报告完成。进程被强制终止时，未提交轮次可能丢失；当前不提供中途 checkpoint 恢复或工具副作用的 exactly-once 保证。
 
-PostgreSQL 每轮加载一次上下文，轮次期间由 Eino 内存 state 管理循环，结束时提交一次。队列 claim 使用短事务、`FOR UPDATE SKIP LOCKED`、事务级 advisory lock 和“每会话一条 running”唯一索引共同保证跨进程互斥；claim token 为 heartbeat 与最终提交提供 fencing。`RunLease` 在推理期间占用一条专用连接，但不保持长事务；`max_conns` 因此也约束可并行持有的运行数量。`Store.Begin` 仍供直接历史操作使用，采用 session advisory lock。
+PostgreSQL 每轮加载一次上下文，轮次期间由原生 Loop 与运行适配器在内存管理上下文，结束时提交一次。队列 claim 使用短事务、`FOR UPDATE SKIP LOCKED`、事务级 advisory lock 和“每会话一条 running”唯一索引共同保证跨进程互斥；claim token 为 heartbeat 与最终提交提供 fencing。`RunLease` 在推理期间占用一条专用连接，但不保持长事务；`max_conns` 因此也约束可并行持有的运行数量。`Store.Begin` 仍供直接历史操作使用，采用 session advisory lock。
 
 `database.driver: memory` 使用进程内会话与长期记忆 Store，适合开发和测试；退出即丢失数据。PostgreSQL 模式下，`database.dsn` 只保存会话历史，`memory.dsn` 是**必须独立**的长期记忆数据库。
 
@@ -61,13 +67,13 @@ Gateway 与 TUI 都使用同一 QueueManager / Run，在每轮运行初始化时
 
 `agent.context_tokens` 是主模型的**输入预算**，必须为模型输出和供应商协议开销留出余量。例如模型总窗口为 32k 时，可以从 24k 输入预算开始。
 
-每次模型调用前，包括每次工具返回后，Eino summarization 中间件都会检查消息和工具定义。通过原生 `TokenCounter` 扩展，以 UTF-8 JSON 字节数作保守文本/工具估算，同时参考模型返回的 `TokenUsage`；这不是精确 tokenizer，通常会提前压缩。增加图片、音频或特殊供应商工具后，应替换为该供应商的计数实现。
+每次模型调用前，包括每次工具返回后，`BeforeModel` 都会检查消息和工具定义。以 UTF-8 JSON 字节数作保守文本/工具估算，同时参考模型返回的 `TokenUsage`；这不是精确 tokenizer，通常会提前压缩。增加图片、音频或特殊供应商工具后，应替换为该供应商的计数实现。
 
-摘要提示词、摘要整理及状态替换均复用 Eino 原生 summarization。压缩后仍超预算、摘要为空或摘要模型报错，会明确失败，不截断原始历史。摘要模型需要足够的上下文窗口来容纳待压缩内容及摘要指令；单条巨大工具结果可能仍需业务工具自身分页或限制返回量。
+摘要由独立的无工具模型请求生成，再检查摘要是否非空、是否仍超预算，最后替换下一轮模型上下文。压缩后仍超预算、摘要为空或摘要模型报错，会明确失败，不截断原始历史。摘要模型需要足够的上下文窗口来容纳待压缩内容及摘要指令；单条巨大工具结果可能仍需业务工具自身分页或限制返回量。
 
 ## 启动
 
-需要 Go 1.25+、支持 Tool Calling 的 OpenAI-compatible 模型。默认使用 PostgreSQL；所有命令在仓库根目录（包含 `go.mod`）运行。
+需要 Go 1.25+、网关已适配且支持工具调用的模型；原 OpenAI-compatible 配置仍可使用。默认使用 PostgreSQL；所有命令在仓库根目录（包含 `go.mod`）运行。
 
 ```powershell
 Copy-Item .env.example .env
@@ -250,7 +256,10 @@ SSE 的每个事件包含 `event: <kind>` 和 JSON `data`，首先是 `queued` �
 - `cmd/easygo-agent`：CLI / TUI / HTTP 入口。
 - `cmd/sandbox-controller`、`cmd/sandbox-bench`：沙箱控制面与压测。
 - `cmd/eval/`：记忆 / 迷宫 / skill 评测入口，报告写到 `doc/eval/`。
-- `internal/agent/deepagent`：构造 Eino 主 Agent、摘要 Agent、上下文预算中间件。
+- `pkg/ai`、`pkg/gateway`、`cmd/ai-gateway`：统一模型协议与独立 AI 网关。
+- `pkg/agentloop`：与模型供应商和存储框架无关的工具循环。
+- `pkg/workshop`、`cmd/workshop`：CLI 任务执行与持久化工坊。
+- `internal/agent/deepagent`、`internal/agent/chatmodel`：原生 Loop 的应用适配、上下文预算和现有消息存储格式转换。
 - `internal/agent/runtime`：QueueManager、已 claim run 的执行、流合并、运行生命周期和展示事件。
 - `internal/agent/telemetry`：按运行关联阶段日志、模型用量与耗时；不保存消息正文。
 - `internal/logger`：通用 Zap JSON 文件输出和日志级别，不依赖 Eino。
@@ -299,7 +308,7 @@ go run ./cmd/easygo-agent -debug -user alice
 ```powershell
 go test ./...
 go vet ./...
-# 200 个实际 Eino Agent / Runtime 的用户记忆端到端验收（必须 100%，门槛为 95%）。
+# 200 个实际 Agent / Runtime 的用户记忆端到端验收（必须 100%，门槛为 95%）。
 go test ./internal/agent/deepagent -run TestUserMemoryEndToEndAcceptanceAtLeastNinetyFivePercent -count=1 -v
 # 需要启用 CGO 且安装 C 编译器。
 go test -race ./...
@@ -310,10 +319,35 @@ go test ./internal/conversation -run TestPostgresContract -v -count=1
 
 模型测试使用 fake model 或本地 OpenAI-compatible 测试服务器，不调用真实模型。涵盖工具循环、原生流合并、跨轮恢复、摘要成功/失败、摘要超预算、最大迭代、取消、提交失败、会话隔离、分页、HTTP 断连和单次 CLI 启动。PostgreSQL 集成测试未配置 `EASYGO_TEST_DATABASE_URL` 时明确跳过。
 
-Eino 参考：[Summarization middleware](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/eino_adk_chatmodelagentmiddleware/middleware_summarization/)。实际实现以 `go.mod` 固定的 Eino v0.9.13 源码为准。
+Eino 仍用于原有消息、工具与迭代器接口，保留历史存储兼容性；模型与工具的实际循环由 EasyGo 原生 Loop 执行。
 
 ## 可恢复后台 agent
 
 示例配置启用分层 skill 与后台任务；旧配置默认关闭。Gateway 和 TUI 自动承载后台 worker，也可用 `go run ./cmd/easygo-agent -mode worker` 常驻执行。任务支持跨轮查询、续跑、取消、PostgreSQL 重启恢复和自动汇总，默认每个进程两个 worker，子 agent 不开放沙箱写操作。
 
 配置、恢复决策、HTTP 接口与验证方式见 [分层 skill 与可恢复后台任务](doc/agent-framework.md)。
+
+## 独立 AI 网关接线
+
+应用默认在进程内使用网关适配器，也可以连接独立的 `cmd/ai-gateway`：
+
+```bash
+go run ./cmd/ai-gateway -config configs/ai-gateway.example.json
+go run ./cmd/easygo-agent -config configs/agent-via-gateway.example.yaml -user alice
+```
+
+先编辑网关示例，保留需要的模型并填好环境变量；应用的 `model.name` 对应网关模型别名，`apikey` 对应网关 Bearer。自定义 JSON 别名在应用中显式设置 `model.streaming: false`，每轮接收一次完整响应；原生协议默认流式。供应商参数映射和价格由网关配置，应用不重复计价。
+
+## 对话调用 CLI 工坊
+
+先按 [工坊文档](doc/workshop.md)运行独立工坊服务，为它配置工作流和 `WORKSHOP_BEARER_TOKEN`。然后在应用 YAML 中启用：
+
+```yaml
+workshop:
+  enabled: true
+  base_url: http://127.0.0.1:8091
+  auth_token: "{WORKSHOP_BEARER_TOKEN}"
+  request_timeout: 15s
+```
+
+Agent 先用 `workshop_catalog` 发现已配置的工作流，再使用 `workshop_submit`、`workshop_get`、`workshop_list`、`workshop_cancel`、`workshop_resume` 和 `workshop_result`。提交必须带稳定的 `idempotency_key`；续跑是不自动重试的写操作。任务归属由运行时用户和会话计算，不能由模型指定。查询返回任务状态、最近一次执行的有界摘要和相对产物预览，并明确标出正文长度与截断状态。`workshop_result` 通过 `run_id` 和字节游标分页读取完整正文，`workshop_list` 分页列出任务；宿主目录和原生 CLI 会话 ID 不暴露给模型。

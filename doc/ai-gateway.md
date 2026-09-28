@@ -1,3 +1,5 @@
+> 此文记录 `eba47cf` 的 Go 本地应用阶段。当前三服务 RPC 部署以 [services/README.md](../services/README.md) 和 [RPC 契约](../contracts/rpc-v1.md) 为准；旧服务命令和 Bearer 接线不适用于新端口。
+
 # AI gateway
 
 `pkg/gateway` implements `pkg/ai.Client` using HTTP and the Go standard library. It is independent of the agent loop, storage, tools, Eino and CLI workshop. A model alias selects a configured protocol, full endpoint URL and upstream model ID.

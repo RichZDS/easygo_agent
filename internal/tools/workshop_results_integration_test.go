@@ -12,7 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"easygo-agent/pkg/workshop"
+	"easygo-agent/services/workshop/workshop"
 )
 
 // Extends the original P2 reproduction without changing its saved source/logs:

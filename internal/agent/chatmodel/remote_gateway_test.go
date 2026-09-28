@@ -17,8 +17,8 @@ import (
 	"time"
 
 	"easygo-agent/internal/config"
-	"easygo-agent/pkg/ai"
-	"easygo-agent/pkg/gateway"
+	"easygo-agent/services/ai-gateway/ai"
+	"easygo-agent/services/ai-gateway/gateway"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 )

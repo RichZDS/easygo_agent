@@ -1,3 +1,5 @@
+> 此文记录 `eba47cf` 的 Go 本地应用阶段。当前三服务 RPC 部署以 [services/README.md](../services/README.md) 和 [RPC 契约](../contracts/rpc-v1.md) 为准；旧服务命令和 Bearer 接线不适用于新端口。
+
 # EasyGo：模型网关、Agent Loop、工坊
 
 这次拆分把供应商协议、模型工具循环和 CLI 任务执行分开。每层有自己的入口和测试；修改供应商字段映射不需要修改工具循环，修改 CLI 参数不需要修改模型网关。

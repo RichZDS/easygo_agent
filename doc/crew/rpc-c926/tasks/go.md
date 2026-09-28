@@ -1,0 +1,18 @@
+Foreman status: done (2026-09-28); see ../closure.md. Docker runtime validation remains explicitly unexecuted.
+
+# 01 Go services and common RPC security
+assignee: go
+status: done
+## 1. Site
+Worktree /home/ubuntu/Projects/easygo-rpc-go, branch feat/rpc-go-services-c926. Read contracts/rpc-v1.md and existing pkg/ai,pkg/gateway,pkg/workshop, command/tests. Own extraction and Go RPC. No project CLAUDE/AGENTS at root currently, check.
+## 2. Implementation
+Move pkg/ai to services/ai-gateway/ai and pkg/gateway to services/ai-gateway/gateway; own go.mod module easygo-agent/services/ai-gateway. Move pkg/workshop to services/workshop/workshop with go.mod module easygo-agent/services/workshop. Move/replace cmd/ai-gateway and cmd/workshop production commands into respective services/*/cmd/server with strict mTLS-only RPC launch. Preserve all provider/workshop core tests and behavior (including P1/P2 fixes). Do not leave duplicate implementations/root service entrypoints. Rewire ALL root Go imports and go.mod require/replace so prior Go local app and root tests still run. No root README edits (foreman).
+Implement packages/rpc-go (module easygo-agent/rpc; stdlib only), consumed via replace ../../packages/rpc-go in each service; root needs its own replace too. mTLS chain + pinned leaf certificate authorization and client server-pin helper, min TLS1.3; exact method/namespace permissions; health permission; no forwarded identity headers. JSON-RPC envelope/errors/bounds per contract, duplicate/unknown field behavior fail-closed, reject unsupported profile without executing. Match actual TLS certificate bytes, never CN/header. Do not implement custom crypto/JWT. Strong unit/real-TLS tests.
+Gateway RPC maps gateway.models/generate. Support params.stream true with exact SSE envelopes in contract, cancellation, authoritative terminal. Existing gateway FileConfig embedded into new server config alongside listen/tls/authorization; no Bearer listener fallback. Workshop server config wraps workshop.Config in workshop field; methods map current bounded Summary/ListPage/Result APIs, scoped data, trusted namespace, required submit key. Return sanitized domain error codes. Implement real CLI server startup/shutdown and helper APIs needed tests; config examples services/*/config.example.json with /run/easygo identity/trust paths, default ports8441/8443. authorization includes own cert only health; agent-loop cert health+allowed business methods namespace*. No end-client direct gateway/workshop permissions by default.
+Do not own Dockerfiles, .dockerignore or service README (Grok owns). Communicate public APIs / config early in worklog. Foreman creates PKI script and cross-process fixture independently. Keep legacy library HTTP handlers for root tests but NEVER mount them on new service ports. Root older local app not default deployment.
+## 3. Do not
+No TS changes, root deploy scripts/compose/docs except own module notes if necessary, no production/keys/references edits, no push. Don't weaken TLS or legacy tests to pass. Ask before contract changes.
+## 4. Proof
+Each Go module tests+race+vet independently, root original tests after extraction. Real mTLS rejects no cert, wrong CA, unknown pinned leaf, wrong method, wrong namespace, wrong server pin, expired cert; authorized roundtrip and stream/cancel succeed. Exercise each RPC workshop method through actual TLS HTTP. Prove old /v1 endpoints unavailable on service RPC listener. Keep generated keys temp.
+## 5. Delivery
+Single implementation commit, log commands/exits/paths, module paths/start commands/config. Report via file before stopping. Foreman cherry-picks, reruns, merges main.

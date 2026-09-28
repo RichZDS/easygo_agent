@@ -2,8 +2,8 @@ package chatmodel
 
 import (
 	"context"
-	"easygo-agent/pkg/ai"
-	"easygo-agent/pkg/gateway"
+	"easygo-agent/services/ai-gateway/ai"
+	"easygo-agent/services/ai-gateway/gateway"
 	"encoding/json"
 	"fmt"
 	"github.com/cloudwego/eino/components/model"

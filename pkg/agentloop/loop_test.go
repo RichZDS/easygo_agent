@@ -2,7 +2,7 @@ package agentloop
 
 import (
 	"context"
-	"easygo-agent/pkg/ai"
+	"easygo-agent/services/ai-gateway/ai"
 	"encoding/json"
 	"errors"
 	"reflect"

@@ -1,13 +1,23 @@
-**
-!go.mod
-!go.sum
-!cmd/
-!cmd/sandbox-controller/
-!cmd/sandbox-controller/**
-!internal/
-!internal/sandbox/
-!internal/sandbox/**
-!deploy/
-!deploy/sandbox/
-!deploy/sandbox/*.Dockerfile
-!deploy/sandbox/runtime-entrypoint.sh
+# Denylist for repo-root image builds.
+# The previous file was a sandbox whitelist. A whitelist here drops
+# services/ and packages/rpc-go, so the service images cannot build.
+# Sandbox Dockerfiles copy explicit paths and still find them.
+# Do not exclude config.example.json or package-lock.json.
+
+.git
+.env*
+state/
+logs/
+storage/
+Storage/
+**/node_modules
+**/dist
+**/*.log
+**/*.db
+**/*.sqlite
+**/tls.key
+
+**/config.local.json
+**/auth.json
+**/*.key
+**/.env*

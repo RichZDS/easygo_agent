@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"easygo-agent/internal/config"
-	"easygo-agent/pkg/gateway"
+	"easygo-agent/services/ai-gateway/gateway"
 	"github.com/cloudwego/eino/components/model"
 )
 

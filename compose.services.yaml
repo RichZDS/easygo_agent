@@ -1,0 +1,72 @@
+# Three mTLS RPC services. Start this file by itself:
+#   docker compose -f compose.services.yaml up --build
+# compose.yaml is the older Postgres and sandbox stack. It is not part of
+# this deployment and mounts a Docker socket for the sandbox profile.
+#
+# Published ports bind the host to 127.0.0.1. Inside the compose network the
+# listeners are whatever each config.example.json sets; the service defaults
+# are :8441, :8442 and :8443 on all container interfaces.
+# Private keys are mounted only into the owning service. public/ holds
+# certificates. This file does not mount a CA private key, a Docker socket,
+# or the operator home directory.
+
+name: easygo-rpc
+
+services:
+  ai-gateway:
+    build:
+      context: .
+      dockerfile: services/ai-gateway/Dockerfile
+    image: easygo-ai-gateway:local
+    init: true
+    restart: "unless-stopped"
+    stop_grace_period: 20s
+    ports:
+      - "127.0.0.1:${EASYGO_GATEWAY_PORT:-8441}:8441"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      CUSTOM_API_KEY: ${CUSTOM_API_KEY:-}
+    volumes:
+      - "${EASYGO_PKI_DIR:-./state/pki}/ai-gateway:/run/easygo/identity:ro"
+      - "${EASYGO_PKI_DIR:-./state/pki}/public:/run/easygo/trust:ro"
+      - "${EASYGO_GATEWAY_CONFIG:-./services/ai-gateway/config.example.json}:/run/easygo/config.json:ro"
+
+  agent-loop:
+    build:
+      context: .
+      dockerfile: services/agent-loop/Dockerfile
+    image: easygo-agent-loop:local
+    init: true
+    restart: "unless-stopped"
+    stop_grace_period: 20s
+    ports:
+      - "127.0.0.1:${EASYGO_AGENT_PORT:-8442}:8442"
+    volumes:
+      - "agent-data:/data"
+      - "${EASYGO_PKI_DIR:-./state/pki}/agent-loop:/run/easygo/identity:ro"
+      - "${EASYGO_PKI_DIR:-./state/pki}/public:/run/easygo/trust:ro"
+      - "${EASYGO_AGENT_CONFIG:-./services/agent-loop/config.example.json}:/run/easygo/config.json:ro"
+
+  workshop:
+    build:
+      context: .
+      dockerfile: services/workshop/Dockerfile
+    image: easygo-workshop:local
+    init: true
+    restart: "unless-stopped"
+    stop_grace_period: 20s
+    ports:
+      - "127.0.0.1:${EASYGO_WORKSHOP_PORT:-8443}:8443"
+    environment:
+      CODEX_API_KEY: ${CODEX_API_KEY:-}
+      ANTHROPIC_API_KEY: ${WORKSHOP_ANTHROPIC_API_KEY:-}
+    volumes:
+      - "workshop-data:/data"
+      - "${EASYGO_PKI_DIR:-./state/pki}/workshop:/run/easygo/identity:ro"
+      - "${EASYGO_PKI_DIR:-./state/pki}/public:/run/easygo/trust:ro"
+      - "${EASYGO_WORKSHOP_CONFIG:-./services/workshop/config.example.json}:/run/easygo/config.json:ro"
+
+volumes:
+  agent-data: {}
+  workshop-data: {}

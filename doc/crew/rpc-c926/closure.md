@@ -1,0 +1,4 @@
+# Foreman closure · 2026-09-28
+All delivered commits integrated; strict JSON fix independently reproduced green on final root worktree. Receipt validation addendum completed by foreman after worker sessions ended; 74 TS tests and full three-process proof pass. Go race/vet evidence reused for unchanged source. Compose config validation passes; no Docker Engine or paid provider execution claimed.
+Original review red evidence preserved. Final logs: final-ts-closure.log, foreman-repro-green.log, three-process-closure.log in parent directory. Three-process evidence /tmp/easygo-rpc-e2e-febkRc.
+Herdr discovery on resumption confirms old wA worker panes/sessions no longer exist. Do not close unrelated wB/wC panes. Five-section handoffs below reconstructed by foreman from worker-authored completion reports and Git; not newly authored by missing workers.

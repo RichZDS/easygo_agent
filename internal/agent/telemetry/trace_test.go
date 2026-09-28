@@ -11,7 +11,7 @@ import (
 
 	"easygo-agent/internal/agent/telemetry"
 	"easygo-agent/internal/testutil"
-	"easygo-agent/pkg/ai"
+	"easygo-agent/services/ai-gateway/ai"
 
 	"github.com/cloudwego/eino/schema"
 	"go.uber.org/zap"

@@ -1,0 +1,40 @@
+{
+  "listen": ":8442",
+  "tls": {
+    "cert_file": "/run/easygo/identity/tls.crt",
+    "key_file": "/run/easygo/identity/tls.key",
+    "ca_file": "/run/easygo/trust/ca.crt"
+  },
+  "authorization": [
+    {
+      "id": "client",
+      "cert_file": "/run/easygo/trust/client.crt",
+      "methods": [
+        "agent.session.create", "agent.session.list", "agent.session.history",
+        "agent.run.start", "agent.run.get", "agent.run.cancel", "agent.run.events"
+      ],
+      "namespaces": ["demo"]
+    },
+    {
+      "id": "agent-loop",
+      "cert_file": "/run/easygo/trust/agent-loop.crt",
+      "methods": ["health"],
+      "namespaces": []
+    }
+  ],
+  "database": "/data/agent.sqlite",
+  "gateway": {
+    "url": "https://ai-gateway:8441/rpc",
+    "peer_certificate_file": "/run/easygo/trust/ai-gateway.crt"
+  },
+  "workshop": {
+    "url": "https://workshop:8443/rpc",
+    "peer_certificate_file": "/run/easygo/trust/workshop.crt"
+  },
+  "model": "chat",
+  "streaming": true,
+  "max_steps": 20,
+  "context_bytes": 128000,
+  "concurrency": 4,
+  "system_prompt": "Use the provided tools when needed. Workshop task acceptance is not completion."
+}

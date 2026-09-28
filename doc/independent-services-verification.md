@@ -1,0 +1,48 @@
+# 三服务改造验收
+
+验收日期：2026-09-28。任务基线：`eba47cf90dc57e8abee6d134c6a8228d55005536`。改造代码位于 `refactor/independent-rpc-services`，完成后合入 `main`。部署入口、权限和操作步骤见 [服务说明](../services/README.md)，接口见 [RPC 契约](../contracts/rpc-v1.md)。
+
+## 交付范围
+
+| 服务 | 实现 | 独立部署边界 |
+|---|---|---|
+| AI 网关 | Go | 协议映射、SSE、用量/费用、元数据观测；独立配置与供应商凭证 |
+| Agent Loop | TypeScript / Node | SQLite 会话与队列、模型/工具循环、压缩、取消、事件、崩溃恢复；只经 RPC 调用其他服务 |
+| 工坊 | Go + CLI 子进程 | Codex/Claude 工作流、任务库、工作区、续跑、产物与分页；独立数据与 CLI 凭证 |
+
+三个目录各有依赖清单、启动程序、示例配置、Dockerfile 和说明。共享 Go RPC 包只在构建时复用。服务端只公开 mTLS RPC 和需授权的健康检查：CA 链校验、实际叶证书指纹、方法权限、namespace 权限；调用方另校验主机名及固定服务端证书。
+
+Loop 的 TypeScript 组织方式参考 reference agent A `<reference revision>` 的 agent-core；模型输出先提交、工具结果提交后再推进的顺序，也对照了 reference agent B `<reference revision>` 当前 agent loop。未复制业务兼容层和旧 LangGraph 路径。
+
+## 实际验证
+
+所有下列已通过项目的命令退出码为 0。最终改动仅涉及 TS 响应边界、客户端脚本与文档；Go 源码沿用此前通过的同一版本，三进程联调再次独立构建 Go 程序。
+
+| 检查 | 结果 |
+|---|---|
+| 根 Go 应用、`packages/rpc-go`、两个 Go 服务的 `go test -race ./...` 和 `go vet ./...` | 通过，旧本地应用回归也通过 |
+| TS `npm run typecheck`、`npm test` | 通过，74 项测试，无失败或跳过 |
+| `node --test scripts/rpc-call.test.mjs` | 通过：证书固定、流解码、损坏响应拒绝、密钥不覆盖 |
+| `node scripts/test-services.mjs` | 通过：三个真实独立服务进程、实际 TLS 和工坊子进程 |
+| 原审查问题的独立复现脚本，改为修复后预期 | 通过：重复字段请求不建会话；损坏写响应后仅一次副作用、一次模型调用 |
+| Docker Compose 官方二进制 `config --quiet` | 通过，仅配置解析 |
+| Docker 镜像构建 / 容器启动 | 未执行：本机没有 Docker Engine |
+| 真实模型供应商和原生 Codex/Claude 在线调用 | 未执行：使用本机响应与 CLI 夹具，无付费模型请求 |
+
+三进程联调逐项检查：无证书、不可信 CA、过期证书、未授权叶证书、错误服务端指纹、越权方法及 namespace 均拒绝；客户端经 Loop、网关、工坊执行真实子进程并核对产物及持久化答案；幂等键重复不重复执行；普通工具错误可继续得到最终答案；取消穿过两层 RPC 关闭阻塞的供应商连接；SIGKILL 后实际等待 31 秒租约到期，原运行标记 interrupted、已完成历史保留、第二实例不能抢占数据库；各服务正常退出。
+
+最终本机证据目录为 `/tmp/easygo-rpc-e2e-febkRc`，测试日志与原审查复现保存在 `/tmp/crew/rpc-c926/` 并另行归档。临时测试私钥不进入仓库。
+
+## 审查修复
+
+独立审查复现了一个问题：宽松 JSON 解析会保留重复字段的最后一个值，使损坏的工坊错误响应被当成允许重试的拒绝。现在入口及上游响应使用同一严格解析器，拒绝递归重复字段、无效 UTF-8、尾随内容和过深嵌套；SSE 必须完整结束，才接受终态。
+
+工坊写操作返回空值、错误 namespace、错误任务 ID 或未知状态，也视为结果不确定。Loop 记录 `uncertain_tool_outcome` 并停止，不再让模型发起下一次写操作。读操作的任务身份同样检查，拒绝的响应内容不会写入模型历史。测试直接统计实际接单次数，验证只有一次写入。
+
+## 迁移边界
+
+原 Go 本地应用、TUI、旧数据库及其业务记忆/沙箱能力保留用于过渡；本次没有把它们完整移植到 TS，也没有自动迁移旧 PostgreSQL/Eino 历史。旧 HTTP/Bearer 接口不能调用新的 mTLS 端口。
+
+每个数据库只供一个服务实例使用；已有 running 任务重启后不自动重放副作用。RPC 公私钥权限与 CLI 执行策略已落实，但不等于为每个 CLI 任务提供独立 OS 沙箱。镜像与真实供应商的验证须在相应运行环境继续执行。
+
+施工图、审查与交接记录见 [crew 任务板](crew/rpc-c926/brief.md)。

@@ -1,0 +1,14 @@
+{
+  "name": "@easygo/agent-loop",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.23.0" },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "start": "node dist/server.js"
+  },
+  "devDependencies": { "@types/node": "22.19.15", "typescript": "5.9.3" }
+}

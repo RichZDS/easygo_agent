@@ -1,3 +1,5 @@
+> 此文记录 `eba47cf` 的 Go 本地应用阶段。当前三服务 RPC 部署以 [services/README.md](../services/README.md) 和 [RPC 契约](../contracts/rpc-v1.md) 为准；旧服务命令和 Bearer 接线不适用于新端口。
+
 # Native agent loop and model boundary
 
 The interactive CLI, TUI and HTTP conversation runtime now execute `pkg/agentloop` through `internal/agent/deepagent`. There is no Eino agent loop behind that adapter. `internal/agent/chatmodel.New` selects an embedded gateway or the standalone gateway HTTP client, so the main model, context summary model and existing background task Engine all send model requests through `pkg/gateway` and `pkg/ai`.

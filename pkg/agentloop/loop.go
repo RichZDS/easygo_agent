@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"time"
 
-	"easygo-agent/pkg/ai"
+	"easygo-agent/services/ai-gateway/ai"
 )
 
 var ErrStepLimit = errors.New("agent step allowance exhausted: final model requested tools")

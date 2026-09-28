@@ -14,7 +14,7 @@ import (
 	"time"
 
 	agentruntime "easygo-agent/internal/agent/runtime"
-	"easygo-agent/pkg/workshop"
+	"easygo-agent/services/workshop/workshop"
 )
 
 // This crosses the production application wiring, native loop, real HTTP model

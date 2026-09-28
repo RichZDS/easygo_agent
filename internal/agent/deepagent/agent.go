@@ -14,7 +14,7 @@ import (
 	"easygo-agent/internal/config"
 	"easygo-agent/internal/prompt"
 	"easygo-agent/pkg/agentloop"
-	"easygo-agent/pkg/ai"
+	"easygo-agent/services/ai-gateway/ai"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/middlewares/summarization"

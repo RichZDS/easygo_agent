@@ -2,6 +2,10 @@ FROM golang:1.25-bookworm AS build
 
 WORKDIR /src
 COPY go.mod go.sum ./
+# The transitional root module references the independently built service modules.
+COPY packages/rpc-go/go.mod ./packages/rpc-go/go.mod
+COPY services/ai-gateway/go.mod ./services/ai-gateway/go.mod
+COPY services/workshop/go.mod ./services/workshop/go.mod
 RUN go mod download
 COPY cmd/sandbox-controller ./cmd/sandbox-controller
 COPY internal/sandbox ./internal/sandbox

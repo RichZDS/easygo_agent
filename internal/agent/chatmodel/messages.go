@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"easygo-agent/pkg/ai"
+	"easygo-agent/services/ai-gateway/ai"
 	"github.com/cloudwego/eino/schema"
 )
 

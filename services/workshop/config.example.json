@@ -1,0 +1,64 @@
+{
+  "listen": ":8443",
+  "tls": {
+    "cert_file": "/run/easygo/identity/tls.crt",
+    "key_file": "/run/easygo/identity/tls.key",
+    "ca_file": "/run/easygo/trust/ca.crt"
+  },
+  "authorization": [
+    {
+      "id": "workshop",
+      "cert_file": "/run/easygo/trust/workshop.crt",
+      "methods": [
+        "health"
+      ],
+      "namespaces": []
+    },
+    {
+      "id": "agent-loop",
+      "cert_file": "/run/easygo/trust/agent-loop.crt",
+      "methods": [
+        "health",
+        "workshop.workflows",
+        "workshop.submit",
+        "workshop.get",
+        "workshop.list",
+        "workshop.cancel",
+        "workshop.resume",
+        "workshop.result",
+        "workshop.events"
+      ],
+      "namespaces": [
+        "*"
+      ]
+    }
+  ],
+  "workshop": {
+    "root": "/data/workshop",
+    "concurrency": 2,
+    "queue_capacity": 8,
+    "max_output_bytes": 4194304,
+    "engines": {
+      "codex": {
+        "binary": "codex",
+        "env_allowlist": [
+          "CODEX_API_KEY"
+        ]
+      }
+    },
+    "workflows": [
+      {
+        "name": "write-note",
+        "version": "1",
+        "instructions": "Write a concise Markdown note addressing the user input into note.md in the current workspace. End by summarizing what you wrote.",
+        "engine": "codex",
+        "model": "YOUR_CODEX_MODEL_ID",
+        "policy": "workspace-write",
+        "timeout_seconds": 300,
+        "artifacts": [
+          "note.md"
+        ]
+      }
+    ]
+  }
+}

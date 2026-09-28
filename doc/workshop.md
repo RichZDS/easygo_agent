@@ -1,3 +1,5 @@
+> 此文记录 `eba47cf` 的 Go 本地应用阶段。当前三服务 RPC 部署以 [services/README.md](../services/README.md) 和 [RPC 契约](../contracts/rpc-v1.md) 为准；旧服务命令和 Bearer 接线不适用于新端口。
+
 # CLI workshop
 
 Workshop is a standalone Go service for running a small catalog of operator-defined

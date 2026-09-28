@@ -1,3 +1,5 @@
+> 此文记录 `eba47cf` 的 Go 本地应用阶段。当前三服务 RPC 部署以 [services/README.md](../services/README.md) 和 [RPC 契约](../contracts/rpc-v1.md) 为准；旧服务命令和 Bearer 接线不适用于新端口。
+
 # 三层改造验收记录 · 2026-09-25
 
 在保留基线 `95131f1` 历史的任务分支上完成实现、独立审查、修复和集成验证。

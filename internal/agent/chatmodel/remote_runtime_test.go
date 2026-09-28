@@ -21,8 +21,8 @@ import (
 	"easygo-agent/internal/config"
 	"easygo-agent/internal/conversation"
 	"easygo-agent/internal/tools"
-	"easygo-agent/pkg/ai"
-	"easygo-agent/pkg/gateway"
+	"easygo-agent/services/ai-gateway/ai"
+	"easygo-agent/services/ai-gateway/gateway"
 	"github.com/cloudwego/eino/components/tool"
 )
 

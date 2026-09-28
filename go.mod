@@ -89,3 +89,14 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 )
+
+require (
+	easygo-agent/services/ai-gateway v0.0.0
+	easygo-agent/services/workshop v0.0.0
+)
+
+replace easygo-agent/rpc => ./packages/rpc-go
+
+replace easygo-agent/services/ai-gateway => ./services/ai-gateway
+
+replace easygo-agent/services/workshop => ./services/workshop

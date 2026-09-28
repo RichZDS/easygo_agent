@@ -58,6 +58,11 @@ Docker failures never fall back to the host runner. Unknown sandbox modes fail.
 Omitting sandbox keeps compatibility with the previous unmanaged API; managed
 deployments must explicitly configure `mode: docker`.
 
+Read-only workflows mount `/workspace` read-only; an explicit writable submount
+at `/workspace/.workshop-home` holds only that task's native state. Workspace-write
+workflows retain a writable task workspace. The mount enforces the read-only
+policy even if a CLI or model attempts a file write.
+
 Each invocation uses a new UUID container. Workspace and native HOME persist across
 resume; capabilities and socket directories are regenerated. Defaults: 1 GiB memory
 with no extra swap, 1 CPU, 128 PIDs, 64 MiB `/tmp`, 8 MiB private `/dev/shm`. Mandatory:
@@ -98,3 +103,29 @@ Without explicit endpoint/image variables, the integration test skips. A normal
 unit-test pass is not evidence that a container ran. The fixture only removes its
 own uniquely named/labeled resources. Do not target a shared/production daemon.
 No daemon installation or host network changes are performed by this test.
+
+
+## Real native CLI proof
+
+Build the pinned runtime image above, then run all four native CLIs through the
+same DockerRunner and UDS relay against a generated local mTLS fixture:
+
+```bash
+EASYGO_DOCKER_TEST_ENDPOINT=unix:///operator/dedicated/docker.sock \
+EASYGO_DOCKER_NATIVE_IMAGE=easygo-task-runtime:local \
+EASYGO_DOCKER_TEST_BINARY=/absolute/path/to/docker \
+go -C services/workshop test ./workshop -run '^TestDockerNativeRuntimes$' -count=1 -v
+```
+
+This opt-in test reports installed versions and checks native first/resume results,
+session continuity, namespace/model/protocol callbacks, a deterministic native file
+tool call and actual artifact, plus cancellation cleanup. Model responses are
+synthetic, provider keys are unnecessary. An unsupported nested CLI sandbox must
+fail visibly; never weaken the outer container isolation to pass the fixture.
+
+With the current native Codex `workspace-write` sandbox, hosts that disallow
+unprivileged user namespaces can reject its nested bwrap helper. Text generation
+and resume still work, but an exec tool cannot create the requested artifact; the
+native fixture reports this as a failure. Resolving that compatibility issue must
+preserve the outer Docker constraints and read-only workflow mounts. The host
+runner's native sandbox policy must not be changed to accommodate containers.

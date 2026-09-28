@@ -375,3 +375,17 @@ func TestDockerRejectsHomeSymlinkWithoutOutsideWrites(t *testing.T) {
 		t.Fatal("outside directory mutated", err)
 	}
 }
+
+func TestDockerReadOnlyWorkspaceAllowsOnlyNativeHomeWrites(t *testing.T) {
+	r, _, _ := dockerFixture(t)
+	args := r.taskContainerOptions("fixture", "/host/workspace", "/host/relay", "/host/workspace/.workshop-home", "read-only")
+	mounts := []string{}
+	for i, arg := range args {
+		if arg == "--mount" {
+			mounts = append(mounts, args[i+1])
+		}
+	}
+	if len(mounts) != 3 || !strings.HasSuffix(mounts[0], ",readonly") || !strings.Contains(mounts[2], "dst=/workspace/.workshop-home,") || strings.Contains(mounts[2], ",readonly") {
+		t.Fatalf("read-only mounts: %v", mounts)
+	}
+}

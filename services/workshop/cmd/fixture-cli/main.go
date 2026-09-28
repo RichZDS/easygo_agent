@@ -82,7 +82,12 @@ func main() {
 		}
 	}
 	home := filepath.Join(os.Getenv("HOME"), "fixture-persisted")
-	if req.Mode == "resume" {
+	if req.Mode == "readonly" {
+		checks["workspace_write_denied"] = os.WriteFile("forbidden-artifact.txt", []byte("no"), 0600) != nil
+		var workspaceFS syscall.Statfs_t
+		checks["workspace_readonly"] = syscall.Statfs("/workspace", &workspaceFS) == nil && workspaceFS.Flags&1 != 0
+		checks["home_writable"] = os.WriteFile(home, []byte("own-home"), 0600) == nil
+	} else if req.Mode == "resume" {
 		b, e := os.ReadFile(home)
 		checks["home_persisted"] = e == nil && string(b) == "own-home"
 		b, e = os.ReadFile("artifact.txt")
@@ -102,7 +107,11 @@ func main() {
 		resp.Body.Close()
 	}
 	proof, _ := json.Marshal(map[string]any{"checks": checks, "limits": limits})
-	os.WriteFile("isolation-proof.json", proof, 0600)
+	proofPath := "isolation-proof.json"
+	if req.Mode == "readonly" {
+		proofPath = filepath.Join(os.Getenv("HOME"), "isolation-proof.json")
+	}
+	os.WriteFile(proofPath, proof, 0600)
 	for name, ok := range checks {
 		if !ok {
 			fmt.Fprintln(os.Stderr, "failed isolation check:", name)

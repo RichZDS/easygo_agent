@@ -57,7 +57,10 @@ func TestDockerIntegration(t *testing.T) {
 	os.WriteFile(filepath.Join(sibling, "sentinel"), []byte("dummy-sibling-sentinel"), 0600)
 	profile := RuntimeProfile{Engine: "codex", Protocol: "responses", GatewayModel: "fixture-model"}
 	in := Invocation{Namespace: "task-namespace", Workspace: workspace, Workflow: Workflow{Name: "proof", Version: "1", Engine: "codex", Model: "fixture-model", Policy: "workspace-write", Instructions: "offline proof", TimeoutSeconds: 30, RuntimeSpec: &profile}}
-	for _, mode := range []string{"first", "resume"} {
+	for _, mode := range []string{"first", "resume", "readonly"} {
+		if mode == "readonly" {
+			in.Workflow.Policy = "read-only"
+		}
 		raw, _ := json.Marshal(map[string]string{"mode": mode, "host_sentinel": sentinel, "sibling": filepath.Join(sibling, "sentinel")})
 		in.Input = string(raw)
 		result, e := r.Run(ctx, in, func(e Event) error {
@@ -70,7 +73,11 @@ func TestDockerIntegration(t *testing.T) {
 			t.Fatal(mode, e)
 		}
 		in.SessionID = result.SessionID
-		raw, e = os.ReadFile(filepath.Join(workspace, "isolation-proof.json"))
+		proofPath := filepath.Join(workspace, "isolation-proof.json")
+		if mode == "readonly" {
+			proofPath = filepath.Join(workspace, ".workshop-home", "isolation-proof.json")
+		}
+		raw, e = os.ReadFile(proofPath)
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -91,6 +98,8 @@ func TestDockerIntegration(t *testing.T) {
 		}
 		t.Logf("%s: %s", mode, raw)
 	}
+
+	in.Workflow.Policy = "workspace-write"
 
 	// Parent and descendant remain alive until cancellation/deadline. Removal
 	// must terminate the entire container namespace in either case.

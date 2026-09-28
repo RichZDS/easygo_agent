@@ -12,7 +12,7 @@
 | 真实镜像构建并启动 | 通过（Compose，最终镜像见下） |
 | 记忆更新/召回/整理、远程 TUI 走 TS 主链 | 通过（含真实 PTY 交互） |
 | 崩溃/重启故障注入 | 通过 6/6 |
-| 并发与有界 soak | 早先中断的 1 小时 soak 已在本轮重跑；推送时正在运行，完成后补记于本文件 |
+| 并发与有界 soak | 通过：8 客户端连续 1 小时，1,920 次运行 0 失败，整场扣费精确对账 |
 | 真实模型完成复杂项目 | 通过：Codex + DeepSeek（deepseek-flash）在隔离容器里首轮完成六文件项目，独立 oracle 717/717 |
 
 ## 单元与集成测试
@@ -28,7 +28,7 @@
 ## 端到端
 
 - **本地真实三服务 + 专用 daemon 上的真实任务容器**（`scripts/test-platform.mjs`）：7/7。
-- **Docker Compose 部署**（`scripts/test-platform-compose.mjs`，`EASYGO_REQUIRE_ARTIFACT=1`）：5/5，包括产物下载字节与哈希校验、他人越权下载被拒。最终镜像：loop `b64ed3510085`、workshop `76b9c3dc22f8`、gateway `b2ad80b5c764`，夹具运行时 `d275eb065ceb`。
+- **Docker Compose 部署**（`scripts/test-platform-compose.mjs`，`EASYGO_REQUIRE_ARTIFACT=1`）：5/5，包括产物下载字节与哈希校验、他人越权下载被拒。最终镜像：loop `b64ed3510085`、workshop `4ccb844bbd58`、gateway `b2ad80b5c764`，夹具运行时 `d275eb065ceb`。
 - **真实浏览器**（`services/agent-loop/test/platform-live-browser.mjs`，Chromium，桌面 1440×1000 与手机 390×844，0 个页面错误），对 Compose 部署：
 
 | 步骤 | 耗时 ms |
@@ -43,6 +43,21 @@
 
 - **远程 TUI**（`scripts/test-remote-tui.py`，120×40 真实 PTY）：新建会话、收到回复、运行队列、Ctrl+C 取消且服务端确认、杀进程重连后历史恢复、记忆/技能与 API 数据一致；坏密码负例得到 401。TUI 内没有会话选择器和记忆/技能面板，这两项走 `--sessions`/`--session`/`--rpc` 命令行模式。
 - **HTTPS 反向代理后的限速**：在 Compose 部署上把网络网关 `172.31.250.1` 设为可信代理，经 docker-proxy 实测：22 个不同转发客户端互不影响；同一客户端第 21 次登录被限速。
+
+## 1 小时 soak（`EASYGO_PLATFORM_SOAK_SECONDS=3600 node scripts/test-platform.mjs`）
+
+真实三服务进程 + 专用 daemon 上的真实任务容器，本地夹具模型。源码为 `e6b279e` 的独立快照：之后的改动只涉及工坊（磁盘配额、Resume 锁、socket 路径校验），已另由端到端、故障注入和 Compose 回归覆盖。
+
+| 指标 | 结果 |
+|---|---|
+| 时长 / 并发 | 3,600 s，8 个账户同时跑，每批间隔 15 s |
+| 完成运行 | 1,920 次，0 失败；另有 1 个 120 秒长任务在 122.6 s 内成功 |
+| 单次运行耗时 | p50 307 ms、p95 389 ms、最大 1,334 ms |
+| 供应商请求 | 1,929 次（chat 1,926、原生 3），同时在途最多 8 |
+| 扣费对账 | 共扣 48,180,000 microcredits = 1,926 × 25,000 + 3 × 10,000，冻结全部归零 |
+| 常驻内存（开始 → 结束） | loop 137 → 171 MiB、gateway 15 → 21 MiB、workshop 14 → 12 MiB；三个进程全程未退出 |
+
+soak 期间机器上同时在跑其他测试和构建，延迟数字包含这些干扰。loop 内存一小时内增长约 34 MiB，这次观测不足以判断是缓存增长还是泄漏，更长时间的运行需要另行观察。这些数字只说明这台 4 核机器在该负载下的行为，不是容量结论。
 
 ## 故障注入（`scripts/test-platform-faults.mjs`）
 

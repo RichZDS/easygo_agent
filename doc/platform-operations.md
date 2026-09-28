@@ -62,7 +62,16 @@ Web 进程只说 HTTP，TLS 在反向代理终止：
 - `secure_cookies` 必须为 true（生成器按 origin 自动设置）；
 - Compose 只把 Web 绑到 `127.0.0.1`，代理在同机转发；不要把 8441/8442/8443 暴露给代理或公网。
 
-限速默认按真实 socket 地址计算，不信任 `X-Forwarded-For`。放在代理后面时，要把代理地址写进 platform 配置的 `trusted_proxies`（`configure-platform.mjs --trusted-proxy`），否则所有用户共享代理 IP 的额度（登录每分钟 20 次、全部请求每分钟 300 次）。语义与 Caddy/nginx 示例见 [platform-web.md](platform-web.md)。
+限速默认按真实 socket 地址计算，不信任 `X-Forwarded-For`。放在代理后面时，要把代理地址写进 platform 配置的 `trusted_proxies`（`configure-platform.mjs --trusted-proxy IP`），否则所有用户共享同一个地址的额度（登录每分钟 20 次、全部请求每分钟 300 次）。语义与 Caddy/nginx 示例见 [platform-web.md](platform-web.md)。
+
+**Compose 部署要写网络网关地址，不是 127.0.0.1**：发布端口经 docker-proxy 转发，Web 容器看到的对端永远是 Compose `core` 网络的网关。`compose.platform.yaml` 把该网络固定为 `EASYGO_PLATFORM_SUBNET`（默认 `172.31.250.0/24`）、网关 `EASYGO_PLATFORM_GATEWAY`（默认 `172.31.250.1`），与宿主已有网段冲突时两者一起改。于是同机反向代理的配置是：
+
+```bash
+node scripts/configure-platform.mjs --state /srv/easygo/state \
+  --origin https://agent.example.com --trusted-proxy 172.31.250.1
+```
+
+这样做的前提是 Web 端口只绑 `127.0.0.1`（Compose 默认如此），只有宿主本机进程能从该网关地址连进来；不要把端口改绑到公网地址后还保留这个白名单。
 
 ## 4. 积分与费率
 

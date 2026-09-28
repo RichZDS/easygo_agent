@@ -60,4 +60,11 @@ services:
       - "${EASYGO_DOCKER_SOCKET:-/var/run/docker.sock}:/run/docker/docker.sock"
     networks: [core]
 networks:
-  core: {}
+  core:
+    # Pinned so the Web container sees a stable peer: published ports reach it
+    # through docker-proxy from this gateway address. List the gateway in the
+    # platform's trusted_proxies when an HTTPS reverse proxy fronts the port.
+    ipam:
+      config:
+        - subnet: ${EASYGO_PLATFORM_SUBNET:-172.31.250.0/24}
+          gateway: ${EASYGO_PLATFORM_GATEWAY:-172.31.250.1}

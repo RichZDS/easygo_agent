@@ -10,15 +10,25 @@
       "id": "client",
       "cert_file": "/run/easygo/trust/client.crt",
       "methods": [
-        "agent.session.create", "agent.session.list", "agent.session.history",
-        "agent.run.start", "agent.run.get", "agent.run.cancel", "agent.run.events"
+        "agent.session.create",
+        "agent.session.list",
+        "agent.session.history",
+        "agent.run.start",
+        "agent.run.get",
+        "agent.run.cancel",
+        "agent.run.events",
+        "agent.workshop.catalog"
       ],
-      "namespaces": ["demo"]
+      "namespaces": [
+        "demo"
+      ]
     },
     {
       "id": "agent-loop",
       "cert_file": "/run/easygo/trust/agent-loop.crt",
-      "methods": ["health"],
+      "methods": [
+        "health"
+      ],
       "namespaces": []
     }
   ],

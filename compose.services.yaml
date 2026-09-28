@@ -27,6 +27,7 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       CUSTOM_API_KEY: ${CUSTOM_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
     volumes:
       - "${EASYGO_PKI_DIR:-./state/pki}/ai-gateway:/run/easygo/identity:ro"
       - "${EASYGO_PKI_DIR:-./state/pki}/public:/run/easygo/trust:ro"

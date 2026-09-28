@@ -17,6 +17,9 @@ const (
 // TaskSummary omits private workspace/configuration and earlier run payloads.
 // Truncation flags describe previews; raw operator endpoints retain full data.
 type TaskSummary struct {
+	Runtime   string       `json:"runtime,omitempty"`
+	Engine    string       `json:"engine"`
+	Model     string       `json:"model"`
 	ID        string       `json:"id"`
 	Namespace string       `json:"namespace"`
 	Status    Status       `json:"status"`
@@ -40,6 +43,9 @@ type RunSummary struct {
 // TaskMetadata has no result text, errors, or artifact arrays, so a list page
 // stays bounded independently of result size and accumulated run history.
 type TaskMetadata struct {
+	Runtime   string        `json:"runtime,omitempty"`
+	Engine    string        `json:"engine"`
+	Model     string        `json:"model"`
 	ID        string        `json:"id"`
 	Namespace string        `json:"namespace"`
 	Status    Status        `json:"status"`
@@ -82,7 +88,7 @@ func prefix(text string, maxBytes int) string {
 }
 
 func summarize(task *Task) TaskSummary {
-	out := TaskSummary{ID: task.ID, Namespace: task.Namespace, Status: task.Status, RunCount: len(task.Runs), Runs: []RunSummary{}}
+	out := TaskSummary{Runtime: task.Workflow.Runtime, Engine: task.Workflow.Engine, Model: task.Workflow.Model, ID: task.ID, Namespace: task.Namespace, Status: task.Status, RunCount: len(task.Runs), Runs: []RunSummary{}}
 	if len(task.Runs) == 0 {
 		return out
 	}
@@ -139,7 +145,7 @@ func (s *Service) ListPage(namespace string, offset, limit int) (*TaskPage, erro
 		page.NextOffset = &end
 	}
 	for _, task := range tasks[offset:end] {
-		item := TaskMetadata{ID: task.ID, Namespace: task.Namespace, Status: task.Status, RunCount: len(task.Runs), Runs: []RunMetadata{}}
+		item := TaskMetadata{Runtime: task.Workflow.Runtime, Engine: task.Workflow.Engine, Model: task.Workflow.Model, ID: task.ID, Namespace: task.Namespace, Status: task.Status, RunCount: len(task.Runs), Runs: []RunMetadata{}}
 		if len(task.Runs) > 0 {
 			run := task.Runs[len(task.Runs)-1]
 			item.Runs = append(item.Runs, RunMetadata{ID: run.ID, Status: run.Status, TextBytes: len(run.Text), ArtifactCount: len(run.Artifacts)})

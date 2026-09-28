@@ -67,6 +67,22 @@ func Methods(g *gateway.Gateway) map[string]rpc.Method {
 			}
 			return map[string]any{"models": g.Models()}, nil
 		},
+		"gateway.native": func(ctx context.Context, raw json.RawMessage, s *rpc.Stream) (any, *rpc.Error) {
+			var p struct {
+				Namespace string          `json:"namespace"`
+				Model     string          `json:"model"`
+				Protocol  string          `json:"protocol"`
+				Body      json.RawMessage `json:"body"`
+			}
+			if rpc.Decode(raw, &p) != nil || p.Model == "" || len(p.Body) == 0 {
+				return nil, rpc.InvalidParams()
+			}
+			result, err := g.Native(ctx, p.Model, p.Protocol, s.ID(), p.Body)
+			if err != nil {
+				return nil, domainError(err)
+			}
+			return result, nil
+		},
 		"gateway.generate": func(ctx context.Context, raw json.RawMessage, s *rpc.Stream) (any, *rpc.Error) {
 			var p struct {
 				Namespace string      `json:"namespace"`

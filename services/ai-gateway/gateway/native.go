@@ -1,0 +1,214 @@
+package gateway
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+
+	"easygo-agent/rpc"
+	"easygo-agent/services/ai-gateway/ai"
+)
+
+// NativeResponse retains a framework's wire format. SSE is bounded and buffered;
+// it is released only after the provider response has been read completely.
+type NativeResponse struct {
+	ContentType string `json:"content_type"`
+	Body        []byte `json:"body"`
+}
+
+// Native only calls the configured model generation endpoint. It never accepts
+// a caller URL, headers, credential, arbitrary HTTP method or model override.
+func (g *Gateway) Native(ctx context.Context, alias, protocol, requestID string, raw json.RawMessage) (out NativeResponse, err error) {
+	start := time.Now()
+	obs := Observation{RequestID: requestID, Model: alias}
+	defer func() {
+		obs.Latency = time.Since(start)
+		if err != nil {
+			var e *Error
+			if errors.As(err, &e) {
+				obs.ErrorCode = e.Code
+			} else {
+				obs.ErrorCode = "invalid_response"
+			}
+		}
+		if g.observer != nil {
+			g.observer(obs)
+		}
+	}()
+	m, ok := g.models[alias]
+	if !ok {
+		return out, fail("unknown_model", "model alias is not configured")
+	}
+	obs.Protocol = m.Protocol
+	if protocol != m.Protocol || protocol == "custom" {
+		return out, fail("unsupported_capability", "runtime protocol does not match model route")
+	}
+	var body map[string]json.RawMessage
+	if int64(len(raw)) > g.bodyLimit || rpc.Decode(raw, &body) != nil || body == nil {
+		return out, fail("invalid_request", "invalid native request")
+	}
+	body["model"], _ = json.Marshal(m.Model)
+	// Operator parameters remain authoritative. Native framework tool definitions
+	// are intentionally retained instead of translated into the neutral tool API.
+	defaults, e := parameters(m, ai.Request{})
+	if e != nil {
+		return out, e
+	}
+	for k, v := range defaults {
+		body[k], _ = json.Marshal(v)
+	}
+	body["model"], _ = json.Marshal(m.Model)
+	data, e := json.Marshal(body)
+	if e != nil || int64(len(data)) > g.bodyLimit {
+		return out, fail("request_too_large", "native request exceeds limit")
+	}
+	req, e := http.NewRequestWithContext(ctx, http.MethodPost, m.Endpoint, bytes.NewReader(data))
+	if e != nil {
+		return out, fail("invalid_config", "invalid endpoint")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	for k, v := range m.Headers {
+		req.Header.Set(k, v)
+	}
+	if protocol == "anthropic" {
+		if req.Header.Get("Anthropic-Version") == "" {
+			req.Header.Set("Anthropic-Version", "2023-06-01")
+		}
+		if m.APIKey != "" {
+			req.Header.Set("X-Api-Key", m.APIKey)
+		}
+	} else if m.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+m.APIKey)
+	}
+	res, e := g.client.Do(req)
+	if e != nil {
+		return out, caused("transport_error", "native upstream failed", e)
+	}
+	defer res.Body.Close()
+	obs.HTTPStatus = res.StatusCode
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return out, &Error{Code: "upstream_http_error", Message: "upstream rejected request", Status: res.StatusCode}
+	}
+	// A unary RPC carries base64 bytes; cap at 8MiB even if other gateway limits
+	// are larger, leaving room for the envelope in a 16MiB RPC response.
+	limit := g.bodyLimit
+	if limit > 8<<20 {
+		limit = 8 << 20
+	}
+	raw, e = readBounded(res.Body, limit)
+	if e != nil {
+		return out, e
+	}
+	contentType := strings.ToLower(strings.Split(res.Header.Get("Content-Type"), ";")[0])
+	if e = validateNative(raw, contentType, protocol, g.eventLimit); e != nil {
+		return out, e
+	}
+	var parsed ai.Response
+	if contentType == "text/event-stream" {
+		parsed, e = decodeStream(bytes.NewReader(raw), m, alias, limit, g.eventLimit, func(ai.Event) error { return nil })
+	} else if contentType == "application/json" {
+		parsed, e = decodeResponse(m, alias, raw)
+	} else {
+		return out, fail("invalid_response", "unsupported native response content type")
+	}
+	// Native framework-specific tools may exceed the neutral parser's vocabulary.
+	// Forward the original bytes, but only report usage/cost when parsing proves it.
+	if e != nil {
+		var problem *Error
+		if !errors.As(e, &problem) || problem.Code != "unsupported_capability" {
+			return out, e
+		}
+	}
+	if e == nil {
+		obs.Usage = parsed.Usage
+		obs.Cost = calculateCost(parsed.Usage, m.Price)
+	}
+	if ctx.Err() != nil {
+		return out, caused("canceled", "request canceled", ctx.Err())
+	}
+	return NativeResponse{ContentType: contentType, Body: raw}, nil
+}
+
+// Check transport completion independently from the neutral parser, which may
+// legitimately not understand native framework tool kinds.
+func validateNative(raw []byte, contentType, protocol string, eventLimit int) error {
+	check := func(data []byte) (map[string]json.RawMessage, error) {
+		var o map[string]json.RawMessage
+		if rpc.Decode(data, &o) != nil || o == nil {
+			return nil, fail("invalid_response", "invalid native JSON")
+		}
+		if value, ok := o["error"]; ok && !bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return nil, fail("upstream_error", "native provider error")
+		}
+		return o, nil
+	}
+	if contentType == "application/json" {
+		_, e := check(raw)
+		return e
+	}
+	if !bytes.HasSuffix(raw, []byte("\n\n")) && !bytes.HasSuffix(raw, []byte("\r\n\r\n")) {
+		return fail("truncated_stream", "native SSE framing incomplete")
+	}
+	var data []string
+	size := 0
+	done := false
+	for _, line := range strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n") {
+		if line != "" {
+			size += len(line)
+			if size > eventLimit {
+				return fail("response_too_large", "native SSE frame exceeds limit")
+			}
+			if strings.HasPrefix(line, "data:") {
+				data = append(data, strings.TrimPrefix(line[5:], " "))
+			}
+			continue
+		}
+		if len(data) == 0 {
+			size = 0
+			continue
+		}
+		payload := strings.Join(data, "\n")
+		data = nil
+		size = 0
+		if done {
+			return fail("invalid_response", "native SSE data after terminal")
+		}
+		if payload == "[DONE]" && protocol == "chat_completions" {
+			done = true
+			continue
+		}
+		o, e := check([]byte(payload))
+		if e != nil {
+			return e
+		}
+		var typ string
+		json.Unmarshal(o["type"], &typ)
+		if typ == "error" || typ == "response.failed" || typ == "response.incomplete" {
+			return fail("upstream_error", "native provider failed")
+		}
+		if protocol == "responses" && typ == "response.completed" {
+			response, e := check(o["response"])
+			if e != nil {
+				return e
+			}
+			var status string
+			json.Unmarshal(response["status"], &status)
+			if status != "completed" {
+				return fail("incomplete_response", "native response incomplete")
+			}
+			done = true
+		}
+		if protocol == "anthropic" && typ == "message_stop" {
+			done = true
+		}
+	}
+	if !done {
+		return fail("truncated_stream", "native SSE has no terminal event")
+	}
+	return nil
+}

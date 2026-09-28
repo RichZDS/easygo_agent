@@ -28,6 +28,7 @@ export class Store {
       const previous = this.db.prepare('SELECT * FROM ownership WHERE id=1').get() as Row | undefined;
       if (previous && Number(previous.expires) > Date.now()) throw new RpcError(-32009, 'database_owned', 'Database already has an active owner');
       this.db.prepare('INSERT INTO ownership VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET owner=excluded.owner, expires=excluded.expires').run(this.owner, Date.now() + LEASE_MS);
+      if (!(this.db.prepare('PRAGMA table_info(runs)').all() as Row[]).some(r => r.name === 'workshop_runtime')) this.db.exec("ALTER TABLE runs ADD COLUMN workshop_runtime TEXT NOT NULL DEFAULT ''");
       const interrupted = this.db.prepare("SELECT id FROM runs WHERE status='running'").all() as Row[];
       for (const row of interrupted) {
         const error = { code: 'interrupted', message: 'Previous owner stopped; tools will not be replayed' };
@@ -79,24 +80,24 @@ export class Store {
     const rows = this.db.prepare('SELECT seq,run_id,message,metadata FROM messages WHERE session_id=? AND seq>? ORDER BY seq LIMIT ?').all(id, after, limit + 1) as Row[];
     return { messages: rows.slice(0, limit).map(r => ({ seq: r.seq, run_id: r.run_id, ...JSON.parse(String(r.message)), metadata: JSON.parse(String(r.metadata)) })), next_after: rows.length > limit ? rows[limit - 1]?.seq ?? after : null };
   }
-  start(ns: string, session: string, input: string, key: string): Run {
+  start(ns: string, session: string, input: string, key: string, runtime = ''): Run {
     return this.transaction(() => {
       this.session(ns, session);
       const existing = this.db.prepare('SELECT * FROM runs WHERE namespace=? AND session_id=? AND idempotency_key=?').get(ns, session, key) as Row | undefined;
       if (existing) {
-        if (existing.input !== input) throw new RpcError(-32009, 'idempotency_conflict');
+        if (existing.input !== input || (runtime !== '' && (existing.workshop_runtime ?? '') !== runtime)) throw new RpcError(-32009, 'idempotency_conflict');
         return this.runView(existing);
       }
       const count = this.db.prepare("SELECT count(*) AS n FROM runs WHERE status IN ('running','queued')").get() as Row;
       if (Number(count.n) >= 1000) throw new RpcError(-32029, 'queue_full');
       const id = randomUUID();
-      this.db.prepare("INSERT INTO runs(id,namespace,session_id,status,created_at,input,idempotency_key) VALUES(?,?,?,'queued',?,?,?)").run(id, ns, session, new Date().toISOString(), input, key);
+      this.db.prepare("INSERT INTO runs(id,namespace,session_id,status,created_at,input,idempotency_key,workshop_runtime) VALUES(?,?,?,'queued',?,?,?,?)").run(id, ns, session, new Date().toISOString(), input, key, runtime);
       this.event(id, 'queued', {});
       return this.get(ns, id);
     });
   }
   private runView(row: Row): Run {
-    return { id: String(row.id), namespace: String(row.namespace), session_id: String(row.session_id), status: row.status as Run['status'], created_at: String(row.created_at), ...(row.result ? { result: JSON.parse(String(row.result)) } : {}), ...(row.error ? { error: JSON.parse(String(row.error)) } : {}) };
+    return { ...(row.workshop_runtime ? { workshop_runtime: String(row.workshop_runtime) } : {}), id: String(row.id), namespace: String(row.namespace), session_id: String(row.session_id), status: row.status as Run['status'], created_at: String(row.created_at), ...(row.result ? { result: JSON.parse(String(row.result)) } : {}), ...(row.error ? { error: JSON.parse(String(row.error)) } : {}) };
   }
   get(ns: string, id: string): Run {
     this.assertOwner();

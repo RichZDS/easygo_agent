@@ -44,6 +44,12 @@ export class Loop {
     if (this.stopped) throw new RpcError(-32603, 'loop_unavailable');
     this.store.assertOwner();
   }
+  async workshopCatalog(ns: string) {
+    this.assertAvailable();
+    const result = await this.workshop.call('workshop.workflows', { namespace: ns });
+    if (!Array.isArray(result)) throw new RpcError(-32000, 'invalid_workshop_catalog');
+    return result;
+  }
   kick() {
     if (this.stopped) return;
     try {

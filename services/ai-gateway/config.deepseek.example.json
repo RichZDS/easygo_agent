@@ -1,0 +1,73 @@
+{
+  "listen": ":8441",
+  "tls": {
+    "cert_file": "/run/easygo/identity/tls.crt",
+    "key_file": "/run/easygo/identity/tls.key",
+    "ca_file": "/run/easygo/trust/ca.crt"
+  },
+  "authorization": [
+    {
+      "id": "ai-gateway",
+      "cert_file": "/run/easygo/trust/ai-gateway.crt",
+      "methods": [
+        "health"
+      ],
+      "namespaces": []
+    },
+    {
+      "id": "agent-loop",
+      "cert_file": "/run/easygo/trust/agent-loop.crt",
+      "methods": [
+        "health",
+        "gateway.models",
+        "gateway.generate"
+      ],
+      "namespaces": [
+        "*"
+      ]
+    },
+    {
+      "id": "workshop",
+      "cert_file": "/run/easygo/trust/workshop.crt",
+      "methods": [
+        "gateway.native"
+      ],
+      "namespaces": [
+        "*"
+      ]
+    }
+  ],
+  "max_request_bytes": 16777216,
+  "max_response_bytes": 16777216,
+  "max_stream_bytes": 67108864,
+  "max_event_bytes": 1048576,
+  "models": {
+    "chat": {
+      "protocol": "chat_completions",
+      "endpoint": "https://api.deepseek.com/chat/completions",
+      "model": "deepseek-flash",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "parameters": {
+        "max_output_tokens": 4096
+      }
+    },
+    "responses": {
+      "protocol": "responses",
+      "endpoint": "https://api.deepseek.com/responses",
+      "model": "deepseek-flash",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "parameters": {
+        "max_output_tokens": 4096
+      }
+    },
+    "claude": {
+      "protocol": "anthropic",
+      "endpoint": "https://api.deepseek.com/anthropic/v1/messages",
+      "model": "deepseek-flash",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "parameters": {
+        "max_output_tokens": 4096
+      }
+    }
+  }
+}

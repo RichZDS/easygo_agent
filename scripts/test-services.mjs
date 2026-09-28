@@ -95,6 +95,7 @@ try {
       return;
     }
     let content = 'DIRECT_OK', tool;
+    if (prompt.includes('NATIVE_REUSE')) { assert.equal(input.model, 'fixture-model'); content='NATIVE_REUSED'; }
     const last = input.messages.filter(m => m.role === 'tool').at(-1);
     if (prompt.includes('MAKE_ARTIFACT')) {
       if (!last) tool = { name: 'workshop_catalog', arguments: '{}' };
@@ -153,9 +154,24 @@ try {
   }
   const fixture = join(state, 'coding-fixture');
   await writeFile(fixture, `#!/usr/bin/python3\nimport json,pathlib,sys\n_ = sys.stdin.read()\npathlib.Path('proof.txt').write_text('verified artifact')\nprint(json.dumps({'type':'thread.started','thread_id':'11111111-2222-4333-8444-555555555555'}))\nprint(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'verified artifact'}}))\nprint(json.dumps({'type':'turn.completed','usage':{'input_tokens':1,'output_tokens':2}}))\n`, { mode: 0o700 });
+  const piFixture = join(state, 'pi-fixture');
+  await writeFile(piFixture, `#!/usr/bin/python3
+import json,os,pathlib,sys,urllib.request
+_ = sys.stdin.read()
+assert 'EASYGO_RPC_TEST_PROVIDER_KEY' not in os.environ
+config=json.loads((pathlib.Path(os.environ['PI_CODING_AGENT_DIR'])/'models.json').read_text())['providers']['easygo']
+request=urllib.request.Request(config['baseUrl']+'/chat/completions',data=json.dumps({'model':'untrusted-override','messages':[{'role':'user','content':'NATIVE_REUSE'}]}).encode(),headers={'Content-Type':'application/json','Authorization':'Bearer '+os.environ['EASYGO_RUNTIME_API_KEY']})
+with urllib.request.urlopen(request,timeout=5) as response: result=json.load(response)
+assert result['choices'][0]['message']['content']=='NATIVE_REUSED'
+pathlib.Path('reuse.txt').write_text('NATIVE_REUSED')
+print(json.dumps({'type':'session','id':'11111111-2222-4333-8444-555555555555'}))
+print(json.dumps({'type':'message_end','message':{'role':'assistant','stopReason':'stop','content':[{'type':'text','text':'NATIVE_REUSED'}],'usage':{'input':1,'output':1}}}))
+print(json.dumps({'type':'agent_end'}))
+print(json.dumps({'type':'agent_settled'}))
+`, {mode:0o700});
   const gatewayConfig = {
     listen: `127.0.0.1:${gatewayPort}`, tls: identity('ai-gateway'),
-    authorization: [grant('ai-gateway', ['health']), grant('agent-loop', ['health', 'gateway.generate', 'gateway.models'], ['*']), grant('client', ['gateway.models'], ['demo']),
+    authorization: [grant('ai-gateway', ['health']), grant('agent-loop', ['health', 'gateway.generate', 'gateway.models'], ['*']), grant('client', ['gateway.models'], ['demo']), grant('workshop', ['gateway.native'], ['demo']),
       { id: 'untrusted-ca-client', cert_file: join(roguePKI, 'public/client.crt'), methods: ['gateway.models'], namespaces: ['demo'] },
       { id: 'expired-client', cert_file: expiredCert, methods: ['gateway.models'], namespaces: ['demo'] }],
     models: { chat: { protocol: 'chat_completions', endpoint: `http://127.0.0.1:${upstream.address().port}/chat/completions`, model: 'fixture-model', api_key_env: 'EASYGO_RPC_TEST_PROVIDER_KEY' } },
@@ -163,9 +179,9 @@ try {
   const workshopConfig = {
     listen: `127.0.0.1:${workshopPort}`, tls: identity('workshop'),
     authorization: [grant('workshop', ['health']), grant('agent-loop', ['health', 'workshop.workflows', 'workshop.submit', 'workshop.get', 'workshop.list', 'workshop.cancel', 'workshop.resume', 'workshop.result', 'workshop.events'], ['*'])],
-    workshop: { root: join(state, 'workshop-data'), concurrency: 1, queue_capacity: 4, engines: { codex: { binary: fixture } }, workflows: [{ name: 'proof', version: '1', instructions: 'Create proof.txt.', engine: 'codex', model: 'fixture', policy: 'workspace-write', timeout_seconds: 5, artifacts: ['proof.txt'] }] },
+    workshop: { root: join(state, 'workshop-data'), concurrency: 1, queue_capacity: 4, engines: { codex: { binary: fixture }, pi: { binary: piFixture } }, model_gateway: { ...endpoint('ai-gateway',gatewayPort), tls: identity('workshop') }, runtime_profiles: { 'pi-main': { engine:'pi', protocol:'chat_completions', gateway_model:'chat' } }, workflows: [{ name: 'proof', version: '1', instructions: 'Create proof.txt.', engine: 'codex', model: 'fixture', policy: 'workspace-write', timeout_seconds: 5, artifacts: ['proof.txt'] }, { name:'reuse', version:'1',instructions:'Reuse main model',runtime:'pi-main',policy:'workspace-write',timeout_seconds:10,artifacts:['reuse.txt'] }] },
   };
-  const agentMethods = ['agent.session.create', 'agent.session.list', 'agent.session.history', 'agent.run.start', 'agent.run.get', 'agent.run.cancel', 'agent.run.events'];
+  const agentMethods = ['agent.workshop.catalog', 'agent.session.create', 'agent.session.list', 'agent.session.history', 'agent.run.start', 'agent.run.get', 'agent.run.cancel', 'agent.run.events'];
   const agentConfig = {
     listen: `127.0.0.1:${agentPort}`, tls: identity('agent-loop'), authorization: [grant('agent-loop', ['health']), grant('client', agentMethods, ['demo'])],
     database: join(state, 'agent-data/agent.sqlite'), gateway: endpoint('ai-gateway', gatewayPort), workshop: endpoint('workshop', workshopPort),
@@ -221,6 +237,17 @@ try {
   assert.ok((await app.call('agent.run.events', { namespace: 'demo', run_id: run.id })).events.length > 0);
   assert.equal((await broker.call('workshop.list', { namespace: 'other' })).tasks.length, 0);
   checked('client → TS loop → gateway → workshop → real child artifact → durable final answer and idempotency');
+
+  const catalog = await app.call('agent.workshop.catalog', { namespace:'demo' });
+  assert.equal(catalog.find(w=>w.name==='reuse').runtimes[0].source,'gateway');
+  const reuseParams={namespace:'demo',workflow:'reuse',input:'run',runtime:'pi-main',idempotency_key:'reuse-once'};
+  const reuseTask=await broker.call('workshop.submit',reuseParams);
+  const reuseResult=await waitFor(async()=>{const r=await broker.call('workshop.get',{namespace:'demo',task_id:reuseTask.id});return ['succeeded','failed'].includes(r.status)?r:false;});
+  assert.equal(reuseResult.status,'succeeded',JSON.stringify(reuseResult));
+  assert.equal(reuseResult.engine,'pi');assert.equal(reuseResult.model,'chat');assert.equal(reuseResult.runtime,'pi-main');
+  assert.equal(reuseResult.runs[0].text,'NATIVE_REUSED');
+  assert.equal((await broker.call('workshop.submit',reuseParams)).id,reuseTask.id);
+  checked('selected runtime subprocess reuses main gateway model through scoped relay without provider credentials');
 
   const recoverySession = await app.call('agent.session.create', { namespace: 'demo' });
   const recoveryRun = await app.call('agent.run.start', { namespace: 'demo', session_id: recoverySession.id, input: 'RECOVER_TOOL_ERROR', idempotency_key: 'safe-error' });

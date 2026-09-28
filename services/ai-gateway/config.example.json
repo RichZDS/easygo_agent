@@ -25,6 +25,16 @@
       "namespaces": [
         "*"
       ]
+    },
+    {
+      "id": "workshop",
+      "cert_file": "/run/easygo/trust/workshop.crt",
+      "methods": [
+        "gateway.native"
+      ],
+      "namespaces": [
+        "*"
+      ]
     }
   ],
   "max_request_bytes": 16777216,

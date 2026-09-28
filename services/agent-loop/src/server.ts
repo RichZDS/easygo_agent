@@ -62,18 +62,19 @@ export async function startServer(input: Config) {
   function dispatch(method: string, value: unknown) {
     const allowed: Record<string, string[]> = {
       'agent.session.create': [], 'agent.session.list': ['offset', 'limit'], 'agent.session.history': ['session_id', 'after', 'limit'],
-      'agent.run.start': ['session_id', 'input', 'idempotency_key'], 'agent.run.get': ['run_id'], 'agent.run.cancel': ['run_id'], 'agent.run.events': ['run_id', 'after', 'limit']
+      'agent.workshop.catalog': [], 'agent.run.start': ['session_id', 'input', 'idempotency_key', 'workshop_runtime'], 'agent.run.get': ['run_id'], 'agent.run.cancel': ['run_id'], 'agent.run.events': ['run_id', 'after', 'limit']
     };
     if (!METHODS.includes(method)) throw new RpcError(-32601, 'method_not_found');
     const p = fields(value, ['namespace', ...allowed[method]!]);
     const ns = namespace(p.namespace);
     switch (method) {
+      case 'agent.workshop.catalog': return loop.workshopCatalog(ns);
       case 'agent.session.create': return store.createSession(ns);
       case 'agent.session.list': return store.listSessions(ns, integer(p.offset, 0, 2147483647), integer(p.limit, 20, 100));
       case 'agent.session.history': return store.history(ns, string(p.session_id), integer(p.after, 0, Number.MAX_SAFE_INTEGER), integer(p.limit, 100, 1000));
       case 'agent.run.start': {
         loop.assertAvailable();
-        const run = store.start(ns, string(p.session_id), string(p.input, 32768), string(p.idempotency_key, 256));
+        const run = store.start(ns, string(p.session_id), string(p.input, 32768), string(p.idempotency_key, 256), p.workshop_runtime === undefined ? '' : string(p.workshop_runtime));
         loop.kick(); return run;
       }
       case 'agent.run.get': return store.get(ns, string(p.run_id));
@@ -100,7 +101,7 @@ export async function startServer(input: Config) {
       } catch { id = null; throw new RpcError(-32600, 'invalid_request'); }
       ns = namespace(object(envelope.params).namespace);
       identity = authorization.authorize(req.socket as TLSSocket, method, ns);
-      const result = dispatch(method, envelope.params);
+      const result = await dispatch(method, envelope.params);
       res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ jsonrpc: '2.0', id, result }));
     } catch (error) {
       const failure = rpcFailure(error); errorCode = failure.reason;

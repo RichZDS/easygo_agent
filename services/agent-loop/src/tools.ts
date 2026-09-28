@@ -11,7 +11,7 @@ function definition(name: string, description: string, properties: Record<string
 export const TOOLS: Tool[] = [
   definition('calculator', 'Perform deterministic arithmetic.', { operation: { enum: ['add', 'subtract', 'multiply', 'divide'], type: 'string' }, a: { type: 'number' }, b: { type: 'number' } }, ['operation', 'a', 'b']),
   definition('workshop_catalog', 'List configured workflows.', {}, []),
-  definition('workshop_submit', 'Submit a workflow; acceptance is not completion. Read task status afterwards.', { workflow: short, input }, ['workflow', 'input']),
+  definition('workshop_submit', 'Submit a workflow; acceptance is not completion. Read task status afterwards.', { workflow: short, input, runtime: short }, ['workflow', 'input']),
   definition('workshop_get', 'Read a bounded task summary.', { task_id: short }, ['task_id']),
   definition('workshop_list', 'List tasks in the current namespace.', { offset, limit: { type: 'integer', minimum: 1, maximum: 100 } }, []),
   definition('workshop_cancel', 'Cancel a task.', { task_id: short }, ['task_id']),
@@ -45,6 +45,8 @@ export async function executeTool(call: Block, run: Run, client: RpcClient, sign
     case 'workshop_catalog': return callWorkshop(client, 'workshop.workflows', p, signal);
     case 'workshop_submit':
       p.workflow = string(args.workflow); p.input = string(args.input, 32768);
+      if (run.workshop_runtime) p.runtime = run.workshop_runtime;
+      else if (args.runtime !== undefined) p.runtime = string(args.runtime);
       // Trusted, deterministic identity. Tool-call IDs are validated unique per run.
       p.idempotency_key = `${run.id}:${string(call.id, 128)}`;
       break;

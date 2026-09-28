@@ -102,3 +102,12 @@ TS 服务拥有自己的持久化会话、队列、原始消息与事件。按�
 三进程真实 mTLS 调用链：客户端→TS Loop→Go 网关→本机模型夹具；Loop→Go 工坊→真实子进程产物→Loop 最终回答。覆盖无证书、不可信 CA、错误服务证书、可信但未授权客户端、越权方法/namespace、取消、重复提交、重启恢复及原始错误传播。不得把本机夹具说成付费模型验证，也不得把静态 Dockerfile 校验说成容器运行验证。
 
 参考：[JSON-RPC 2.0](https://www.jsonrpc.org/specification)、[Node TLS](https://nodejs.org/docs/latest-v22.x/api/tls.html)、[Node SQLite](https://nodejs.org/docs/latest-v22.x/api/sqlite.html)、[Go TLS](https://pkg.go.dev/crypto/tls)。
+
+
+## Runtime selection extension
+
+`agent.workshop.catalog({namespace})` returns the bounded workshop workflow catalog under caller namespace authorization. `agent.run.start` accepts optional `workshop_runtime` (nonempty ID, <=128 UTF-8 bytes), persists it and includes it in idempotency identity. The trusted selection overrides the model's `workshop_submit.runtime` argument.
+
+`workshop.submit` accepts optional `runtime` profile ID, restricted to the workflow default/allowed list. Explicitly changing it for an existing key conflicts; omission on a retry retains the original task. Summary/list add runtime, engine, model. Workflow catalog adds nonsecret runtime choices. Resume retains the stored runtime/profile; no cross-framework session migration.
+
+`gateway.native({namespace,model,protocol,body})` is separately authorized for Workshop's certificate. It posts to the configured generation endpoint with the configured model and credentials, preserving matching native API format. Returns `{content_type,body}` where body is base64 bytes, <=8MiB decoded. SSE is buffered and validated, not incremental RPC streaming. Only responses/chat_completions/anthropic matching the configured route are accepted; no caller URLs/headers/credentials. Existing `gateway.generate` remains the neutral protocol for the TS Loop.

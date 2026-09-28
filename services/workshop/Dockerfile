@@ -10,10 +10,12 @@ COPY services/workshop /src/services/workshop
 WORKDIR /src/services/workshop
 RUN go build -trimpath -o /out/server ./cmd/server
 
-FROM node:22-bookworm-slim
+FROM node:26-bookworm-slim
 
-ARG CODEX_VERSION=0.156.0
+ARG CODEX_VERSION=0.157.1
 ARG CLAUDE_CODE_VERSION=2.1.281
+ARG PI_VERSION=0.87.1
+ARG OPENCLAW_VERSION=2026.9.6
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -24,6 +26,8 @@ RUN apt-get update \
     && npm install -g --no-fund --no-audit \
         "@openai/codex@${CODEX_VERSION}" \
         "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+        "@earendil-works/pi-coding-agent@${PI_VERSION}" \
+        "openclaw@${OPENCLAW_VERSION}" \
     && npm cache clean --force
 
 COPY --from=build /out/server /usr/local/bin/server

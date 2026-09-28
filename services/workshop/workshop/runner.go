@@ -22,6 +22,7 @@ const diagnosticLimit = 16 * 1024
 
 type CommandRunner struct {
 	engines   map[string]EngineConfig
+	gateway   *ModelGateway
 	maxOutput int
 }
 
@@ -36,7 +37,7 @@ func NewCommandRunner(engines map[string]EngineConfig, maxOutput int) (*CommandR
 	}
 	r := &CommandRunner{engines: map[string]EngineConfig{}, maxOutput: maxOutput}
 	for name, engine := range engines {
-		if name != "claude" && name != "codex" {
+		if !knownEngine(name) {
 			return nil, fmt.Errorf("%w: unknown engine", ErrInvalid)
 		}
 		if engine.Binary == "" {
@@ -51,7 +52,7 @@ func NewCommandRunner(engines map[string]EngineConfig, maxOutput int) (*CommandR
 			return nil, err
 		}
 		for _, name := range engine.EnvAllowlist {
-			if !envName.MatchString(name) {
+			if !envName.MatchString(name) || reservedEnvironment(name) {
 				return nil, fmt.Errorf("%w: environment name", ErrInvalid)
 			}
 		}
@@ -83,6 +84,14 @@ func engineArgs(in Invocation) ([]string, error) {
 			args = append(args, in.SessionID)
 		}
 		return append(args, "-"), nil
+	case "pi":
+		tools := "read,grep,find,ls"
+		if w.Policy == "workspace-write" {
+			tools += ",edit,write"
+		}
+		return []string{"--print", "--mode", "json", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-approve", "--tools", tools, "--model", w.Model}, nil
+	case "openclaw":
+		return []string{"agent", "--local", "--json", "--agent", "main", "--timeout", fmt.Sprint(w.TimeoutSeconds)}, nil
 	case "claude":
 		tools, mode := "Read,Glob,Grep", "dontAsk"
 		if w.Policy == "workspace-write" {
@@ -108,12 +117,23 @@ func (r *CommandRunner) Run(ctx context.Context, in Invocation, emit func(Event)
 		return Result{}, err
 	}
 	home := filepath.Join(in.Workspace, ".workshop-home")
+	if info, e := os.Lstat(home); e == nil && info.Mode()&os.ModeSymlink != 0 {
+		return Result{}, errors.New("task home must not be a symlink")
+	}
 	if err := os.MkdirAll(home, 0700); err != nil {
 		return Result{}, err
 	}
 	env := map[string]string{"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": home, "CODEX_HOME": filepath.Join(home, "codex"), "CLAUDE_CONFIG_DIR": filepath.Join(home, "claude")}
+	for _, dir := range []string{env["CODEX_HOME"], env["CLAUDE_CONFIG_DIR"]} {
+		if e := os.MkdirAll(dir, 0700); e != nil {
+			return Result{}, e
+		}
+	}
 	var secrets []string
 	for _, name := range engine.EnvAllowlist {
+		if in.Workflow.RuntimeSpec != nil {
+			continue
+		} // profiles inject only their selected credential
 		if value, ok := os.LookupEnv(name); ok {
 			env[name] = value
 			if value != "" && name != "PATH" && name != "HOME" && name != "TMPDIR" && name != "CODEX_HOME" && name != "CLAUDE_CONFIG_DIR" {
@@ -121,6 +141,12 @@ func (r *CommandRunner) Run(ctx context.Context, in Invocation, emit func(Event)
 			}
 		}
 	}
+	args, runtimeSecrets, cleanup, err := r.configureRuntime(ctx, in, args, env)
+	if err != nil {
+		return Result{}, err
+	}
+	defer cleanup()
+	secrets = append(secrets, runtimeSecrets...)
 	redact := redactor(secrets)
 	childCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -212,6 +238,7 @@ func redactor(secrets []string) func(string) string {
 
 type nativeEvent struct {
 	Type      string `json:"type"`
+	ID        string `json:"id"`
 	Subtype   string `json:"subtype"`
 	SessionID string `json:"session_id"`
 	ThreadID  string `json:"thread_id"`
@@ -228,6 +255,13 @@ type nativeEvent struct {
 		Text string `json:"text"`
 	} `json:"item"`
 	Message struct {
+		Role       string `json:"role"`
+		StopReason string `json:"stopReason"`
+		Usage      struct {
+			Input     int64 `json:"input"`
+			Output    int64 `json:"output"`
+			CacheRead int64 `json:"cacheRead"`
+		} `json:"usage"`
 		Content []struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
@@ -243,6 +277,7 @@ type streamParser struct {
 	pending      []byte
 	result       Result
 	success      bool
+	piReady      bool
 	err          error
 	cancel       context.CancelFunc
 }
@@ -264,6 +299,9 @@ func (p *streamParser) Write(data []byte) (int, error) {
 		return n, nil
 	}
 	p.pending = append(p.pending, data...)
+	if p.engine == "openclaw" {
+		return n, nil
+	}
 	for {
 		index := bytes.IndexByte(p.pending, '\n')
 		if index < 0 {
@@ -281,6 +319,12 @@ func (p *streamParser) Write(data []byte) (int, error) {
 	return n, nil
 }
 func (p *streamParser) finish() error {
+	if p.engine == "openclaw" {
+		if p.err == nil {
+			p.parseOpenClaw(p.pending)
+		}
+		return p.err
+	}
 	if p.err == nil && len(bytes.TrimSpace(p.pending)) > 0 {
 		p.parse(p.pending)
 	}
@@ -293,9 +337,17 @@ func (p *streamParser) send(e Event) {
 	}
 }
 func (p *streamParser) parse(line []byte) {
+	if p.engine == "pi" {
+		p.parsePiRaw(line)
+		return
+	}
 	var event nativeEvent
 	if json.Unmarshal(line, &event) != nil || event.Type == "" {
 		p.fail(errors.New("malformed engine JSONL event"))
+		return
+	}
+	if p.engine == "pi" {
+		p.parsePi(event)
 		return
 	}
 	id := event.SessionID

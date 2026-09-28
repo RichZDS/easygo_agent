@@ -6,7 +6,7 @@
 |---|---|---|
 | [`services/ai-gateway`](services/ai-gateway) | Go | 模型协议映射、流式输出、用量、计价与观测 |
 | [`services/agent-loop`](services/agent-loop) | TypeScript | 会话、持久队列、模型/工具循环、压缩、取消与历史 |
-| [`services/workshop`](services/workshop) | Go | CLI 任务、工作区、原生会话续跑、产物与结果分页 |
+| [`services/workshop`](services/workshop) | Go | 可选 Agent 框架、模型复用、工作区、原生会话续跑与产物 |
 
 ```mermaid
 flowchart LR
@@ -14,10 +14,12 @@ flowchart LR
   Loop -->|mTLS RPC| Gateway[Go AI 网关]
   Loop -->|mTLS RPC| Workshop[Go CLI 工坊]
   Gateway --> Provider[模型供应商]
-  Workshop --> CLI[Codex / Claude CLI]
+  Workshop --> CLI[Codex / Claude / Pi / OpenClaw]
 ```
 
 Loop 不加载网关或工坊的运行实现，不共享它们的数据库，也不持有模型供应商密钥。Go 的公共传输代码在 `packages/rpc-go`，只在构建时复用，不是第四个服务。
+
+工坊现可独立选择 Codex、Claude Code、Pi、OpenClaw，并引用主网关中的模型配置；支持第三方 API。见 [框架选择与 DeepSeek 接入](doc/workshop-runtimes.md)。
 
 ## 部署与调用
 

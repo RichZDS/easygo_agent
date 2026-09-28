@@ -24,6 +24,6 @@ export interface Config {
 }
 export interface Run {
   id: string; namespace: string; session_id: string; status: 'queued' | 'running' | 'completed' | 'failed' | 'canceled' | 'interrupted';
-  created_at: string; result?: Response; error?: { code: string; message: string; upstream?: unknown };
+  workshop_runtime?: string; created_at: string; result?: Response; error?: { code: string; message: string; upstream?: unknown };
 }
-export const METHODS = ['agent.session.create', 'agent.session.list', 'agent.session.history', 'agent.run.start', 'agent.run.get', 'agent.run.cancel', 'agent.run.events'];
+export const METHODS = ['agent.workshop.catalog', 'agent.session.create', 'agent.session.list', 'agent.session.history', 'agent.run.start', 'agent.run.get', 'agent.run.cancel', 'agent.run.events'];

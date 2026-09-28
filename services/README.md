@@ -16,7 +16,7 @@ flowchart LR
   L -->|mTLS RPC| G[Go AI 网关]
   L -->|mTLS RPC| W[Go CLI 工坊]
   G --> P[模型供应商]
-  W --> E[Codex / Claude 子进程]
+  W --> E[Codex / Claude / Pi / OpenClaw]
 ```
 
 ## 公钥、私钥与权限
@@ -32,6 +32,8 @@ scripts/dev-pki.sh ./state/pki
 脚本拒绝覆盖已存在目录，生成各自的 `tls.crt`、`tls.key` 和公共 `public/*.crt`。CA 私钥位于 `.ca/ca.key`。开发叶证书有效期为 7 天，CA 为 30 天。生产可用自己的 CA 签发证书，配置相同路径即可；更换服务端证书时同时更新调用方的固定证书配置，替换后重启服务。
 
 容器只读挂载自己的身份目录和公共 trust 目录；不挂 `.ca`、其它身份的私钥、Docker socket 或操作者 HOME。镜像以 UID/GID 1000 运行，身份目录的所有权应允许这个 UID 读取，私钥保持 `0600`。生成的 `state/` 已被 Git 和 Docker 构建上下文忽略。
+
+选择四种框架、复用主网关模型及 DeepSeek 示例见 [运行配置说明](../doc/workshop-runtimes.md)。工坊 CLI 镜像使用 Node 26；TS Loop 仍用 Node 22。
 
 ## 配置与启动
 

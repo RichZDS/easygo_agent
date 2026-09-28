@@ -18,26 +18,31 @@ var (
 )
 
 type Workflow struct {
-	Name           string   `json:"name"`
-	Version        string   `json:"version"`
-	Instructions   string   `json:"instructions"`
-	Engine         string   `json:"engine"` // claude or codex
-	Model          string   `json:"model"`
-	Policy         string   `json:"policy"` // read-only or workspace-write; required
-	TimeoutSeconds int      `json:"timeout_seconds"`
-	Artifacts      []string `json:"artifacts,omitempty"` // explicit relative regular-file paths
+	Runtime         string          `json:"runtime,omitempty"`
+	AllowedRuntimes []string        `json:"allowed_runtimes,omitempty"`
+	RuntimeSpec     *RuntimeProfile `json:"runtime_spec,omitempty"` // immutable operator snapshot, no secret values
+	Name            string          `json:"name"`
+	Version         string          `json:"version"`
+	Instructions    string          `json:"instructions"`
+	Engine          string          `json:"engine"` // claude or codex
+	Model           string          `json:"model"`
+	Policy          string          `json:"policy"` // read-only or workspace-write; required
+	TimeoutSeconds  int             `json:"timeout_seconds"`
+	Artifacts       []string        `json:"artifacts,omitempty"` // explicit relative regular-file paths
 }
 
 // WorkflowMetadata describes a discoverable workflow without its instructions
 // or operator execution configuration.
 type WorkflowMetadata struct {
-	Name           string   `json:"name"`
-	Version        string   `json:"version"`
-	Engine         string   `json:"engine"`
-	Model          string   `json:"model"`
-	Policy         string   `json:"policy"`
-	TimeoutSeconds int      `json:"timeout_seconds"`
-	Artifacts      []string `json:"artifacts"`
+	Runtime        string          `json:"runtime,omitempty"`
+	Runtimes       []RuntimeChoice `json:"runtimes,omitempty"`
+	Name           string          `json:"name"`
+	Version        string          `json:"version"`
+	Engine         string          `json:"engine"`
+	Model          string          `json:"model"`
+	Policy         string          `json:"policy"`
+	TimeoutSeconds int             `json:"timeout_seconds"`
+	Artifacts      []string        `json:"artifacts"`
 }
 
 type EngineConfig struct {
@@ -46,16 +51,19 @@ type EngineConfig struct {
 }
 
 type Config struct {
-	Root           string                  `json:"root"`
-	Concurrency    int                     `json:"concurrency"`
-	QueueCapacity  int                     `json:"queue_capacity"`
-	Workflows      []Workflow              `json:"workflows"`
-	Engines        map[string]EngineConfig `json:"engines"`
-	MaxOutputBytes int                     `json:"max_output_bytes,omitempty"`
-	BearerTokenEnv string                  `json:"bearer_token_env,omitempty"`
+	RuntimeProfiles map[string]RuntimeProfile `json:"runtime_profiles,omitempty"`
+	ModelGateway    *ModelGateway             `json:"model_gateway,omitempty"`
+	Root            string                    `json:"root"`
+	Concurrency     int                       `json:"concurrency"`
+	QueueCapacity   int                       `json:"queue_capacity"`
+	Workflows       []Workflow                `json:"workflows"`
+	Engines         map[string]EngineConfig   `json:"engines"`
+	MaxOutputBytes  int                       `json:"max_output_bytes,omitempty"`
+	BearerTokenEnv  string                    `json:"bearer_token_env,omitempty"`
 }
 
 type SubmitRequest struct {
+	Runtime        string `json:"runtime,omitempty"`
 	Namespace      string `json:"namespace"`
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
 	Workflow       string `json:"workflow"`
@@ -128,6 +136,7 @@ type Event struct {
 }
 
 type Invocation struct {
+	Namespace string
 	Workflow  Workflow
 	Workspace string
 	Input     string

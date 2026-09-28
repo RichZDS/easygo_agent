@@ -31,6 +31,7 @@ type Service struct {
 	db        *bolt.DB
 	root      string
 	workflows map[string]Workflow
+	runtimes  map[string]RuntimeProfile
 	runner    Runner
 	queue     chan string
 	slots     chan struct{}
@@ -48,7 +49,17 @@ type Service struct {
 func (s *Service) Workflows() []WorkflowMetadata {
 	catalog := make([]WorkflowMetadata, 0, len(s.workflows))
 	for _, w := range s.workflows {
+		choices := []RuntimeChoice{}
+		ids := append([]string{w.Runtime}, w.AllowedRuntimes...)
+		seen := map[string]bool{}
+		for _, id := range ids {
+			if p, ok := s.runtimes[id]; ok && !seen[id] {
+				choices = append(choices, p.choice(id))
+				seen[id] = true
+			}
+		}
 		catalog = append(catalog, WorkflowMetadata{
+			Runtime: w.Runtime, Runtimes: choices,
 			Name: w.Name, Version: w.Version, Engine: w.Engine, Model: w.Model,
 			Policy: w.Policy, TimeoutSeconds: w.TimeoutSeconds,
 			Artifacts: append([]string{}, w.Artifacts...),
@@ -76,8 +87,35 @@ func New(cfg Config, runner Runner) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Service{root: root, workflows: map[string]Workflow{}, runner: runner, queue: make(chan string, cfg.Concurrency+cfg.QueueCapacity), slots: make(chan struct{}, cfg.Concurrency+cfg.QueueCapacity), stop: make(chan struct{}), active: map[string]context.CancelFunc{}}
+	s := &Service{root: root, workflows: map[string]Workflow{}, runtimes: map[string]RuntimeProfile{}, runner: runner, queue: make(chan string, cfg.Concurrency+cfg.QueueCapacity), slots: make(chan struct{}, cfg.Concurrency+cfg.QueueCapacity), stop: make(chan struct{}), active: map[string]context.CancelFunc{}}
+	for id, p := range cfg.RuntimeProfiles {
+		if strings.TrimSpace(id) == "" || len(id) > 128 {
+			return nil, ErrInvalid
+		}
+		if err := p.validate(); err != nil {
+			return nil, err
+		}
+		if p.GatewayModel != "" && cfg.ModelGateway == nil {
+			return nil, fmt.Errorf("%w: model gateway required", ErrInvalid)
+		}
+		s.runtimes[id] = p
+	}
 	for _, w := range cfg.Workflows {
+		if w.RuntimeSpec != nil {
+			return nil, fmt.Errorf("%w: runtime_spec is reserved for task snapshots", ErrInvalid)
+		}
+		for _, id := range append([]string{w.Runtime}, w.AllowedRuntimes...) {
+			if id != "" {
+				if _, ok := s.runtimes[id]; !ok {
+					return nil, fmt.Errorf("%w: unknown runtime profile", ErrInvalid)
+				}
+			}
+		}
+		var selectErr error
+		w, selectErr = s.selectRuntime(w, "")
+		if selectErr != nil {
+			return nil, selectErr
+		}
 		if err := validateWorkflow(w); err != nil {
 			return nil, err
 		}
@@ -85,12 +123,21 @@ func New(cfg Config, runner Runner) (*Service, error) {
 			return nil, fmt.Errorf("%w: duplicate workflow", ErrInvalid)
 		}
 		w.Artifacts = append([]string(nil), w.Artifacts...)
+		w.AllowedRuntimes = append([]string(nil), w.AllowedRuntimes...)
 		s.workflows[w.Name] = w
 	}
 	if runner == nil {
 		s.runner, err = NewCommandRunner(cfg.Engines, cfg.MaxOutputBytes)
+		if err == nil {
+			s.runner.(*CommandRunner).gateway = cfg.ModelGateway
+		}
 		if err != nil {
 			return nil, err
+		}
+		for _, p := range s.runtimes {
+			if _, ok := cfg.Engines[p.Engine]; !ok {
+				return nil, fmt.Errorf("%w: runtime engine is not configured", ErrInvalid)
+			}
 		}
 		for _, w := range s.workflows {
 			if _, ok := cfg.Engines[w.Engine]; !ok {
@@ -144,7 +191,7 @@ func New(cfg Config, runner Runner) (*Service, error) {
 }
 
 func validateWorkflow(w Workflow) error {
-	if w.Name == "" || w.Version == "" || w.Instructions == "" || w.Model == "" || (w.Engine != "codex" && w.Engine != "claude") || (w.Policy != "read-only" && w.Policy != "workspace-write") || w.TimeoutSeconds < 1 || w.TimeoutSeconds > 86400 {
+	if w.Name == "" || w.Version == "" || w.Instructions == "" || w.Model == "" || !knownEngine(w.Engine) || (w.Policy != "read-only" && w.Policy != "workspace-write") || w.TimeoutSeconds < 1 || w.TimeoutSeconds > 86400 {
 		return fmt.Errorf("%w: workflow needs name/version/instructions/model, known engine, explicit policy and timeout 1..86400", ErrInvalid)
 	}
 	seen := map[string]bool{}
@@ -198,7 +245,7 @@ func (s *Service) Submit(req SubmitRequest) (*Task, error) {
 		return nil, err
 	}
 	if previous != nil {
-		if previous.Workflow.Name != req.Workflow || previous.Input != req.Input {
+		if previous.Workflow.Name != req.Workflow || previous.Input != req.Input || (req.Runtime != "" && previous.Workflow.Runtime != req.Runtime) {
 			return nil, ErrConflict
 		}
 		return previous, nil
@@ -207,12 +254,17 @@ func (s *Service) Submit(req SubmitRequest) (*Task, error) {
 	if !ok {
 		return nil, ErrWorkflow
 	}
+	w, err = s.selectRuntime(w, req.Runtime)
+	if err != nil {
+		return nil, err
+	}
 	select {
 	case s.slots <- struct{}{}:
 	default:
 		return nil, ErrFull
 	}
 	w.Artifacts = append([]string(nil), w.Artifacts...)
+	w.AllowedRuntimes = append([]string(nil), w.AllowedRuntimes...)
 	id := uuid.NewString()
 	workspace := filepath.Join(s.root, "workspaces", id)
 	if err := os.MkdirAll(workspace, 0700); err != nil {
@@ -450,7 +502,7 @@ func (s *Service) execute(id string) {
 	}
 	s.mu.Unlock()
 	defer cancel()
-	result, runErr := s.runner.Run(ctx, Invocation{Workflow: task.Workflow, Workspace: task.Workspace, Input: run.Input, SessionID: run.ResumeSessionID}, func(event Event) error {
+	result, runErr := s.runner.Run(ctx, Invocation{Namespace: task.Namespace, Workflow: task.Workflow, Workspace: task.Workspace, Input: run.Input, SessionID: run.ResumeSessionID}, func(event Event) error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		err := s.db.Update(func(tx *bolt.Tx) error {

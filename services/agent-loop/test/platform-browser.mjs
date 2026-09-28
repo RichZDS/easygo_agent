@@ -78,7 +78,7 @@ try {
   await page.locator('#logout').click(); await page.locator('#auth-switch').click();
   await login('admin@example.test', 'fixture-admin-password'); await navigate('admin');
   await page.locator('#grant-user').selectOption(user.id); await page.locator('#grant-amount').fill('10.5'); await page.locator('#grant-reason').fill('browser fixture');
-  await page.locator('#grant-form button').click(); await page.waitForFunction(() => document.getElementById('users').textContent.includes('10.5 credits'));
+  await page.locator('#grant-form button').click(); await page.waitForFunction(() => document.getElementById('users').textContent.includes('10.5 积分'));
   app.wallet.reserve({ namespace: user.namespace, request_id: 'browser-pending', fingerprint: 'pending', model: 'fixture', reserve_input_tokens: 100, reserve_output_tokens: 0, source: 'fixture' });
   app.wallet.settle({ namespace: user.namespace, request_id: 'browser-pending', usage: { known: false, input_tokens: 0, output_tokens: 0 }, outcome: 'uncertain', source: 'fixture' });
   await page.locator('#refresh').click(); await page.locator('#resolve-request').selectOption('0'); await page.locator('#resolve-decision').selectOption('settle');

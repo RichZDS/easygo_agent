@@ -635,3 +635,8 @@ footer {
 .table-wrap {
   overscroll-behavior-x:contain
 }
+
+.pager { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 16px 0; }
+.pager button { padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: #f5f7f1; color: var(--green); }
+.pager span { color: var(--muted); font-size: 12px; }
+#artifacts { margin: 14px 0; }

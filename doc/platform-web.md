@@ -37,12 +37,12 @@ bootstrap 密码通过指定环境变量读取，仅在第一次创建管理员�
 | POST `/api/logout` | `{}` → `{ok:true}`，撤销当前会话 |
 | GET `/api/me` | `{user,registration}` |
 | POST `/api/rpc` | `{method,params}` → `{result}`；只有契约 allowlist |
-| GET `/api/wallet?after=0` | `{balance_micros,held_micros,available_micros,ledger}`；流水按 seq 升序，最多 100 条 |
-| GET `/api/usage?offset=0` | `{receipts}`；最近在前，最多 100 条，保留原始 settlement 与独立 resolution |
-| GET `/api/admin/users?offset=0` | `{users}`；最多 100 条，不含密码和会话 token |
+| GET `/api/wallet?after=0` | `{balance_micros,held_micros,available_micros,ledger,next_after}`；流水按 seq 升序，最多 100 条，末页 next_after=null |
+| GET `/api/usage?offset=0` | `{receipts,next_offset}`；最近在前，最多 100 条，末页 next_offset=null，保留原始 settlement 与独立 resolution |
+| GET `/api/admin/users?offset=0` | `{users,next_offset}`；最多 100 条，末页 next_offset=null，不含密码和会话 token |
 | POST `/api/admin/credits` | `{user_id,amount_micros,reason,idempotency_key}` → `{ledger_seq,duplicate}` |
 | GET / PUT `/api/admin/tariff` | PUT `{input_micros,output_micros}`；返回版本化费率行，单位为每 token 的 microcredits |
-| GET `/api/admin/usage/pending?offset=0` | `{receipts}`，最多 100 个 reserved/pending 请求 |
+| GET `/api/admin/usage/pending?offset=0` | `{receipts,next_offset}`，最多 100 个 reserved/pending 请求，末页 next_offset=null |
 | POST `/api/admin/usage/resolve` | `{namespace,request_id,decision:'release'\|'settle',usage?,reason,idempotency_key}` → `{reservation_id,status,charged_micros,duplicate}` |
 
 `params.namespace` 由认证层注入，浏览器显式传此字段会被拒绝。allowlist 只包括 platform-v1 的 agent session/run/catalog、workshop 和 knowledge 方法；钱包、服务配置和任意 RPC 代理不公开。回调仍必须对 session/task/run ID 进行注入 namespace 下的所有权检查。
@@ -63,7 +63,11 @@ bootstrap 密码通过指定环境变量读取，仅在第一次创建管理员�
 
 ## 页面和知识库参数
 
-中文响应式控制台包含注册/登录、总览、会话与运行事件、工坊运行时选择和取消/续跑/结果、记忆和技能编辑/导入、额度/原始用量/流水、管理员发放/费率/人工对账。UI 金额用 BigInt 十进制转换，失败重试保留幂等键。列表初始只展示 API 的有界页；完整翻页接口存在，当前 UI 尚不提供翻页导航。浏览器轮询周期 4 秒；hidden 页面不轮询。
+中文响应式控制台包含注册/登录、总览、会话与运行事件、工坊运行时选择和取消/续跑/结果、记忆和技能编辑/导入、额度/原始用量/流水、管理员发放/费率/人工对账。UI 金额用 BigInt 十进制转换，保留最多 6 位小数，显示单位为“积分”；失败重试保留幂等键。会话、任务、用量、流水、管理用户与待核对请求均有上一页/下一页/首页控件，每页最多 100 条。offset 列表沿用接口 next_offset；流水使用独占 seq 下界 next_after，避免分页重复。所有 read metadata 使用 101 条探测，仅返回前 100 条。页面请求携带响应序号，过期响应不能覆盖新的游标选择。浏览器轮询周期 4 秒；hidden 页面不轮询。
+
+会话历史请求 `agent.session.history {session_id,before:Number.MAX_SAFE_INTEGER,limit:100}` 读取最新页。响应 messages 在页内仍按 seq 升序，previous_before 指向更早页；控件提供“更早消息”和“回到最新”。切换/新建会话重置游标。用户正在看旧页时，自动轮询只更新运行状态，不重读/覆盖旧页；切换前发出的迟到响应也会被丢弃。核心 before/previous_before 由 foreman 实现，Web 不修改 core store/server。
+
+`workshop.artifact {task_id,run_id?,path}` 经公开 allowlist 回调，namespace 仍由平台注入。下载按钮只根据当前任务摘要中当前 run 登记的 artifacts 生成，不接受用户填写任意路径。响应 `{path,sha256,size,data_base64}` 必须与登记信息匹配，实际解码大小 ≤ 8 MiB 且 SHA-256 一致；失败只显示错误，不触发下载。校验通过后以 `application/octet-stream` Blob 下载，文件名仅取 basename 并移除控制符、路径与特殊字符；模型生成 HTML 不会内联执行。摘要标记 artifacts_truncated 时页面明确提示返回列表截断，不声称已展示所有文件。工坊的路径安全、namespace 校验与文件读取由 foreman 的 workshop.artifact 实现负责。
 
 Knowledge 使用已确认参数：memory `{id?,kind,content,importance?,confidence?,source_run_ids?,expected_version?}`，skill `{name,description,content,expected_version?}`。编辑/删除携带 version；记忆编辑保留既有来源和评分。8 个 memory kind 使用小写 agent/memory/experiment/error/preference/style/prompt/constraint。导入参数为 `{entries,dry_run?,provenance?}`，默认预览不落库，页面明确显示结果；使用者显式 `dry_run:false` 后才真正导入。
 
@@ -88,3 +92,5 @@ node test/platform-browser.mjs
 ```
 
 脚本使用本地 dummy 账户与 fixture RPC，覆盖注册零余额、管理员发放和人工对账、计量对话、恶意 HTML 作为纯文字、工坊取消/续跑/结果、带版本记忆和技能修改、账本与 1440px/390px 布局。它不证明真实 Docker/provider/core 集成；这些属于 foreman 的最终整链验收。SQLite 会打印 Node experimental warning，保留该警告。
+
+补充大数据量浏览器验收沿用上面的三个环境变量，执行 `node test/platform-pagination-browser.mjs`。独立本地夹具覆盖 120 个会话、105 个任务、1205 条消息、230 条用量、126 条流水、105 个管理用户及 105 条待核对请求；验证旧页不受轮询/迟到 latest 响应覆盖、页间无重复、6 位小数积分保真、HTML 作为二进制下载、8 MiB 边界文件字节一致，以及 forbidden/changed/mismatched/oversized 四种错误。所有数字是夹具规模，不是线上性能或稳定性声明。`platform.test.mjs` 另有真实 HTTP 分页 metadata、账户隔离和 artifact allowlist/namespace 测试。

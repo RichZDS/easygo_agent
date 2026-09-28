@@ -96,7 +96,7 @@
 <article>
 <p>可用额度</p>
 <strong id="overview-available">—</strong>
-<small>credits</small>
+<small>积分</small>
 </article>
 <article>
 <p>执行中冻结</p>
@@ -127,12 +127,14 @@
 </div>
 <div id="sessions" class="stack">
 </div>
+<div id="sessions-pager" class="pager" aria-label="列表翻页"></div>
 </div>
 <div class="card chat-panel">
 <div class="section-title">
 <h2 id="session-title">选择或创建会话</h2>
 <span id="run-status" class="badge">就绪</span>
 </div>
+<div id="history-pager" class="pager" aria-label="消息翻页"></div>
 <div id="messages" class="messages" aria-live="polite">
 </div>
 <details>
@@ -177,6 +179,7 @@
 <h2>任务列表</h2>
 <div id="tasks" class="stack">
 </div>
+<div id="tasks-pager" class="pager" aria-label="列表翻页"></div>
 </div>
 </div>
 <div class="card">
@@ -197,6 +200,7 @@
 </form>
 <details open>
 <summary>结果与产物</summary>
+<div id="artifacts" class="stack" aria-label="可下载产物"></div>
 <pre id="task-output">
 </pre>
 </details>
@@ -299,7 +303,7 @@
 <article>
 <p>可用额度</p>
 <strong id="wallet-available">—</strong>
-<small>credits</small>
+<small>积分</small>
 </article>
 <article>
 <p>冻结额度</p>
@@ -309,7 +313,7 @@
 <article>
 <p>账户余额</p>
 <strong id="wallet-balance">—</strong>
-<small>credits</small>
+<small>积分</small>
 </article>
 </div>
 <div class="card">
@@ -331,6 +335,7 @@
 </tbody>
 </table>
 </div>
+<div id="usage-pager" class="pager" aria-label="列表翻页"></div>
 </div>
 <div class="card">
 <h2>额度流水</h2>
@@ -340,7 +345,7 @@
 <tr>
 <th>时间</th>
 <th>类型</th>
-<th>变动 credits</th>
+<th>变动 积分</th>
 <th>说明</th>
 </tr>
 </thead>
@@ -348,6 +353,7 @@
 </tbody>
 </table>
 </div>
+<div id="ledger-pager" class="pager" aria-label="列表翻页"></div>
 </div>
 </section>
 <section data-view="admin" hidden>
@@ -356,11 +362,12 @@
 <h2>用户与额度</h2>
 <div id="users" class="stack">
 </div>
+<div id="users-pager" class="pager" aria-label="列表翻页"></div>
 <form id="grant-form">
 <label>用户<select id="grant-user" required>
 </select>
 </label>
-<label>发放额度（credits）<input id="grant-amount" inputmode="decimal" required pattern="[0-9]+(\.[0-9]{1,6})?" placeholder="例如 10.5">
+<label>发放额度（积分）<input id="grant-amount" inputmode="decimal" required pattern="[0-9]+(\.[0-9]{1,6})?" placeholder="例如 10.5">
 </label>
 <label>发放原因<input id="grant-reason" required maxlength="1024">
 </label>
@@ -373,9 +380,9 @@
 <p id="tariff-version" class="muted">
 </p>
 <form id="tariff-form">
-<label>每 1000 输入 token 的 credits<input id="tariff-input" inputmode="decimal" required>
+<label>每 1000 输入 token 的 积分<input id="tariff-input" inputmode="decimal" required>
 </label>
-<label>每 1000 输出 token 的 credits<input id="tariff-output" inputmode="decimal" required>
+<label>每 1000 输出 token 的 积分<input id="tariff-output" inputmode="decimal" required>
 </label>
 <button class="primary">发布新费率</button>
 </form>
@@ -387,6 +394,7 @@
 <p class="muted">请先核实请求已停止及供应商用量。人工释放或结算会终止预留。迟到的网关收据仅补存原始用量，不再改动额度。</p>
 <div id="pending-receipts" class="stack">
 </div>
+<div id="pending-pager" class="pager" aria-label="列表翻页"></div>
 <form id="resolve-form">
 <label>待核对请求<select id="resolve-request" required>
 </select>

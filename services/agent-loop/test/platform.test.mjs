@@ -174,7 +174,7 @@ async function apiFixture(t, extra = {}) {
     return { status: res.status, data: json, text, headers: res.headers, cookie: res.headers.get('set-cookie')?.split(';')[0] };
   }
   const register = address => call('/api/register', { email: address, password: 'fixture-user-password' });
-  return { app, call, register, seen, base };
+  return { app, call, register, seen, base, file: config.database };
 }
 
 test('HTTP auth, zero signup, cookies, CSRF, role checks, namespace binding, allowlist and logout revocation', async t => {
@@ -238,4 +238,37 @@ test('registration disabled and secure cookies remain explicit', async t => {
   assert.equal((await call('/api/register', data, null, { headers: { origin: 'https://platform.test' } })).data.error.code, 'registration_disabled');
   const login = await call('/api/login', { email: 'admin@example.test', password: 'fixture-admin-password' }, null, { headers: { origin: 'https://platform.test' } });
   assert.match(login.headers.get('set-cookie'), /; Secure/);
+});
+
+test('read pagination exposes all rows with exact end cursors and namespace-bound artifact dispatch', async t => {
+  const { call, register, app, seen, file } = await apiFixture(t);
+  const user = await register('paging@example.test');
+  const admin = await call('/api/login', { email: 'admin@example.test', password: 'fixture-admin-password' });
+  const store = new PlatformStore(file);
+  try {
+    store.grant({ user_id: user.data.user.id, amount_micros: 1_000_001, reason: 'paging fixture', idempotency_key: 'seed' }, 'fixture');
+    store.transaction(() => { for (let i = 0; i < 103; i++) store.run("INSERT INTO accounts(id,email,password,namespace,role,created_at) VALUES(?,?,?,?,'user','now')", `seed-${i}`, `seed${i}@example.test`, 'unused', `seed-${i}`); });
+    for (let i = 0; i < 105; i++) {
+      app.wallet.reserve(reserve(`page-${i}`, { namespace: user.data.user.namespace, reserve_input_tokens: 0, reserve_output_tokens: 0 }));
+      app.wallet.settle(settle(`page-${i}`, { namespace: user.data.user.namespace, usage: { known: true, input_tokens: 0, output_tokens: 0 } }));
+      app.wallet.reserve(reserve(`pending-${i}`, { namespace: user.data.user.namespace, reserve_input_tokens: 0, reserve_output_tokens: 0 }));
+    }
+  } finally { store.close(); }
+  const ledger1 = (await call('/api/wallet', undefined, user.cookie)).data;
+  const ledger2 = (await call(`/api/wallet?after=${ledger1.next_after}`, undefined, user.cookie)).data;
+  assert.equal(ledger1.ledger.length, 100); assert.equal(ledger2.ledger.length, 6); assert.equal(ledger2.next_after, null);
+  assert.equal(new Set([...ledger1.ledger, ...ledger2.ledger].map(r => r.seq)).size, 106);
+  assert.equal(ledger2.balance_micros, 1_000_001);
+  const receipts = [];
+  for (let offset = 0; offset !== null;) { const page = (await call(`/api/usage?offset=${offset}`, undefined, user.cookie)).data; receipts.push(...page.receipts); offset = page.next_offset; }
+  assert.equal(receipts.length, 210); assert.equal(new Set(receipts.map(r => r.request_id)).size, 210);
+  const empty = (await call('/api/usage', undefined, admin.cookie)).data; assert.deepEqual(empty, { receipts: [], next_offset: null });
+  for (const [route, key] of [['users', 'users'], ['usage/pending', 'receipts']]) {
+    const first = (await call(`/api/admin/${route}`, undefined, admin.cookie)).data;
+    const last = (await call(`/api/admin/${route}?offset=${first.next_offset}`, undefined, admin.cookie)).data;
+    assert.equal(first[key].length, 100); assert.equal(first.next_offset, 100); assert.equal(last[key].length, 5); assert.equal(last.next_offset, null);
+  }
+  const artifact = await call('/api/rpc', { method: 'workshop.artifact', params: { task_id: 'task', run_id: 'run', path: 'result.txt' } }, user.cookie);
+  assert.equal(artifact.status, 200); assert.equal(seen.at(-1).params.namespace, user.data.user.namespace); assert.equal(seen.at(-1).method, 'workshop.artifact');
+  assert.equal((await call('/api/rpc', { method: 'workshop.artifact', params: { namespace: 'other', task_id: 'task', path: 'result.txt' } }, user.cookie)).status, 400);
 });

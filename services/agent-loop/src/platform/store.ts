@@ -92,16 +92,17 @@ export class PlatformStore {
   }
   walletView(ns: string, after = 0) {
     const a = this.account(ns);
-    return { balance_micros: a.balance, held_micros: a.held, available_micros: safe(BigInt(Number(a.balance)) - BigInt(Number(a.held))), ledger: this.all('SELECT * FROM ledger WHERE user_id=? AND seq>? ORDER BY seq LIMIT 100', a.id!, after) };
+    const rows = this.all('SELECT * FROM ledger WHERE user_id=? AND seq>? ORDER BY seq LIMIT 101', a.id!, after);
+    return { balance_micros: a.balance, held_micros: a.held, available_micros: safe(BigInt(Number(a.balance)) - BigInt(Number(a.held))), ledger: rows.slice(0, 100), next_after: rows.length > 100 ? rows[99]!.seq : null };
   }
-  usage(ns: string, offset = 0) {
-    return this.all('SELECT id,request_id,model,source,tariff_version,reserved_micros,status,settlement,charged_micros,created_at FROM reservations WHERE namespace=? ORDER BY rowid DESC LIMIT 100 OFFSET ?', ns, offset).map(r => ({ ...r, settlement: r.settlement ? JSON.parse(String(r.settlement)) : null, resolution: this.resolution(String(r.id)) }));
+  usage(ns: string, offset = 0, limit = 100) {
+    return this.all('SELECT id,request_id,model,source,tariff_version,reserved_micros,status,settlement,charged_micros,created_at FROM reservations WHERE namespace=? ORDER BY rowid DESC LIMIT ? OFFSET ?', ns, limit, offset).map(r => ({ ...r, settlement: r.settlement ? JSON.parse(String(r.settlement)) : null, resolution: this.resolution(String(r.id)) }));
   }
   resolution(id: string) {
     const row = this.get('SELECT payload,charged_micros,status,created_at FROM resolutions WHERE reservation_id=?', id);
     return row ? { ...row, payload: JSON.parse(String(row.payload)) } : null;
   }
-  pending(offset = 0) { return this.all("SELECT namespace,request_id,model,source,status,reserved_micros,created_at FROM reservations WHERE status IN ('reserved','pending') ORDER BY rowid LIMIT 100 OFFSET ?", offset); }
+  pending(offset = 0, limit = 100) { return this.all("SELECT namespace,request_id,model,source,status,reserved_micros,created_at FROM reservations WHERE status IN ('reserved','pending') ORDER BY rowid LIMIT ? OFFSET ?", limit, offset); }
   close() { this.db.close(); }
 }
 

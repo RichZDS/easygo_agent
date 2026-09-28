@@ -11,7 +11,7 @@ export interface PlatformConfig {
 }
 export const PUBLIC_METHODS = new Set([
   'agent.session.create', 'agent.session.list', 'agent.session.history', 'agent.run.start', 'agent.run.get', 'agent.run.cancel', 'agent.run.events', 'agent.workshop.catalog',
-  'workshop.submit', 'workshop.get', 'workshop.list', 'workshop.cancel', 'workshop.resume', 'workshop.result', 'workshop.events',
+  'workshop.submit', 'workshop.get', 'workshop.list', 'workshop.cancel', 'workshop.resume', 'workshop.result', 'workshop.events', 'workshop.artifact',
   'agent.memory.list', 'agent.memory.upsert', 'agent.memory.delete', 'agent.memory.consolidate', 'agent.memory.import',
   'agent.skills.list', 'agent.skills.get', 'agent.skills.upsert', 'agent.skills.delete', 'agent.skills.import'
 ]);
@@ -162,7 +162,7 @@ export async function createPlatform(config: PlatformConfig, callbacks: { rpc(me
       }
       if (method === 'GET' && path === '/api/me') { json(res, { user: userView(a), registration: config.registration }); return; }
       if (method === 'GET' && path === '/api/wallet') { json(res, store.walletView(ns, count(Number(url.searchParams.get('after') ?? 0)))); return; }
-      if (method === 'GET' && path === '/api/usage') { json(res, { receipts: store.usage(ns, count(Number(url.searchParams.get('offset') ?? 0), 1_000_000)) }); return; }
+      if (method === 'GET' && path === '/api/usage') { const offset = count(Number(url.searchParams.get('offset') ?? 0), 1_000_000); const rows = store.usage(ns, offset, 101); json(res, { receipts: rows.slice(0, 100), next_offset: rows.length > 100 ? offset + 100 : null }); return; }
       if (method === 'POST' && path === '/api/rpc') {
         const p = fields(await body(req), ['method', 'params']);
         const name = string(p.method), params = object(p.params);
@@ -172,9 +172,9 @@ export async function createPlatform(config: PlatformConfig, callbacks: { rpc(me
       }
       if (path.startsWith('/api/admin/')) {
         if (a.role !== 'admin') throw new RpcError(-32003, 'admin_required');
-        if (method === 'GET' && path === '/api/admin/usage/pending') { json(res, { receipts: store.pending(count(Number(url.searchParams.get('offset') ?? 0), 1_000_000)) }); return; }
+        if (method === 'GET' && path === '/api/admin/usage/pending') { const offset = count(Number(url.searchParams.get('offset') ?? 0), 1_000_000); const rows = store.pending(offset, 101); json(res, { receipts: rows.slice(0, 100), next_offset: rows.length > 100 ? offset + 100 : null }); return; }
         if (method === 'POST' && path === '/api/admin/usage/resolve') { json(res, wallet.resolve(await body(req), String(a.id))); return; }
-        if (method === 'GET' && path === '/api/admin/users') { json(res, { users: store.all('SELECT id,email,namespace,role,disabled,balance,held,created_at FROM accounts ORDER BY rowid LIMIT 100 OFFSET ?', count(Number(url.searchParams.get('offset') ?? 0), 1_000_000)) }); return; }
+        if (method === 'GET' && path === '/api/admin/users') { const offset = count(Number(url.searchParams.get('offset') ?? 0), 1_000_000); const rows = store.all('SELECT id,email,namespace,role,disabled,balance,held,created_at FROM accounts ORDER BY rowid LIMIT 101 OFFSET ?', offset); json(res, { users: rows.slice(0, 100), next_offset: rows.length > 100 ? offset + 100 : null }); return; }
         if (method === 'POST' && path === '/api/admin/credits') { json(res, store.grant(await body(req), String(a.id))); return; }
         if (method === 'GET' && path === '/api/admin/tariff') { json(res, store.tariff()); return; }
         if (method === 'PUT' && path === '/api/admin/tariff') { json(res, store.setTariff(await body(req), String(a.id))); return; }

@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-const state = { user: null, page: 'overview', session: null, run: null, task: null, catalog: [], timer: null, polling: false, generation: 0, register: false, grant: null, resolution: null, pending: [], memoryDraft: null };
+const state = { user: null, page: 'overview', session: null, run: null, task: null, catalog: [], timer: null, polling: false, generation: 0, register: false, grant: null, resolution: null, pending: [], memoryDraft: null, historyBefore: Number.MAX_SAFE_INTEGER, historyRequest: 0, taskRequest: 0 };
 const titles = { overview: '总览', chat: '对话', workshop: '任务工坊', memory: '长期记忆', skills: '技能库', wallet: '额度与用量', admin: '管理' };
 const labels = { queued: '排队中', running: '执行中', completed: '已完成', succeeded: '已完成', failed: '失败', canceled: '已取消', cancelled: '已取消', cancelling: '取消中', timed_out: '超时', interrupted: '已中断', reserved: '已预留', pending: '待核对', settled: '已结算', released: '已释放', resolved_settled: '人工结算', resolved_released: '人工释放', grant: '管理员发放' };
 const errors = { authentication_required: '请先登录。', invalid_credentials: '邮箱或密码不正确。', password_too_short: '密码至少需要 12 个字符。', registration_unavailable: '该邮箱暂不可注册，请尝试登录。', insufficient_credits: '可用额度不足，请联系管理员发放额度。', origin_forbidden: '请求来源校验失败，请从配置的站点地址重新打开。', admin_required: '此操作需要管理员权限。', rate_limited: '操作较频繁，请稍后重试。', registration_disabled: '当前未开放注册。', auth_busy: '登录请求较多，请稍后重试。' };
@@ -55,9 +55,9 @@ function asItems(value, key) { return Array.isArray(value) ? value : value?.[key
 function time(value) { return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'; }
 function pretty(value) { return JSON.stringify(value, null, 2); }
 function signedOut() {
-  clearInterval(state.timer); state.timer = null; state.generation++; state.user = null; state.grant = null; state.resolution = null; state.pending = []; state.memoryDraft = null; clearTimeout(noticeTimer); $('notice').textContent = ''; chatAttempt = taskAttempt = null; state.session = state.run = state.task = null;
+  clearInterval(state.timer); state.timer = null; state.generation++; state.user = null; state.grant = null; state.resolution = null; state.pending = []; state.memoryDraft = null; clearTimeout(noticeTimer); $('notice').textContent = ''; chatAttempt = taskAttempt = null; state.session = state.run = state.task = null; resetPages(); resetHistory(); state.taskRequest++;
   $('shell').hidden = true; $('auth').hidden = false;
-  for (const id of ['messages', 'sessions', 'tasks', 'memory-list', 'skills-list', 'usage', 'ledger', 'users', 'recent-tasks', 'pending-receipts', 'grant-user', 'resolve-request']) $(id).replaceChildren();
+  for (const id of ['messages', 'sessions', 'tasks', 'memory-list', 'skills-list', 'usage', 'ledger', 'users', 'recent-tasks', 'pending-receipts', 'grant-user', 'resolve-request', 'artifacts']) $(id).replaceChildren();
   document.querySelectorAll('.import-result').forEach(el => { el.textContent = ''; });
   for (const id of ['task-detail', 'task-output', 'task-events', 'run-events']) $(id).textContent = '';
   for (const id of ['memory-form', 'skill-form', 'grant-form', 'chat-form', 'task-form', 'resume-form', 'resolve-form', 'memory-import', 'skills-import']) $(id).reset();
@@ -87,11 +87,33 @@ async function refresh() {
     if (state.page === 'admin') await admin();
   } catch (e) { $('connection').textContent = '读取失败'; throw e; }
 }
+const pages = Object.fromEntries(['sessions', 'tasks', 'usage', 'ledger', 'users', 'pending'].map(name => [name, { cursor: 0, previous: [], request: 0 }]));
+function resetPages() { for (const [name, p] of Object.entries(pages)) { p.cursor = 0; p.previous = []; p.request++; $(`${name}-pager`).replaceChildren(); } }
+function beginPage(name) {
+  const p = pages[name], cursor = p.cursor, request = ++p.request, generation = state.generation;
+  return () => p.cursor === cursor && p.request === request && state.generation === generation;
+}
+async function changePage(name, cursor, previous, load) {
+  const p = pages[name], old = { cursor: p.cursor, previous: p.previous };
+  p.cursor = cursor; p.previous = previous;
+  try { await load(); }
+  catch (error) { if (p.cursor === cursor && p.previous === previous) { p.cursor = old.cursor; p.previous = old.previous; p.request++; } throw error; }
+}
+function drawPager(name, next, load) {
+  const p = pages[name];
+  const first = button('回到首页', () => changePage(name, 0, [], load)); first.id = `${name}-first`; first.disabled = !p.previous.length;
+  const previous = button('上一页', () => changePage(name, p.previous.at(-1), p.previous.slice(0, -1), load)); previous.id = `${name}-previous`; previous.disabled = !p.previous.length;
+  const more = button('下一页', () => changePage(name, next, [...p.previous, p.cursor], load)); more.id = `${name}-next`; more.disabled = !Number.isSafeInteger(next) || next <= p.cursor;
+  $(`${name}-pager`).replaceChildren(first, previous, node('span', `第 ${p.previous.length + 1} 页`), more);
+}
 async function wallet(full = false) {
-  const w = await api('/api/wallet');
+  const ledgerRead = full ? beginPage('ledger') : null, usageRead = full ? beginPage('usage') : null;
+  const w = await api(`/api/wallet?after=${full ? pages.ledger.cursor : 0}`);
+  if (full && (!ledgerRead() || !usageRead())) return;
   for (const prefix of ['overview', 'wallet']) for (const part of ['available', 'held', 'balance']) $(`${prefix}-${part}`).textContent = credits(w[`${part}_micros`]);
   if (!full) return;
-  const u = await api('/api/usage');
+  const u = await api(`/api/usage?offset=${pages.usage.cursor}`);
+  if (!ledgerRead() || !usageRead()) return;
   const tbody = $('usage'); tbody.replaceChildren();
   for (const r of u.receipts) {
     const tr = node('tr'), usage = r.settlement?.usage;
@@ -107,25 +129,36 @@ async function wallet(full = false) {
     }
     tr.append(status); tbody.append(tr);
   }
+  drawPager('usage', u.next_offset, () => wallet(true));
   $('ledger').replaceChildren();
-  for (const r of w.ledger) { const tr = node('tr'); for (const cell of [time(r.created_at), labels[r.kind] || r.kind, credits(r.amount_micros), r.reason]) tr.append(node('td', cell)); $('ledger').append(tr); }
+  for (const r of w.ledger) { const tr = node('tr'); tr.dataset.seq = String(r.seq); for (const cell of [time(r.created_at), labels[r.kind] || r.kind, credits(r.amount_micros), r.reason]) tr.append(node('td', cell)); $('ledger').append(tr); }
+  drawPager('ledger', w.next_after, () => wallet(true));
 }
 async function sessions() {
-  const data = await rpc('agent.session.list', { limit: 100 });
-  list($('sessions'), data.sessions || [], s => row(s.id.slice(0, 12), time(s.created_at), '', async () => { state.session = s.id; state.run = null; $('session-title').textContent = `会话 ${s.id.slice(0, 12)}`; $('run-events').textContent = ''; await history(); }));
+  const current = beginPage('sessions');
+  const data = await rpc('agent.session.list', { offset: pages.sessions.cursor, limit: 100 });
+  if (!current()) return;
+  list($('sessions'), data.sessions || [], s => row(s.id.slice(0, 12), time(s.created_at), '', async () => { state.session = s.id; state.run = null; resetHistory(); $('session-title').textContent = `会话 ${s.id.slice(0, 12)}`; $('run-events').textContent = ''; await history(); }));
+  drawPager('sessions', data.next_offset, sessions);
 }
+function resetHistory() { state.historyBefore = Number.MAX_SAFE_INTEGER; state.historyRequest++; $('history-pager').replaceChildren(); }
 async function history() {
-  const session = state.session, data = await rpc('agent.session.history', { session_id: session, limit: 1000 });
-  if (session !== state.session) return;
+  const session = state.session, before = state.historyBefore, request = ++state.historyRequest;
+  const data = await rpc('agent.session.history', { session_id: session, before, limit: 100 });
+  if (session !== state.session || before !== state.historyBefore || request !== state.historyRequest) return;
   const active = (data.runs || []).find(r => ['queued', 'running'].includes(r.status));
   if (!state.run && active) { state.run = active.id; $('run-status').replaceChildren(badge(active.status)); $('cancel-run').disabled = false; }
   const box = $('messages'); box.replaceChildren();
   for (const message of data.messages || []) {
-    const bubble = node('div', undefined, `message ${message.role}`); bubble.append(node('small', { user: '你', assistant: 'Agent', tool: '工具' }[message.role] || message.role));
+    const bubble = node('div', undefined, `message ${message.role}`); bubble.dataset.seq = String(message.seq ?? ''); bubble.append(node('small', { user: '你', assistant: 'Agent', tool: '工具' }[message.role] || message.role));
     for (const b of message.content || []) bubble.append(node('div', b.text || (b.type === 'tool_call' ? `调用 ${b.name}\n${pretty(b.arguments)}` : `[${b.type}]`)));
     box.append(bubble);
   }
-  if (!box.childElementCount) empty(box, '写下第一条消息，开始新的工作。');
+  if (!box.childElementCount) empty(box, '这一页没有消息。');
+  const older = button('更早消息', async () => { state.historyBefore = data.previous_before; await history(); }); older.id = 'history-older';
+  older.disabled = !Number.isSafeInteger(data.previous_before) || data.previous_before <= 0 || data.previous_before >= before;
+  const latest = button('回到最新', async () => { resetHistory(); await history(); }); latest.id = 'history-latest'; latest.disabled = before === Number.MAX_SAFE_INTEGER;
+  $('history-pager').replaceChildren(older, node('span', before === Number.MAX_SAFE_INTEGER ? '最新消息' : '正在查看历史消息'), latest);
 }
 async function catalog() {
   state.catalog = asItems(await rpc('agent.workshop.catalog'), 'workflows');
@@ -147,15 +180,40 @@ function taskRuntimes() {
   if ((w?.runtimes || []).some(r => r.id === current)) $('task-runtime').value = current;
 }
 async function tasks(recent = false) {
-  const data = await rpc('workshop.list', { limit: recent ? 5 : 100 });
-  list($(recent ? 'recent-tasks' : 'tasks'), data.tasks || [], t => row(t.id.slice(0, 12), `${t.runtime || t.engine || '默认运行时'} · ${t.run_count ?? 0} 次执行`, t.status, async () => { state.task = t.id; if (state.page !== 'workshop') await page('workshop'); else await taskDetail(); }));
+  const current = recent ? () => true : beginPage('tasks');
+  const data = await rpc('workshop.list', { offset: recent ? 0 : pages.tasks.cursor, limit: recent ? 5 : 100 });
+  if (!current()) return;
+  list($(recent ? 'recent-tasks' : 'tasks'), data.tasks || [], t => row(t.id.slice(0, 12), `${t.runtime || t.engine || '默认运行时'} · ${t.run_count ?? 0} 次执行`, t.status, async () => { state.task = t.id; $('task-output').textContent = ''; if (state.page !== 'workshop') await page('workshop'); else await taskDetail(); }));
+  if (!recent) drawPager('tasks', data.next_offset, () => tasks());
 }
 async function taskDetail() {
-  const task = state.task, t = await rpc('workshop.get', { task_id: task });
-  if (state.task !== task) return;
+  const task = state.task, request = ++state.taskRequest, t = await rpc('workshop.get', { task_id: task });
+  if (state.task !== task || request !== state.taskRequest) return;
   $('task-status').replaceChildren(badge(t.status)); $('task-detail').textContent = pretty(t);
   $('cancel-task').disabled = !['queued', 'running', 'cancelling'].includes(t.status); $('resume-task').disabled = ['queued', 'running', 'cancelling'].includes(t.status); $('task-result').disabled = false;
-  $('task-events').textContent = pretty(await rpc('workshop.events', { task_id: task }));
+  const run = t.runs?.at(-1);
+  list($('artifacts'), run?.artifacts || [], artifact => {
+    const item = row(artifact.path, `${artifact.size} bytes`, '');
+    item.append(button('下载', () => downloadArtifact(task, run.id, artifact))); return item;
+  });
+  if (run?.artifacts_truncated) $('artifacts').append(node('p', '服务返回的产物列表已截断；这里只展示已登记并返回的文件。', 'muted'));
+  const events = await rpc('workshop.events', { task_id: task });
+  if (state.task === task && request === state.taskRequest) $('task-events').textContent = pretty(events);
+}
+async function downloadArtifact(task, run, registered) {
+  const max = 8 * 1024 * 1024;
+  if (typeof registered.path !== 'string' || !Number.isSafeInteger(registered.size) || registered.size < 0 || registered.size > max || !/^[a-f0-9]{64}$/i.test(registered.sha256)) throw Error('产物登记信息无效或文件超过 8 MiB。');
+  const artifact = await rpc('workshop.artifact', { task_id: task, run_id: run, path: registered.path });
+  if (artifact.path !== registered.path || artifact.size !== registered.size || artifact.sha256 !== registered.sha256 || typeof artifact.data_base64 !== 'string' || artifact.data_base64.length > 4 * Math.ceil(max / 3) || artifact.data_base64.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(artifact.data_base64)) throw Error('产物与登记记录不符或内容超限，请刷新后重试。');
+  const data = Uint8Array.from(atob(artifact.data_base64), c => c.charCodeAt(0));
+  if (data.byteLength !== registered.size) throw Error('产物大小不符，未下载。');
+  const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', data)), b => b.toString(16).padStart(2, '0')).join('');
+  if (hash !== registered.sha256.toLowerCase()) throw Error('产物校验失败，文件可能已改变。');
+  const filename = registered.path.split(/[\\/]/).at(-1).replace(/[\x00-\x1f\x7f<>:"|?*\u202a-\u202e\u2066-\u2069]/g, '_').replace(/^[. ]+|[. ]+$/g, '') || 'artifact.bin';
+  const url = URL.createObjectURL(new Blob([data], { type: 'application/octet-stream' }));
+  const link = node('a'); link.href = url; link.download = filename; document.body.append(link); link.click(); link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  notify('文件已校验，已发起下载。');
 }
 async function poll() {
   if (!state.user || state.polling || document.hidden) return;
@@ -165,7 +223,7 @@ async function poll() {
       const id = state.run, run = await rpc('agent.run.get', { run_id: id });
       if (state.run !== id) return;
       $('run-status').replaceChildren(badge(run.status)); $('cancel-run').disabled = !['queued', 'running'].includes(run.status);
-      $('run-events').textContent = pretty(await rpc('agent.run.events', { run_id: id, limit: 1000 })); await history();
+      $('run-events').textContent = pretty(await rpc('agent.run.events', { run_id: id, limit: 1000 })); if (state.historyBefore === Number.MAX_SAFE_INTEGER) await history();
       if (!['queued', 'running'].includes(run.status)) { state.run = null; if (run.error) notify(`执行${labels[run.status] || run.status}：${run.error.code || '请查看事件'}`); await wallet(); }
     }
     if (state.page === 'workshop' && state.task) await taskDetail();
@@ -185,15 +243,26 @@ async function skills() {
     r.append(button('删除', async () => { if (!confirm('删除这个技能？')) return; await rpc('agent.skills.delete', { name: s.name, expected_version: s.version }); await skills(); })); return r;
   });
 }
-async function admin() {
-  const data = await api('/api/admin/users');
-  list($('users'), data.users, u => row(u.email, `${credits(u.balance)} credits · ${u.role === 'admin' ? '管理员' : '普通用户'}`, '', () => { $('grant-user').value = u.id; }));
+async function users() {
+  const current = beginPage('users'), data = await api(`/api/admin/users?offset=${pages.users.cursor}`);
+  if (!current()) return;
+  list($('users'), data.users, u => row(u.email, `${credits(u.balance)} 积分 · ${u.role === 'admin' ? '管理员' : '普通用户'}`, '', () => { $('grant-user').value = u.id; }));
   const selected = $('grant-user').value; $('grant-user').replaceChildren(); for (const u of data.users) $('grant-user').append(new Option(u.email, u.id)); if (data.users.some(u => u.id === selected)) $('grant-user').value = selected;
-  const pending = await api('/api/admin/usage/pending'); state.pending = pending.receipts;
-  list($('pending-receipts'), state.pending, r => row(r.request_id, `${r.namespace} · 冻结 ${credits(r.reserved_micros)} credits`, r.status));
-  const selectedRequest = $('resolve-request').value; $('resolve-request').replaceChildren();
+  drawPager('users', data.next_offset, users);
+}
+async function pendingReceipts() {
+  const current = beginPage('pending'), pending = await api(`/api/admin/usage/pending?offset=${pages.pending.cursor}`);
+  if (!current()) return;
+  const selected = state.pending[Number($('resolve-request').value)]; state.pending = pending.receipts;
+  list($('pending-receipts'), state.pending, r => row(r.request_id, `${r.namespace} · 冻结 ${credits(r.reserved_micros)} 积分`, r.status));
+  $('resolve-request').replaceChildren();
   for (const [index, r] of state.pending.entries()) $('resolve-request').append(new Option(`${r.request_id} · ${r.namespace}`, String(index)));
-  if (Number(selectedRequest) < state.pending.length) $('resolve-request').value = selectedRequest;
+  const index = state.pending.findIndex(r => r.namespace === selected?.namespace && r.request_id === selected?.request_id);
+  if (index >= 0) $('resolve-request').value = String(index);
+  drawPager('pending', pending.next_offset, pendingReceipts);
+}
+async function admin() {
+  await users(); await pendingReceipts();
   const tariff = await api('/api/admin/tariff'); $('tariff-version').textContent = `当前版本 v${tariff.version}`;
   $('tariff-input').value = credits(BigInt(tariff.input_micros) * 1000n); $('tariff-output').value = credits(BigInt(tariff.output_micros) * 1000n);
 }
@@ -202,10 +271,10 @@ bindForm('auth-form', async () => { try { const data = await api(state.register 
 $('logout').onclick = () => busy($('logout'), async () => { await api('/api/logout', {}); signedOut(); });
 document.querySelectorAll('[data-page],[data-go]').forEach(el => { el.onclick = () => busy(el, () => page(el.dataset.page || el.dataset.go)); });
 $('refresh').onclick = () => busy($('refresh'), refresh);
-$('new-session').onclick = () => busy($('new-session'), async () => { const s = await rpc('agent.session.create'); state.session = s.id; state.run = null; $('session-title').textContent = `会话 ${s.id.slice(0, 12)}`; await sessions(); await history(); });
+$('new-session').onclick = () => busy($('new-session'), async () => { const s = await rpc('agent.session.create'); state.session = s.id; state.run = null; resetHistory(); $('session-title').textContent = `会话 ${s.id.slice(0, 12)}`; await sessions(); await history(); });
 let chatAttempt, taskAttempt;
 bindForm('chat-form', async () => {
-  if (!state.session) { const s = await rpc('agent.session.create'); state.session = s.id; $('session-title').textContent = `会话 ${s.id.slice(0, 12)}`; await sessions(); }
+  if (!state.session) { const s = await rpc('agent.session.create'); state.session = s.id; resetHistory(); $('session-title').textContent = `会话 ${s.id.slice(0, 12)}`; await sessions(); }
   const params = { session_id: state.session, input: $('chat-input').value, ...($('chat-runtime').value ? { workshop_runtime: $('chat-runtime').value } : {}) };
   const signature = pretty(params); if (!chatAttempt || chatAttempt.signature !== signature) chatAttempt = { signature, key: crypto.randomUUID() };
   const run = await rpc('agent.run.start', { ...params, idempotency_key: chatAttempt.key }); chatAttempt = null; state.run = run.id; $('chat-input').value = ''; $('cancel-run').disabled = false; await poll();
@@ -219,7 +288,7 @@ bindForm('task-form', async () => {
 });
 $('cancel-task').onclick = () => busy($('cancel-task'), async () => { await rpc('workshop.cancel', { task_id: state.task }); await taskDetail(); await tasks(); });
 bindForm('resume-form', async () => { await rpc('workshop.resume', { task_id: state.task, input: $('resume-input').value }); $('resume-input').value = ''; await taskDetail(); await tasks(); });
-$('task-result').onclick = () => busy($('task-result'), async () => { const result = await rpc('workshop.result', { task_id: state.task, limit: 65536 }); $('task-output').textContent = result.text || pretty(result); });
+$('task-result').onclick = () => busy($('task-result'), async () => { const result = await rpc('workshop.result', { task_id: state.task, limit: 32768 }); $('task-output').textContent = result.text || pretty(result); });
 bindForm('memory-form', async () => { await rpc('agent.memory.upsert', { ...($('memory-id').value ? { id: $('memory-id').value, expected_version: Number($('memory-version').value) } : {}), ...(state.memoryDraft && $('memory-id').value === state.memoryDraft.id ? { importance: state.memoryDraft.importance, confidence: state.memoryDraft.confidence, source_run_ids: state.memoryDraft.source_run_ids } : {}), kind: $('memory-kind').value, content: $('memory-content').value }); $('memory-form').reset(); await memories(); notify('记忆已保存。'); });
 $('consolidate').onclick = () => busy($('consolidate'), async () => { await rpc('agent.memory.consolidate'); await memories(); notify('记忆整理请求已完成。'); });
 bindForm('skill-form', async () => { await rpc('agent.skills.upsert', { name: $('skill-name').value, description: $('skill-description').value, content: $('skill-body').value, ...($('skill-version').value ? { expected_version: Number($('skill-version').value) } : {}) }); const saved = await rpc('agent.skills.get', { name: $('skill-name').value }); $('skill-version').value = saved.version; await skills(); notify('技能已保存。'); });

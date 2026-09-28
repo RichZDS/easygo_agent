@@ -18,7 +18,7 @@ const grant=(id,methods,namespaces=['*'])=>({id,cert_file:`/run/easygo/trust/${i
 const endpoint=(name,port)=>({url:`https://${name}:${port}/rpc`,peer_certificate_file:`/run/easygo/trust/${name}.crt`});
 const gateway=JSON.parse(await readFile(join(root,'services/ai-gateway/config.deepseek.example.json'),'utf8'));
 gateway.authorization=[grant('ai-gateway',['health']),grant('agent-loop',['gateway.generate','gateway.models']),grant('workshop',['gateway.native']),grant('client',['health'])];
-gateway.meter={...endpoint('agent-loop',8442),database:'/data/meter.db',max_output_tokens:4096};
+gateway.meter={...endpoint('agent-loop',8442),database:'/data/meter.db',max_output_tokens:32768};
 if(args['fixture-url']){
  const u=new URL(args['fixture-url']);if(!['http:','https:'].includes(u.protocol)||u.username||u.password||u.search||u.hash)throw Error('invalid fixture base URL');
  gateway.models={chat:{protocol:'chat_completions',endpoint:u.origin+'/chat',model:'fixture-model',api_key_env:'DEEPSEEK_API_KEY'},responses:{protocol:'responses',endpoint:u.origin+'/responses',model:'fixture-model',api_key_env:'DEEPSEEK_API_KEY'}};

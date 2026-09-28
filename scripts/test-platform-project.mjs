@@ -19,12 +19,13 @@ const exec=promisify(execFile),root=resolve(fileURLToPath(new URL('..',import.me
 const env=name=>{const v=process.env[name];if(!v)throw Error('Missing '+name);return v;};
 const go=process.env.EASYGO_GO_BIN??'go',docker=env('EASYGO_DOCKER_TEST_BINARY'),endpoint=env('EASYGO_DOCKER_TEST_ENDPOINT');
 const image=process.env.EASYGO_LIVE_RUNTIME_IMAGE??'easygo-task-runtime:platform',runtime=process.env.EASYGO_LIVE_RUNTIME??'codex',model=process.env.EASYGO_LIVE_MODEL??'deepseek-flash';
-const repairs=Number(process.env.EASYGO_LIVE_REPAIR_ROUNDS??1),budgetCredits=Number(process.env.EASYGO_LIVE_CREDITS??3000),taskSeconds=Number(process.env.EASYGO_LIVE_TASK_SECONDS??1500);
-assert.ok(Number.isInteger(repairs)&&repairs>=0&&repairs<=3&&Number.isInteger(budgetCredits)&&budgetCredits>0&&budgetCredits<=100000&&Number.isInteger(taskSeconds)&&taskSeconds<=3600);
+// Coding CLIs write whole files in one response; the gateway clamps output to this cap.
+const maxOutput=Number(process.env.EASYGO_LIVE_MAX_OUTPUT??32768),repairs=Number(process.env.EASYGO_LIVE_REPAIR_ROUNDS??1),budgetCredits=Number(process.env.EASYGO_LIVE_CREDITS??3000),taskSeconds=Number(process.env.EASYGO_LIVE_TASK_SECONDS??1500);
+assert.ok(Number.isInteger(maxOutput)&&maxOutput>=1024&&maxOutput<=131072&&Number.isInteger(repairs)&&repairs>=0&&repairs<=3&&Number.isInteger(budgetCredits)&&budgetCredits>0&&budgetCredits<=100000&&Number.isInteger(taskSeconds)&&taskSeconds<=3600);
 const key=(await readFile(env('EASYGO_LIVE_KEY_FILE'),'utf8')).trim();if(key.length<16||/\s/.test(key))throw Error('Key file must hold one API key');
 const parent=resolve(process.env.EASYGO_LIVE_STATE_ROOT??join(root,'..','easygo-live-project'));await mkdir(parent,{recursive:true,mode:0o700});
 const state=await mkdtemp(join(parent,'run-')),owner='live-'+state.split('-').at(-1);
-const report={state,runtime,model,image,budget_credits:budgetCredits,rounds:[],paid_provider:true};
+const report={state,runtime,model,image,max_output_tokens:maxOutput,budget_credits:budgetCredits,rounds:[],paid_provider:true};
 const children=[],clients=[];const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function save(){await writeFile(join(state,'report.json'),JSON.stringify(report,null,2));}
 async function port(){const s=net.createServer();s.listen(0,'127.0.0.1');await once(s,'listening');const p=s.address().port;await new Promise(r=>s.close(r));return p;}
@@ -54,7 +55,7 @@ try{
  const cert=n=>join(state,'pki/public',n+'.crt');const ep=(n,p)=>({url:`https://127.0.0.1:${p}/rpc`,peer_certificate_file:cert(n)});
  const grant=(id,methods,namespaces=['*'])=>({id,cert_file:cert(id),methods,namespaces});
  const gateway=JSON.parse(await readFile(join(root,'services/ai-gateway/config.deepseek.example.json'),'utf8'));
- Object.assign(gateway,{listen:`127.0.0.1:${gp}`,tls:identity('ai-gateway'),authorization:[grant('client',['health']),grant('agent-loop',['gateway.generate','gateway.models']),grant('workshop',['gateway.native'])],meter:{...ep('agent-loop',ap),database:join(state,'meter.db'),max_output_tokens:4096}});
+ Object.assign(gateway,{listen:`127.0.0.1:${gp}`,tls:identity('ai-gateway'),authorization:[grant('client',['health']),grant('agent-loop',['gateway.generate','gateway.models']),grant('workshop',['gateway.native'])],meter:{...ep('agent-loop',ap),database:join(state,'meter.db'),max_output_tokens:maxOutput}});
  for(const [alias,m]of Object.entries(gateway.models)){m.model=model;m.parameters=alias==='responses'?{reasoning:{effort:'low'}}:{thinking:{type:'disabled'}};}
  const workshopConfig=JSON.parse(await readFile(join(root,'services/workshop/config.runtimes.example.json'),'utf8')).workshop;
  const profiles={codex:'codex-responses',claude:'claude-messages',pi:'pi-main',openclaw:'openclaw-main'};assert.ok(profiles[runtime],'runtime must be codex, claude, pi or openclaw');

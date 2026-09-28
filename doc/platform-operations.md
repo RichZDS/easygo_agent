@@ -80,7 +80,8 @@ node scripts/configure-platform.mjs --state /srv/easygo/state \
 - 默认费率：输入 + 输出每 1000 token = 1 积分；1 积分 = 1,000,000 microcredits，全部整数运算。缓存 token 是输入 token 的子集，不重复计费。
 - 管理员 `GET/PUT /api/admin/tariff` 查看/修改费率。费率有版本；预留时快照当时的版本，之后按该版本结算，改价不影响已在途的请求。
 - 发积分 `POST /api/admin/credits {user_id, amount_micros, reason, idempotency_key}`，同一幂等键重放不重复入账。没有接支付，也没有自动充值。
-- 网关在调用供应商**之前**预留：请求序列化字节数 + 1024 作为输入估计，加上最大输出（默认 4096）。余额不足直接拒绝，不产生供应商调用。预留是保守估计，不是 tokenizer 报价。
+- 网关在调用供应商**之前**预留：请求序列化字节数 + 1024 作为输入估计，加上最大输出。余额不足直接拒绝，不产生供应商调用。预留是保守估计，不是 tokenizer 报价。
+- 最大输出由 `gateway.json` 的 `meter.max_output_tokens` 决定，网关会把每个请求的输出上限压到这个值。代码生成类 CLI 常在一次响应里写出整个文件：真实测试中上限 4096 时每个写文件的响应都被截断、任务失败，改为 32768 后一次响应输出约 2.1 万 token 并顺利完成。`configure-platform.mjs` 因此默认写 32768。代价是每次调用要先冻结约 33 积分，余额低于此值的用户发不出请求；只做短对话的部署可以调低。
 
 ## 5. 对账
 

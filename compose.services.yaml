@@ -52,7 +52,7 @@ services:
   workshop:
     build:
       context: .
-      dockerfile: services/workshop/Dockerfile
+      dockerfile: services/workshop/Dockerfile.host
     image: easygo-workshop:local
     init: true
     restart: "unless-stopped"

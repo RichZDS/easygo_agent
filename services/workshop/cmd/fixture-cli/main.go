@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,9 +18,10 @@ import (
 )
 
 type request struct {
-	Mode         string `json:"mode"`
-	HostSentinel string `json:"host_sentinel"`
-	Sibling      string `json:"sibling"`
+	Mode            string `json:"mode"`
+	DurationSeconds int    `json:"duration_seconds"`
+	HostSentinel    string `json:"host_sentinel"`
+	Sibling         string `json:"sibling"`
 }
 
 func main() {
@@ -42,6 +44,25 @@ func main() {
 		os.WriteFile("ready", []byte("child-running"), 0600)
 		time.Sleep(time.Hour)
 		return
+	}
+	if req.Mode == "long" {
+		if req.DurationSeconds < 1 || req.DurationSeconds > 300 {
+			os.Exit(2)
+		}
+		os.WriteFile("ready", []byte("long-running"), 0600)
+		fmt.Println(`{"type":"thread.started","thread_id":"11111111-1111-4111-8111-111111111111"}`)
+		started := time.Now()
+		rounds := 0
+		digest := sha256.Sum256([]byte("bounded workload"))
+		for time.Since(started) < time.Duration(req.DurationSeconds)*time.Second {
+			for i := 0; i < 250000; i++ {
+				digest = sha256.Sum256(digest[:])
+				rounds++
+			}
+			data, _ := json.Marshal(map[string]any{"elapsed_ms": time.Since(started).Milliseconds(), "rounds": rounds})
+			os.WriteFile("progress.json", data, 0600)
+			time.Sleep(time.Second)
+		}
 	}
 	checks := map[string]bool{}
 	checks["uid_1000"] = os.Getuid() == 1000

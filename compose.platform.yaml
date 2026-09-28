@@ -1,0 +1,63 @@
+# Managed platform: Web, mTLS model metering, and isolated task containers.
+# Generate configs with scripts/configure-platform.mjs before startup.
+name: easygo-platform
+services:
+  ai-gateway:
+    image: easygo-ai-gateway:platform
+    build:
+      context: .
+      dockerfile: services/ai-gateway/Dockerfile
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 20s
+    mem_limit: 1g
+    cpus: 2
+    environment:
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+    volumes:
+      - "${EASYGO_PLATFORM_STATE:?set absolute platform state}/pki/ai-gateway:/run/easygo/identity:ro"
+      - "${EASYGO_PLATFORM_STATE}/pki/public:/run/easygo/trust:ro"
+      - "${EASYGO_PLATFORM_STATE}/gateway.json:/run/easygo/config.json:ro"
+      - "${EASYGO_PLATFORM_STATE}/gateway:/data"
+    networks: [core]
+  agent-loop:
+    image: easygo-agent-loop:platform
+    build:
+      context: .
+      dockerfile: services/agent-loop/Dockerfile
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 20s
+    mem_limit: 2g
+    cpus: 2
+    ports:
+      - "127.0.0.1:${EASYGO_PLATFORM_PORT:-8090}:8080"
+    environment:
+      EASYGO_ADMIN_PASSWORD: ${EASYGO_ADMIN_PASSWORD:?set bootstrap admin password}
+    volumes:
+      - "${EASYGO_PLATFORM_STATE}/pki/agent-loop:/run/easygo/identity:ro"
+      - "${EASYGO_PLATFORM_STATE}/pki/public:/run/easygo/trust:ro"
+      - "${EASYGO_PLATFORM_STATE}/loop.json:/run/easygo/config.json:ro"
+      - "${EASYGO_PLATFORM_STATE}/agent:/data"
+    networks: [core]
+  workshop:
+    image: easygo-workshop:platform
+    build:
+      context: .
+      dockerfile: services/workshop/Dockerfile
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    mem_limit: 512m
+    cpus: 1
+    group_add:
+      - "${EASYGO_DOCKER_GID:?set Docker socket group id}"
+    volumes:
+      - "${EASYGO_PLATFORM_STATE}/pki/workshop:/run/easygo/identity:ro"
+      - "${EASYGO_PLATFORM_STATE}/pki/public:/run/easygo/trust:ro"
+      - "${EASYGO_PLATFORM_STATE}/workshop.json:/run/easygo/config.json:ro"
+      - "${EASYGO_PLATFORM_STATE}/workshop:/data/workshop"
+      - "${EASYGO_DOCKER_SOCKET:-/var/run/docker.sock}:/run/docker/docker.sock"
+    networks: [core]
+networks:
+  core: {}

@@ -86,7 +86,9 @@ try{
   task=await user.rpc('workshop.resume',{task_id:task.id,input:failure});
  }
  await until(async()=>(await user.request('/api/wallet')).held_micros===0,120000,2000);
- const receipts=(await user.request('/api/usage')).receipts;const w=await user.request('/api/wallet');
+ // A real agent can make well over one page (100) of model calls; read every page.
+ const receipts=[];for(let offset=0;offset!==null;){const page=await user.request('/api/usage?offset='+offset);receipts.push(...page.receipts);offset=page.next_offset;}
+ assert.equal(new Set(receipts.map(r=>r.request_id)).size,receipts.length,'usage pages overlap');const w=await user.request('/api/wallet');
  report.usage={requests:receipts.length,statuses:Object.fromEntries([...new Set(receipts.map(r=>r.status))].map(k=>[k,receipts.filter(r=>r.status===k).length])),input_tokens:receipts.reduce((s,r)=>s+(r.settlement?.usage?.input_tokens??0),0),cache_read_tokens:receipts.reduce((s,r)=>s+(r.settlement?.usage?.cache_read_tokens??0),0),output_tokens:receipts.reduce((s,r)=>s+(r.settlement?.usage?.output_tokens??0),0),charged_micros:receipts.reduce((s,r)=>s+r.charged_micros,0)};
  report.wallet={balance_micros:w.balance_micros,held_micros:w.held_micros};assert.equal(budgetCredits*1000000-w.balance_micros,report.usage.charged_micros);
  report.pass=report.rounds.at(-1).oracle.ok===true;if(!report.pass)process.exitCode=1;

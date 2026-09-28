@@ -36,7 +36,10 @@ Add to the operator-owned `workshop` configuration:
     "memory_bytes": 1073741824,
     "nano_cpus": 1000000000,
     "pids_limit": 128,
-    "tmpfs_bytes": 67108864
+    "tmpfs_bytes": 67108864,
+    "disk_quota_bytes": 2147483648,
+    "disk_quota_files": 200000,
+    "disk_poll_ms": 2000
   }
 }
 ```
@@ -68,7 +71,40 @@ resume; capabilities and socket directories are regenerated. Defaults: 1 GiB mem
 with no extra swap, 1 CPU, 128 PIDs, 64 MiB `/tmp`, 8 MiB private `/dev/shm`. Mandatory:
 all capabilities dropped, read-only rootfs, UID/GID 1000, no-new-privileges, private
 IPC, network none. Docker's default seccomp/AppArmor profiles are retained.
-Persistent workspace disk has no quota in this runner. This is not VM isolation.
+Persistent workspace limits are **soft aggregate limits plus a hard per-file
+limit**, not filesystem project quotas or VM isolation. `disk_quota_bytes` defaults
+to 2 GiB (16 MiB..1 TiB), `disk_quota_files` to 200000 (1000..10000000), and
+`disk_poll_ms` to 2000 (200..60000). The whole task workspace, including native HOME,
+is scanned before admission/resume, periodically while running and after exit.
+Allocated bytes are `st_blocks * 512`; sparse holes are not charged. Hard-linked
+inodes are charged once for bytes; every directory entry (including directories,
+symlinks and hard links) counts toward the entry limit, plus the workspace root.
+The scanner does not follow symlinks and reads bounded batches; it stops as soon
+as a limit is observed. Counters at rejection are therefore lower bounds, not an
+exhaustive post-stop census. Scan permission/IO/race failures fail closed as
+`disk_quota_scan_failed`; active-tree metadata churn can conservatively fail a run.
+
+Docker also gets `--ulimit fsize=<bytes>:<bytes>`. Docker performs no byte conversion,
+and Linux RLIMIT_FSIZE is measured in bytes; writes extending a file beyond that
+hard limit get EFBIG or SIGXFSZ. This also limits a sparse file's logical extent.
+See [Docker ulimit documentation](https://docs.docker.com/reference/cli/docker/container/run/#set-ulimits-in-container---ulimit)
+and [Linux getrlimit](https://man7.org/linux/man-pages/man2/getrlimit.2.html).
+
+An observed aggregate overage cancels/removes the task container, marks its run
+failed with `disk_quota_exceeded used_bytes=... used_files=... limit_bytes=...
+limit_files=...`, and publishes no artifacts. An already over-quota workspace
+cannot resume. Resume RPC uses error.data.code=disk_quota_exceeded (-32014) and a
+sanitized counter-only message; scan failure uses disk_quota_scan_failed (-32015).
+Host-mode behavior is unchanged. Other task containers are not canceled.
+
+Fast writers can overshoot during the polling interval, scan and container-removal
+latency. Deleted-but-open files and filesystem metadata not reachable in the tree
+are not an enforceable aggregate quota. Do not promise protection against filling
+a shared host disk using this monitor alone. For adversarial/production tenants
+or strict host-capacity guarantees, use a dedicated filesystem with per-task XFS
+project quotas (and inode limits), or independently bounded VM/task disks; retain
+host free-space alarms and capacity headroom. Large entry limits also increase
+controller scan CPU/memory costs.
 
 Cancel, timeout, parser failure and normal exit force-remove the owned container,
 killing descendants. Cleanup transport errors fail the run and disable new runner
@@ -134,3 +170,24 @@ This override is internal to Docker command construction, not an RPC option. It
 cannot activate through the host CommandRunner, whose sandbox policy is unchanged.
 The real-native fixture also asks Codex's exec tool to write under a read-only
 workflow and verifies the filesystem rejects it.
+
+
+## Small-quota Docker proof
+
+Build a separate fixture tag; do not overwrite existing load-test images:
+
+```bash
+docker --host unix:///operator/dedicated/docker.sock build \
+  -f deploy/runtime/Dockerfile.fixture -t easygo-task-fixture:quota .
+EASYGO_DOCKER_TEST_ENDPOINT=unix:///operator/dedicated/docker.sock \
+EASYGO_DOCKER_QUOTA_IMAGE=easygo-task-fixture:quota \
+EASYGO_DOCKER_TEST_BINARY=/absolute/path/to/docker \
+go -C services/workshop test ./workshop -run '^TestDockerDiskQuotaIntegration$' -count=1 -v
+```
+
+Cases use 16 MiB quota, at most 128 MiB target writes per case (fixture hard ceiling
+256 MiB), and remove their workspaces immediately. They prove per-file EFBIG,
+aggregate byte/file termination, rejection before resume creates a container,
+unaffected concurrent normal task, final scan of a fast exit, and sparse block
+accounting. Logs distinguish the first observed counters from full post-stop usage
+and measured overshoot/latency. No test writes the 2 GiB default.

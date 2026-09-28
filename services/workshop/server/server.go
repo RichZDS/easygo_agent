@@ -180,6 +180,15 @@ func domainError(e error) *rpc.Error {
 		return rpc.Failure(-32602, "unknown_workflow")
 	case errors.Is(e, workshop.ErrInvalid):
 		return rpc.InvalidParams()
+	case errors.Is(e, workshop.ErrDiskQuotaExceeded):
+		out := rpc.Failure(-32014, "disk_quota_exceeded")
+		var quota *workshop.DiskQuotaError
+		if errors.As(e, &quota) {
+			out.Message = quota.Error()
+		} // Only counters/limits, never wrapper paths.
+		return out
+	case errors.Is(e, workshop.ErrDiskQuotaScanFailed):
+		return rpc.Failure(-32015, "disk_quota_scan_failed")
 	case errors.Is(e, workshop.ErrArtifactTooLarge):
 		return rpc.Failure(-32013, "artifact_too_large")
 	case errors.Is(e, workshop.ErrConflict):

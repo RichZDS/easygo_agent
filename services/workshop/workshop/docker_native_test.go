@@ -82,7 +82,7 @@ func TestDockerNativeRuntimes(t *testing.T) {
 				writeNativeFixture(rec, tc.path, answer)
 				return map[string]any{"content_type": rec.Header().Get("Content-Type"), "body": rec.Body.Bytes()}, nil
 			})
-			cfg := Config{Root: root, ModelGateway: gateway, Sandbox: SandboxConfig{Mode: "docker", DockerBinary: os.Getenv("EASYGO_DOCKER_TEST_BINARY"), Endpoint: endpoint, Image: image, Owner: "native-" + uuid.NewString(), HostRoot: root}}
+			cfg := Config{Root: root, ModelGateway: gateway, Sandbox: SandboxConfig{Mode: "docker", DockerBinary: os.Getenv("EASYGO_DOCKER_TEST_BINARY"), Endpoint: endpoint, Image: image, Owner: "native-" + uuid.NewString(), HostRoot: root, DiskQuotaBytes: 64 << 20, DiskQuotaFiles: 10000, DiskPollMS: 200}}
 			r, err := NewDockerRunner(cfg)
 			if err != nil {
 				t.Fatal(err)

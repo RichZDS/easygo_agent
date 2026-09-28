@@ -29,16 +29,19 @@ const runtimeRelay = "/run/easygo-relay"
 // HostRoot is the daemon-visible path of Config.Root, not a parent directory.
 // Empty Mode preserves the legacy unmanaged host API; managed deployments set docker.
 type SandboxConfig struct {
-	Mode         string `json:"mode"`
-	DockerBinary string `json:"docker_binary,omitempty"`
-	Endpoint     string `json:"endpoint,omitempty"`
-	Image        string `json:"image,omitempty"`
-	Owner        string `json:"owner,omitempty"`
-	HostRoot     string `json:"host_root,omitempty"`
-	MemoryBytes  int64  `json:"memory_bytes,omitempty"`
-	NanoCPUs     int64  `json:"nano_cpus,omitempty"`
-	PIDsLimit    int64  `json:"pids_limit,omitempty"`
-	TmpfsBytes   int64  `json:"tmpfs_bytes,omitempty"`
+	Mode           string `json:"mode"`
+	DockerBinary   string `json:"docker_binary,omitempty"`
+	Endpoint       string `json:"endpoint,omitempty"`
+	Image          string `json:"image,omitempty"`
+	Owner          string `json:"owner,omitempty"`
+	HostRoot       string `json:"host_root,omitempty"`
+	MemoryBytes    int64  `json:"memory_bytes,omitempty"`
+	NanoCPUs       int64  `json:"nano_cpus,omitempty"`
+	PIDsLimit      int64  `json:"pids_limit,omitempty"`
+	TmpfsBytes     int64  `json:"tmpfs_bytes,omitempty"`
+	DiskQuotaBytes int64  `json:"disk_quota_bytes,omitempty"`
+	DiskQuotaFiles int64  `json:"disk_quota_files,omitempty"`
+	DiskPollMS     int    `json:"disk_poll_ms,omitempty"`
 }
 
 type dockerCommand func(context.Context, io.Reader, io.Writer, io.Writer, ...string) error
@@ -125,6 +128,18 @@ func normalizeSandbox(c SandboxConfig) (SandboxConfig, error) {
 	if c.MemoryBytes < 64<<20 || c.MemoryBytes > 64<<30 || c.NanoCPUs < 100_000_000 || c.NanoCPUs > 32_000_000_000 || c.PIDsLimit < 16 || c.PIDsLimit > 4096 || c.TmpfsBytes < 1<<20 || c.TmpfsBytes > 1<<30 {
 		return c, fmt.Errorf("%w: invalid Docker resource bounds", ErrInvalid)
 	}
+	if c.DiskQuotaBytes == 0 {
+		c.DiskQuotaBytes = 2 << 30
+	}
+	if c.DiskQuotaFiles == 0 {
+		c.DiskQuotaFiles = 200000
+	}
+	if c.DiskPollMS == 0 {
+		c.DiskPollMS = 2000
+	}
+	if c.DiskQuotaBytes < 16<<20 || c.DiskQuotaBytes > 1<<40 || c.DiskQuotaFiles < 1000 || c.DiskQuotaFiles > 10000000 || c.DiskPollMS < 200 || c.DiskPollMS > 60000 {
+		return c, fmt.Errorf("%w: invalid disk quota bounds", ErrInvalid)
+	}
 	return c, nil
 }
 
@@ -203,6 +218,7 @@ func (r *DockerRunner) hostPath(local string) (string, error) {
 
 func (r *DockerRunner) containerOptions(name, workspace, relay string) []string {
 	args := []string{"create", "--name", name, "--pull", "never", "--interactive", "--user", "1000:1000", "--workdir", runtimeWorkspace, "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges=true", "--pids-limit", strconv.FormatInt(r.cfg.PIDsLimit, 10), "--memory", strconv.FormatInt(r.cfg.MemoryBytes, 10), "--memory-swap", strconv.FormatInt(r.cfg.MemoryBytes, 10), "--cpus", strconv.FormatFloat(float64(r.cfg.NanoCPUs)/1e9, 'f', 9, 64), "--ipc", "private", "--shm-size", "8388608", "--log-driver", "none", "--tmpfs", fmt.Sprintf("/tmp:rw,nosuid,nodev,noexec,size=%d,mode=1777", r.cfg.TmpfsBytes), "--entrypoint", "/usr/local/bin/task-shim"}
+	args = append(args, "--ulimit", fmt.Sprintf("fsize=%d:%d", r.cfg.DiskQuotaBytes, r.cfg.DiskQuotaBytes))
 	labels := r.labels()
 	keys := []string{managedLabel, ownerLabel, rootLabel}
 	for _, k := range keys {
@@ -385,6 +401,9 @@ func (r *DockerRunner) Run(ctx context.Context, in Invocation, emit func(Event) 
 	if err != nil {
 		return result, err
 	}
+	if err = r.CheckDiskQuota(ctx, in.Workspace); err != nil {
+		return result, err
+	}
 	home := filepath.Join(in.Workspace, ".workshop-home")
 	for _, dir := range []string{home, filepath.Join(home, "codex"), filepath.Join(home, "claude")} {
 		if err = mkdirNoSymlinks(dir, 0700); err != nil {
@@ -432,6 +451,9 @@ func (r *DockerRunner) Run(ctx context.Context, in Invocation, emit func(Event) 
 	if err != nil {
 		return result, err
 	}
+	if err = r.CheckDiskQuota(ctx, in.Workspace); err != nil {
+		return result, err
+	}
 	name := "easygo-" + uuid.NewString()
 	// Register cleanup before create: even ambiguous daemon create responses are reaped.
 	defer func() {
@@ -470,7 +492,45 @@ func (r *DockerRunner) Run(ctx context.Context, in Invocation, emit func(Event) 
 	if _, err = r.output(ctx, options...); err != nil {
 		return result, err
 	}
-	return runNative(ctx, in.Workflow.Engine, r.maxOutput, []string{key}, emit, func(childCtx context.Context, stdout, stderr io.Writer) error {
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	monitorCtx, stopMonitor := context.WithCancel(ctx)
+	defer stopMonitor()
+	quotaDone := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(time.Duration(r.cfg.DiskPollMS) * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-monitorCtx.Done():
+				quotaDone <- nil
+				return
+			case <-ticker.C:
+				if e := r.CheckDiskQuota(monitorCtx, in.Workspace); e != nil {
+					if monitorCtx.Err() != nil {
+						quotaDone <- nil
+						return
+					}
+					cancelRun()
+					quotaDone <- e
+					return
+				}
+			}
+		}
+	}()
+	result, err = runNative(runCtx, in.Workflow.Engine, r.maxOutput, []string{key}, emit, func(childCtx context.Context, stdout, stderr io.Writer) error {
 		return r.command(childCtx, strings.NewReader(in.Workflow.Instructions+"\n\nUser input:\n"+in.Input), stdout, stderr, "start", "--attach", "--interactive", name)
 	})
+	stopMonitor()
+	if quotaErr := <-quotaDone; quotaErr != nil {
+		return result, quotaErr
+	}
+	// A short-lived process can finish between polls; it still cannot publish an
+	// over-quota workspace as success. External cancellation keeps its own status.
+	if ctx.Err() == nil {
+		if quotaErr := r.CheckDiskQuota(ctx, in.Workspace); quotaErr != nil {
+			return result, quotaErr
+		}
+	}
+	return result, err
 }

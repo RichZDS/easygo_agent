@@ -471,6 +471,11 @@ func (s *Service) Resume(namespace, id, input string) (*Task, error) {
 	if !terminal(task.Status) || task.SessionID == "" {
 		return nil, ErrConflict
 	}
+	if docker, ok := s.runner.(*DockerRunner); ok {
+		if err := docker.CheckDiskQuota(context.Background(), task.Workspace); err != nil {
+			return nil, err
+		}
+	}
 	select {
 	case s.slots <- struct{}{}:
 	default:
@@ -579,6 +584,8 @@ func (s *Service) execute(id string) {
 		}
 		status, reason := Succeeded, ""
 		switch {
+		case errors.Is(runErr, ErrDiskQuotaExceeded), errors.Is(runErr, ErrDiskQuotaScanFailed):
+			status, reason = Failed, runErr.Error()
 		case current.Status == Cancelling:
 			status, reason = Cancelled, "cancelled by caller"
 		case s.closed:

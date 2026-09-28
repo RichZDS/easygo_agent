@@ -38,7 +38,7 @@ func TestDockerIntegration(t *testing.T) {
 		}
 		return map[string]any{"content_type": "application/json", "body": []byte(`{"fixture":"ok"}`)}, nil
 	})
-	cfg := Config{Root: root, ModelGateway: gateway, Sandbox: SandboxConfig{Mode: "docker", DockerBinary: os.Getenv("EASYGO_DOCKER_TEST_BINARY"), Endpoint: endpoint, Image: image, Owner: "proof-" + uuid.NewString(), HostRoot: root}}
+	cfg := Config{Root: root, ModelGateway: gateway, Sandbox: SandboxConfig{Mode: "docker", DockerBinary: os.Getenv("EASYGO_DOCKER_TEST_BINARY"), Endpoint: endpoint, Image: image, Owner: "proof-" + uuid.NewString(), HostRoot: root, DiskQuotaBytes: 16 << 20, DiskQuotaFiles: 1000, DiskPollMS: 200}}
 	r, err := NewDockerRunner(cfg)
 	if err != nil {
 		t.Fatal(err)

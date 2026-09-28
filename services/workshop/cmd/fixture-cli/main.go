@@ -19,6 +19,11 @@ import (
 
 type request struct {
 	Mode            string `json:"mode"`
+	Bytes           int64  `json:"bytes"`
+	Files           int    `json:"files"`
+	Chunk           int    `json:"chunk"`
+	Sparse          bool   `json:"sparse"`
+	DelayMS         int    `json:"delay_ms"`
 	DurationSeconds int    `json:"duration_seconds"`
 	HostSentinel    string `json:"host_sentinel"`
 	Sibling         string `json:"sibling"`
@@ -35,6 +40,9 @@ func main() {
 	if json.Unmarshal([]byte(input), &req) != nil {
 		fmt.Fprintln(os.Stderr, "fixture input invalid")
 		os.Exit(2)
+	}
+	if req.Mode == "fill" {
+		os.Exit(fill(req))
 	}
 	if req.Mode == "sleep" {
 		child := exec.Command(os.Args[0], "--child")
@@ -143,4 +151,72 @@ func main() {
 	msg, _ := json.Marshal(map[string]any{"type": "item.completed", "item": map[string]string{"type": "agent_message", "text": "offline isolation fixture passed"}})
 	fmt.Println(string(msg))
 	fmt.Println(`{"type":"turn.completed","usage":{"input_tokens":2,"output_tokens":3}}`)
+}
+
+// A bounded offline writer. bytes is per-file logical size; the entire target is
+// capped at 256 MiB and tests use at most 128 MiB. Sparse writes allocate only one block.
+func fill(req request) int {
+	if req.Bytes < 1 || req.Files < 1 || req.Files > 10000 || req.Bytes > 256<<20 || req.Bytes*int64(req.Files) > 256<<20 || req.Chunk < 1 || req.Chunk > 4<<20 || req.DelayMS < 0 || req.DelayMS > 1000 {
+		return 2
+	}
+	fmt.Println(`{"type":"thread.started","thread_id":"11111111-1111-4111-8111-111111111111"}`)
+	if err := os.MkdirAll("fill", 0700); err != nil {
+		return 2
+	}
+	os.WriteFile("artifact.txt", []byte("must-not-publish-on-quota-failure"), 0600)
+	started := time.Now()
+	var limit syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &limit); err != nil {
+		return 2
+	}
+	meta, _ := json.Marshal(map[string]any{"started_unix_nano": started.UnixNano(), "fsize_soft": limit.Cur, "fsize_hard": limit.Max})
+	os.WriteFile("fill-meta.json", meta, 0600)
+	data := make([]byte, req.Chunk)
+	var writtenTotal int64
+	marked := false
+	mark := func() {
+		if !marked && (writtenTotal >= int64(limit.Cur) || req.Bytes == 1 && writtenTotal >= 1000) {
+			marked = true
+			b, _ := json.Marshal(map[string]int64{"unix_nano": time.Now().UnixNano()})
+			os.WriteFile("fill-crossed.json", b, 0600)
+		}
+	}
+	for i := 0; i < req.Files; i++ {
+		f, err := os.Create(fmt.Sprintf("fill/file-%06d", i))
+		if err != nil {
+			return 2
+		}
+		if req.Sparse {
+			_, err = f.Seek(req.Bytes-1, 0)
+			if err == nil {
+				_, err = f.Write([]byte{1})
+			}
+		} else {
+			for left := req.Bytes; left > 0 && err == nil; {
+				n := int64(len(data))
+				if n > left {
+					n = left
+				}
+				var written int
+				written, err = f.Write(data[:n])
+				left -= int64(written)
+				writtenTotal += int64(written)
+				mark()
+				if req.DelayMS > 0 {
+					time.Sleep(time.Duration(req.DelayMS) * time.Millisecond)
+				}
+			}
+		}
+		closeErr := f.Close()
+		if err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "fill_write_error: %v\n", err)
+			return 9
+		}
+	}
+	fmt.Println(`{"type":"item.completed","item":{"type":"agent_message","text":"fill complete"}}`)
+	fmt.Println(`{"type":"turn.completed","usage":{"input_tokens":0,"output_tokens":0}}`)
+	return 0
 }

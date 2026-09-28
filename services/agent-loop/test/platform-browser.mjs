@@ -84,6 +84,11 @@ try {
   await page.locator('#refresh').click(); await page.locator('#resolve-request').selectOption('0'); await page.locator('#resolve-decision').selectOption('settle');
   await page.locator('#resolve-input').fill('15'); await page.locator('#resolve-output').fill('5'); await page.locator('#resolve-reason').fill('fixture provider receipt'); await page.locator('#resolve-form button').click();
   await page.waitForFunction(() => document.getElementById('pending-receipts').textContent.includes('还没有内容'));
+  app.wallet.reserve({ namespace: user.namespace, request_id: 'browser-late-receipt', fingerprint: 'late', model: 'fixture', reserve_input_tokens: 100, reserve_output_tokens: 0, source: 'fixture' });
+  await page.locator('#refresh').click(); await page.locator('#resolve-request').selectOption('0'); await page.locator('#resolve-decision').selectOption('release');
+  await page.locator('#resolve-reason').fill('fixture manual release before provider reply'); await page.locator('#resolve-form button').click();
+  await page.waitForFunction(() => document.getElementById('pending-receipts').textContent.includes('还没有内容'));
+  assert.equal(app.wallet.settle({ namespace: user.namespace, request_id: 'browser-late-receipt', usage: { known: true, input_tokens: 37, output_tokens: 13 }, outcome: 'complete', source: 'fixture' }).late, true);
   await page.screenshot({ path: join(evidence, 'admin-desktop.png') });
   await page.locator('#logout').click(); await login('user@example.test', 'fixture-user-password');
   await page.waitForFunction(() => document.getElementById('overview-available').textContent === '10.48');
@@ -105,12 +110,20 @@ try {
   assert.equal([...skills.values()][0].version, 2);
   await navigate('wallet'); await page.waitForFunction(() => document.getElementById('wallet-balance').textContent === '10.45');
   await page.waitForFunction(() => document.getElementById('usage').textContent.includes('人工结算'));
-  assert.match(await page.locator('#usage').textContent(), /人工结算/); await page.screenshot({ path: join(evidence, 'wallet-desktop.png') });
+  assert.match(await page.locator('#usage').textContent(), /人工结算/);
+  const lateRow = page.locator('#usage tr').filter({ hasText: 'browser-late-receipt' });
+  assert.match(await lateRow.textContent(), /37 \/ 13/);
+  assert.equal((await lateRow.locator('td').nth(4).textContent()).trim(), '0');
+  await lateRow.locator('summary').click(); assert.equal(await lateRow.getByText('人工决定：释放冻结，不扣费', { exact: true }).isVisible(), true);
+  const manualRow = page.locator('#usage tr').filter({ hasText: 'browser-pending' });
+  assert.equal((await manualRow.locator('td').nth(2).textContent()).trim(), '待确认');
+  await manualRow.locator('summary').click(); assert.equal(await manualRow.getByText('核对输入 / 输出：15 / 5 token', { exact: true }).isVisible(), true);
+ await page.screenshot({ path: join(evidence, 'wallet-desktop.png') });
   await page.setViewportSize({ width: 390, height: 844 }); await navigate('overview');
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   await page.screenshot({ path: join(evidence, 'overview-mobile.png'), fullPage: true });
   await navigate('wallet'); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   await page.screenshot({ path: join(evidence, 'wallet-mobile.png'), fullPage: true });
   assert.deepEqual(jsErrors, []);
-  console.log(JSON.stringify({ result: 'passed', viewport_desktop: '1440x1000', viewport_mobile: '390x844', browser_errors: jsErrors.length, evidence, proof: ['register_zero_balance', 'admin_grant', 'pending_resolution', 'chat_metered_fixture', 'model_html_as_text', 'runtime_task_cancel_resume_result', 'versioned_memory_edit', 'versioned_skill_edit', 'usage_ledger', 'responsive_overflow'] }));
+  console.log(JSON.stringify({ result: 'passed', viewport_desktop: '1440x1000', viewport_mobile: '390x844', browser_errors: jsErrors.length, evidence, proof: ['register_zero_balance', 'admin_grant', 'pending_resolution', 'late_raw_receipt_separate_from_manual_charge', 'chat_metered_fixture', 'model_html_as_text', 'runtime_task_cancel_resume_result', 'versioned_memory_edit', 'versioned_skill_edit', 'usage_ledger', 'responsive_overflow'] }));
 } finally { await browser?.close(); await app?.close(); delete process.env.PLATFORM_BROWSER_ADMIN; await rm(root, { recursive: true, force: true }); }

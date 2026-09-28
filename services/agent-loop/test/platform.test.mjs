@@ -102,12 +102,42 @@ test('manual reconciliation is atomic, snapshot priced, audited, idempotent and 
   const release = { namespace: 'account-a', request_id: 'orphan', decision: 'release', reason: 'Provider confirms no dispatch', idempotency_key: 'reconcile-2' };
   assert.equal(wallet.resolve(release, 'admin').status, 'resolved_released');
   assert.equal(wallet.resolve(release, 'admin').duplicate, true);
-  assert.throws(() => wallet.settle(settle('orphan')), reason('reservation_resolved'));
+  assert.equal(wallet.settle(settle('orphan')).late, true);
   assert.equal(store.pending().length, 0);
   assert.equal(store.walletView('account-a').balance_micros, 970_000);
   assert.throws(() => store.run('UPDATE resolutions SET payload=?', '{}'), /append_only/);
   assert.throws(() => store.run('UPDATE reservations SET settlement=? WHERE request_id=?', '{}', 'pending'), /immutable_receipt/);
   assert.equal(store.all("SELECT * FROM audit WHERE action LIKE 'resolved_%'").length, 2);
+});
+
+for (const decision of ['release', 'settle']) test(`late provider receipt after admin ${decision} preserves raw usage without changing credits`, async t => {
+  const { store, wallet, file } = await fixture(t); grant(store, 1_000_000);
+  const reserved = wallet.reserve(reserve('late'));
+  const manual = { namespace: 'account-a', request_id: 'late', decision, ...(decision === 'settle' ? { usage: { known: true, input_tokens: 20, output_tokens: 10 } } : {}), reason: 'Manual provider verification', idempotency_key: 'manual-late' };
+  const resolved = wallet.resolve(manual, 'admin');
+  // A different active request must keep its hold; late receipt must not release it.
+  wallet.reserve(reserve('other'));
+  const before = store.walletView('account-a'), resolution = store.resolution(reserved.reservation_id);
+  const late = settle('late', { usage: { known: true, input_tokens: 200, output_tokens: 80, cache_read_tokens: 40, cache_write_tokens: 10 } });
+  const accepted = wallet.settle(late);
+  assert.deepEqual(accepted, { reservation_id: reserved.reservation_id, status: resolved.status, charged_micros: resolved.charged_micros, duplicate: false, late: true });
+  assert.deepEqual(store.walletView('account-a'), before);
+  assert.equal(before.held_micros, 100_000);
+  assert.deepEqual(store.resolution(reserved.reservation_id), resolution);
+  const usage = store.usage('account-a').find(r => r.request_id === 'late');
+  assert.deepEqual(usage.settlement.usage, late.usage);
+  assert.equal(usage.status, resolved.status); assert.equal(usage.charged_micros, decision === 'settle' ? 30_000 : 0);
+  assert.equal(store.all("SELECT * FROM audit WHERE action='late_receipt' AND subject=?", reserved.reservation_id).length, 1);
+  assert.equal(wallet.settle(late).duplicate, true);
+  assert.throws(() => wallet.settle(settle('late')), reason('settlement_conflict'));
+  assert.deepEqual(store.walletView('account-a'), before);
+  assert.equal(store.all("SELECT * FROM audit WHERE action='late_receipt' AND subject=?", reserved.reservation_id).length, 1);
+  const reopened = new PlatformStore(file);
+  try {
+    assert.equal(new Wallet(reopened).settle(late).duplicate, true);
+    assert.deepEqual(reopened.walletView('account-a'), before);
+    assert.deepEqual(reopened.usage('account-a').find(r => r.request_id === 'late').settlement.usage, late.usage);
+  } finally { reopened.close(); }
 });
 
 test('independent SQLite connections race for limited credit without overspend', async t => {

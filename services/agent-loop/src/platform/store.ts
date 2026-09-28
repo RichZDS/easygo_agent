@@ -190,7 +190,13 @@ export class Wallet {
         if (row.settlement !== payload) throw new RpcError(-32009, 'settlement_conflict');
         return { reservation_id: row.id, status: row.status, charged_micros: row.charged_micros, duplicate: true };
       }
-      if (this.store.resolution(String(row.id))) throw new RpcError(-32009, 'reservation_resolved');
+      if (this.store.resolution(String(row.id))) {
+        // Manual reconciliation already adjusted credits. Preserve a late provider
+        // receipt as evidence without changing its charge or releasing another hold.
+        this.store.run('UPDATE reservations SET settlement=? WHERE id=?', payload, row.id!);
+        this.store.audit(source, 'late_receipt', String(row.id), payload);
+        return { reservation_id: row.id, status: row.status, charged_micros: row.charged_micros, duplicate: false, late: true };
+      }
       const pending = p.outcome !== 'rejected' && !u.known;
       const status = pending ? 'pending' : p.outcome === 'rejected' ? 'released' : 'settled';
       const tariff = this.store.get('SELECT * FROM tariffs WHERE version=?', row.tariff_version!)!;

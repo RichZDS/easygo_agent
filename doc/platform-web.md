@@ -57,7 +57,7 @@ bootstrap 密码通过指定环境变量读取，仅在第一次创建管理员�
 
 初始费率每输入/输出 token 1000 microcredits，即 1000 总 token = 1 credit。1 credit = 1,000,000 microcredits。缓存读写是输入 token 的子集，缓存读写之和不得大于输入，不重复加价。已知实际用量无论 complete 或 uncertain 都只扣一次并释放预留；未知 complete/uncertain 保持 pending 和冻结，不自动超时退款。rejected 必须没有实际非零用量，释放预留。超预留实际用量可使余额为负，后续预留拒绝。
 
-管理员对账只处理 reserved/pending。settle 要求 `usage.known=true`；release 不接受 usage。按预留快照计费，在同一事务调整余额和冻结、追加流水与审计、保存独立 resolutions，不修改原始 settlement。相同幂等键和相同负载可重试；换负载或重复解决同一预留冲突。已存在的完全相同原始 settlement 重放仍为无副作用重复；人工处理尚无 receipt 的 reserved 请求后再来的 settlement 返回 `reservation_resolved`。操作前必须核实网关已停止重放/请求已终止，避免人工释放正在运行的请求。
+管理员对账只处理 reserved/pending。settle 要求 `usage.known=true`；release 不接受 usage。按预留快照计费，在同一事务调整余额和冻结、追加流水与审计、保存独立 resolutions，不修改原始 settlement。相同幂等键和相同负载可重试；换负载或重复解决同一预留冲突。已存在的完全相同原始 settlement 重放仍为无副作用重复；人工处理尚无 receipt 的 reserved 请求后，第一份合法的迟到 settlement 补存为不可变原始证据并追加 `late_receipt` 审计；返回当前人工处理的 status/charged_micros 和 `late:true`，不再次扣费、释放冻结或改变人工决定。完全相同重试为 duplicate no-op，不同重试冲突；原先已保存的 pending receipt 也不能被覆盖。管理页操作前仍需核实实际用量；人工决定是额度调整依据，原始 token 统计独立保留。用量页的主列显示原始回执，人工核对的数量/原因在单独详情中显示。
 
 数据库开启 WAL、FULL 同步、外键、5 秒 busy timeout。表：`platform_migrations`、`accounts`、`auth_sessions`、`tariffs`、`reservations`、`ledger`、`grants`、`audit`、`resolutions`。v1 建账户和账务；v2 增加 reconciliation。ledger/audit/tariff/resolution 有禁止修改和删除的触发器；已留存 settlement 有不可变触发器。后台没有自动清理账本和 pending。
 
@@ -76,7 +76,7 @@ npm run typecheck
 npm test
 ```
 
-`test/platform.test.mjs` 覆盖认证/CSRF/角色/namespace、撤销、零余额、并发额度耗尽、费率快照、overflow/cache、重复与冲突、已知中断/未知待核对/拒绝释放、负余额、持久化和管理员对账。并发案例启动 4 个独立 worker/SQLite 连接，各申请 20 次，预算只能准入 10 次。
+`test/platform.test.mjs` 覆盖认证/CSRF/角色/namespace、撤销、零余额、并发额度耗尽、费率快照、overflow/cache、重复与冲突、已知中断/未知待核对/拒绝释放、负余额、持久化、管理员对账及人工处理后迟到回执的留存/重放/冲突（不会再次扣费或释放其他请求冻结）。并发案例启动 4 个独立 worker/SQLite 连接，各申请 20 次，预算只能准入 10 次。
 
 浏览器证明使用已有 Playwright 和 Chromium，脚本本身不会下载安装工具：
 

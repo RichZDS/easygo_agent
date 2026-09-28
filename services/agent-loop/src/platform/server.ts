@@ -4,10 +4,12 @@ import { readFile } from 'node:fs/promises';
 import { fields, object, string, RpcError } from '../validation.js';
 import { parseJSON } from '../strict-json.mjs';
 import { PlatformStore, Wallet, count, type Row } from './store.js';
+import { createClientAddress } from './client-address.mjs';
 
 export interface PlatformConfig {
   listen: string; database: string; public_origin: string; secure_cookies: boolean; registration: boolean;
   bootstrap_admin?: { email: string; password_env: string };
+  trusted_proxies?: string[];
 }
 export const PUBLIC_METHODS = new Set([
   'agent.session.create', 'agent.session.list', 'agent.session.history', 'agent.run.start', 'agent.run.get', 'agent.run.cancel', 'agent.run.events', 'agent.workshop.catalog',
@@ -55,7 +57,8 @@ async function body(req: IncomingMessage) {
 }
 
 export async function createPlatform(config: PlatformConfig, callbacks: { rpc(method: string, params: Record<string, unknown>): Promise<unknown> }) {
-  fields(config, ['listen', 'database', 'public_origin', 'secure_cookies', 'registration', 'bootstrap_admin']);
+  fields(config, ['listen', 'database', 'public_origin', 'secure_cookies', 'registration', 'bootstrap_admin', 'trusted_proxies']);
+  const clientAddress = createClientAddress(config.trusted_proxies);
   const origin = new URL(config.public_origin);
   if (!['http:', 'https:'].includes(origin.protocol) || origin.origin !== config.public_origin || origin.username || origin.password) throw new Error('public_origin must be an HTTP(S) origin');
   if (typeof config.registration !== 'boolean' || typeof config.secure_cookies !== 'boolean' || (origin.protocol === 'https:' && !config.secure_cookies)) throw new Error('Explicit registration/secure_cookies required; HTTPS requires secure cookies');
@@ -118,7 +121,8 @@ export async function createPlatform(config: PlatformConfig, callbacks: { rpc(me
       if (closing) throw new RpcError(-32029, 'shutting_down');
       const url = new URL(req.url ?? '/', config.public_origin);
       const path = url.pathname, method = req.method ?? '';
-      rate(`ip:${req.socket.remoteAddress ?? 'unknown'}`, 300);
+      const client = clientAddress(req);
+      rate(`ip:${client}`, 300);
       if (method === 'GET' && assets.has(path)) {
         const [file, content] = assets.get(path)!;
         const data = await readFile(new URL(`../../web/${file}`, import.meta.url));
@@ -127,7 +131,7 @@ export async function createPlatform(config: PlatformConfig, callbacks: { rpc(me
       if (!path.startsWith('/api/')) { json(res, { error: { code: 'not_found' } }, 404); return; }
       if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(method) && (req.headers.origin !== origin.origin || (req.headers['sec-fetch-site'] && !['same-origin', 'none'].includes(String(req.headers['sec-fetch-site']))))) throw new RpcError(-32003, 'origin_forbidden');
       if (method === 'POST' && (path === '/api/register' || path === '/api/login')) {
-        rate(`auth-ip:${req.socket.remoteAddress ?? 'unknown'}`, 20);
+        rate(`auth-ip:${client}`, 20);
         const p = fields(await body(req), ['email', 'password']);
         const address = email(p.email), pass = password(p.password);
         rate(`auth-email:${digest(address)}`, 10);

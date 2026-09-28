@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, stat } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
@@ -286,4 +289,90 @@ test('non-string settlement/reconciliation enums never mutate holds or usage', a
     assert.deepEqual(store.walletView('account-a'),before);
   }
   assert.equal(store.usage('account-a')[0].settlement,null);
+});
+
+// Rotate emails so these assertions exercise the IP bucket, not auth-email's 10/min bucket.
+const proxyLogin = (call, index, headers = {}) => call('/api/login', { email: `proxy-${index}@example.test`, password: 'proxy-test-password' }, undefined, { headers });
+for (const [name, config] of [['default empty', {}], ['nonmatching allowlist', { trusted_proxies: ['10.0.0.1'] }]]) {
+  test(`untrusted proxy headers cannot bypass login rate limits (${name})`, async t => {
+    const { call } = await apiFixture(t, config);
+    for (let i = 0; i < 20; i++) assert.equal((await proxyLogin(call, i, { 'x-forwarded-for': `192.0.2.${i + 1}`, 'x-real-ip': `198.51.100.${i + 1}`, forwarded: `for=203.0.113.${i + 1}` })).status, 401);
+    const limited = await proxyLogin(call, 20, { 'x-forwarded-for': '192.0.2.250' });
+    assert.equal(limited.status, 429); assert.equal(limited.data.error.code, 'rate_limited');
+  });
+}
+
+test('trusted proxy clients have independent login buckets and cannot bypass per-email limits', async t => {
+  const { call } = await apiFixture(t, { trusted_proxies: ['127.0.0.1'] });
+  for (const client of ['192.0.2.1', '192.0.2.2']) {
+    for (let i = 0; i < 20; i++) assert.equal((await proxyLogin(call, `${client}-${i}`, { 'x-forwarded-for': client })).status, 401);
+    const limited = await proxyLogin(call, `${client}-21`, { 'x-forwarded-for': client });
+    assert.equal(limited.status, 429); assert.equal(limited.data.error.code, 'rate_limited');
+  }
+  for (let i = 0; i < 10; i++) assert.equal((await proxyLogin(call, 'same-email', { 'x-forwarded-for': `198.51.100.${i + 1}` })).status, 401);
+  assert.equal((await proxyLogin(call, 'same-email', { 'x-forwarded-for': '198.51.100.100' })).status, 429);
+});
+
+test('trusted proxy right-to-left boundary ignores a forged left prefix and skips only allowlisted hops', async t => {
+  const { call } = await apiFixture(t, { trusted_proxies: ['127.0.0.1', '127.0.0.2'] });
+  for (let i = 0; i < 20; i++) {
+    const chain = i === 0 ? 'evil, 10.0.0.9' : `evil-${i}, 10.0.0.9, 127.0.0.2, ::ffff:127.0.0.1`;
+    assert.equal((await proxyLogin(call, i, { 'x-forwarded-for': chain })).status, 401);
+  }
+  assert.equal((await proxyLogin(call, 21, { 'x-forwarded-for': '203.0.113.5, 10.0.0.9' })).status, 429);
+  // If malformed left prefixes had caused a whole-header fallback, this would be rate limited.
+  assert.equal((await proxyLogin(call, 'socket')).status, 401);
+  assert.equal((await proxyLogin(call, 'other', { 'x-forwarded-for': '10.0.0.10, 127.0.0.2' })).status, 401);
+});
+
+test('trusted proxy malformed, missing or oversized XFF falls back to socket; other headers are ignored', async t => {
+  const { call } = await apiFixture(t, { trusted_proxies: ['127.0.0.1'] });
+  for (let i = 0; i < 20; i++) assert.equal((await proxyLogin(call, i)).status, 401);
+  const suffix = ', 10.0.0.10';
+  for (const xff of ['', 'evil', '10.0.0.9, evil', '[::1]', '192.0.2.1:443', 'fe80::1%eth0', '127.0.0.1', '127.0.0.01', Array(33).fill('10.0.0.10').join(','), 'x'.repeat(2049 - suffix.length) + suffix]) {
+    const r = await proxyLogin(call, 'bad-' + xff.length, { 'x-forwarded-for': xff });
+    assert.equal(r.status, 429); assert.equal(r.data.error.code, 'rate_limited');
+  }
+  assert.equal((await proxyLogin(call, 'ignored', { 'x-real-ip': '10.0.0.10', forwarded: 'for=10.0.0.10' })).status, 429);
+  assert.equal((await proxyLogin(call, 'boundary-bytes', { 'x-forwarded-for': 'x'.repeat(2048 - suffix.length) + suffix })).status, 401);
+  assert.equal((await proxyLogin(call, 'boundary-hops', { 'x-forwarded-for': Array(32).fill('10.0.0.11').join(',') })).status, 401);
+});
+
+test('trusted proxy normalizes IPv4-mapped socket and client addresses plus equivalent IPv6 literals', async t => {
+  const { call } = await apiFixture(t, { listen: '[::]:0', trusted_proxies: ['0:0:0:0:0:FFFF:7F00:1'] });
+  for (let i = 0; i < 20; i++) assert.equal((await proxyLogin(call, `v4-${i}`, { 'x-forwarded-for': i % 2 ? '::ffff:192.0.2.9' : '192.0.2.9' })).status, 401);
+  assert.equal((await proxyLogin(call, 'v4-21', { 'x-forwarded-for': '0:0:0:0:0:ffff:c000:209' })).status, 429);
+  for (let i = 0; i < 20; i++) assert.equal((await proxyLogin(call, `v6-${i}`, { 'x-forwarded-for': i % 2 ? '2001:0DB8:0:0:0:0:0:9' : '2001:db8::9' })).status, 401);
+  assert.equal((await proxyLogin(call, 'v6-21', { 'x-forwarded-for': '2001:DB8::9' })).status, 429);
+  assert.equal((await proxyLogin(call, 'different', { 'x-forwarded-for': '2001:db8::10' })).status, 401);
+});
+
+test('trusted proxy global request rate uses the same normalized client boundary', async t => {
+  const { call } = await apiFixture(t, { trusted_proxies: ['127.0.0.1'] });
+  for (let i = 0; i < 300; i++) assert.equal((await call('/not-found', undefined, undefined, { headers: { 'x-forwarded-for': '192.0.2.9' } })).status, 404);
+  assert.equal((await call('/not-found', undefined, undefined, { headers: { 'x-forwarded-for': '::ffff:192.0.2.9' } })).status, 429);
+  assert.equal((await call('/not-found', undefined, undefined, { headers: { 'x-forwarded-for': '192.0.2.10' } })).status, 404);
+});
+
+test('trusted_proxies rejects invalid startup configuration before touching the database', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'platform-invalid-proxy-')); t.after(() => rm(dir, { recursive: true, force: true }));
+  const database = join(dir, 'must-not-exist.db');
+  for (const trusted_proxies of [null, true, '127.0.0.1', [1], [''], ['localhost'], ['127.1'], ['127.0.0.1/32'], ['::/0'], ['[::1]'], ['127.0.0.1:80'], ['fe80::1%eth0'], [' 127.0.0.1 '], Array(17).fill('127.0.0.1')]) {
+    await assert.rejects(createPlatform({ listen: '127.0.0.1:0', database, public_origin: 'http://platform.test', secure_cookies: false, registration: true, trusted_proxies }, { async rpc() {} }), /trusted_proxies/);
+  }
+  await assert.rejects(stat(database), { code: 'ENOENT' });
+  const { call } = await apiFixture(t, { trusted_proxies: Array.from({ length: 16 }, (_, i) => `192.0.2.${i + 1}`) });
+  assert.equal((await call('/api/me')).status, 401);
+});
+
+test('trusted_proxies CLI flag is repeatable, canonicalized and validated before creating state', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'platform-proxy-config-')); t.after(() => rm(dir, { recursive: true, force: true }));
+  const cli = fileURLToPath(new URL('../../../scripts/configure-platform.mjs', import.meta.url)), exec = promisify(execFile);
+  const state = join(dir, 'configured');
+  await exec(process.execPath, [cli, '--state', state, '--origin', 'https://agent.example.test', '--fixture-url', 'http://127.0.0.1:9000', '--trusted-proxy', '::ffff:127.0.0.1', '--trusted-proxy', '2001:0DB8::1']);
+  const config = JSON.parse(await readFile(join(state, 'loop.json'), 'utf8'));
+  assert.deepEqual(config.platform.trusted_proxies, ['127.0.0.1', '2001:db8::1']); assert.equal(config.platform.secure_cookies, true);
+  const invalid = join(dir, 'invalid');
+  await assert.rejects(exec(process.execPath, [cli, '--state', invalid, '--trusted-proxy', '127.0.0.1/32']), error => error.code === 1 && /trusted_proxies/.test(error.stderr));
+  await assert.rejects(stat(invalid), { code: 'ENOENT' });
 });

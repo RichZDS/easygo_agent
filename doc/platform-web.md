@@ -11,6 +11,7 @@ const platform = await createPlatform({
   public_origin: 'http://localhost:8080',
   secure_cookies: false, // HTTPS 站点必须为 true
   registration: true,
+  trusted_proxies: [], // 仅列出实际受控代理的精确 IP；默认不信任转发头
   bootstrap_admin: { email: 'admin@example.test', password_env: 'PLATFORM_ADMIN_PASSWORD' }
 }, {
   rpc: async (method, params) => dispatch(method, params)
@@ -20,11 +21,59 @@ const platform = await createPlatform({
 // await platform.wallet.settle(params)
 ```
 
-`public_origin` 必须是无路径、无尾斜杠的完整 HTTP(S) origin。所有写请求必须带严格相等的 `Origin`，远程 TUI 也需要发送该头。HTTPS 要求 Secure cookie；TLS 可以在可信反向代理终止。请求限速只采用真实 socket 地址，不信任 `X-Forwarded-For`。不要把多个服务经任意代理全部映射到同一个无限流公网出口。
+`public_origin` 必须是无路径、无尾斜杠的完整 HTTP(S) origin。所有写请求必须带严格相等的 `Origin`，远程 TUI 也需要发送该头。HTTPS 要求 Secure cookie；TLS 可以在可信反向代理终止。`trusted_proxies` 默认空，限速沿用 socket 对端地址、忽略所有转发头。配置该精确 IP 白名单后，只对来自名单内代理的连接读取 `X-Forwarded-For`，让不同真实客户端独立限速；不会根据转发头推断 Origin、角色、账户或 namespace。
 
 bootstrap 密码通过指定环境变量读取，仅在第一次创建管理员时需要。最短 12 个字符、最多 1024 UTF-8 字节；已有普通用户不能被 bootstrap 静默提升。注册账户绑定随机独立 namespace、初始余额 0、固定 user 角色。密码为随机盐 scrypt，cookie 随机 256 bit，数据库只留 cookie SHA-256；HttpOnly、SameSite=Strict、7 天有效。登录轮换当前 cookie，注销立即撤销，禁用账户立即失去认证和预留权限；禁用不阻止已有实际用量入账。
 
 构建不需要新增包：Node 22 内建 SQLite、crypto、HTTP。运行目录必须保留 `web/` 与 `dist/` 同级：静态文件相对 `dist/platform/server.js` 查找，和当前工作目录无关。部署镜像需复制 `services/agent-loop/web/`。
+
+## HTTPS 反向代理与客户端地址
+
+`trusted_proxies?: string[]` 最多 16 个精确、无 scope ID 的 IPv4/IPv6 字面量；不支持主机名、CIDR、端口、方括号或通配范围，非法配置在启动时失败。IPv6 压缩写法/大小写会规范化；IPv4-mapped IPv6（如 `::ffff:127.0.0.1`）和对应 IPv4 使用同一白名单地址与限速键。白名单由启动配置固定，任何请求头都不能扩展它。
+
+解析规则：先核对真实 socket 对端；不受信则忽略所有转发头。对端受信时，仅解析 XFF，从右向左越过明确受信的代理地址，取第一个非白名单 IP 后立即停止。该信任边界左侧的数据来自不受信客户端，既不作为客户端地址，也不再解析：例如代理追加真实地址后的 `evil, 10.0.0.9` 取 `10.0.0.9`。右侧实际遍历到非法项、头缺失、总长度超过 2048 字节、超过 32 段，或整条链只有受信代理时，回退 socket 地址。`X-Real-IP` 和标准 `Forwarded` 均不参与解析，原始 XFF 不写日志。
+
+只把受控代理填写到白名单，使用 **应用实际看到的代理对端地址**（容器网络下不一定是 `127.0.0.1`）。代理必须覆盖客户端自带 XFF，或者在它右侧追加实际连接来源；不能原样转交而不追加，也不能预先用未经验证的头改写来源地址。入口代理应直接面向客户端；多级代理需要各级按同一规则处理，并把确实受控的中间代理 IP 列入名单。
+
+配置生成器支持重复参数，在 loop.json 的 platform 段写入规范化后的 IP：
+
+```bash
+node scripts/configure-platform.mjs --state /absolute/new-platform-state \
+  --origin https://agent.example.com \
+  --trusted-proxy 127.0.0.1 --trusted-proxy ::1
+```
+
+以下两个最小示例都假设代理和应用在同一主机，应用仅监听 `127.0.0.1:8080`，`public_origin=https://agent.example.com`、`secure_cookies=true`、`trusted_proxies=["127.0.0.1"]`，且域名/证书已经按实际环境配置。
+
+Caddyfile（使用默认的安全 XFF 处理，未启用对客户端转发头的额外信任）：
+
+```caddyfile
+agent.example.com {
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+Caddy 默认忽略传入请求自带的 `X-Forwarded-*` 值，并设置或追加上游转发头。这里保留该默认行为。参见 [Caddy reverse_proxy 官方文档](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy#defaults)。
+
+nginx（证书文件路径换成实际路径）：
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name agent.example.com;
+    ssl_certificate /etc/nginx/tls/fullchain.pem;
+    ssl_certificate_key /etc/nginx/tls/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+nginx 的 `$proxy_add_x_forwarded_for` 在已有 XFF 右侧追加实际 `$remote_addr`，没有原头时直接使用该地址；配合平台从右到左的信任边界，客户端伪造的左侧前缀不会成为限速地址。参见 [nginx proxy 模块官方文档](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#var_proxy_add_x_forwarded_for)。上述变更只调整两处 IP 限速键，不改变每用户/邮箱限额、CSRF、cookie、namespace 或钱包事务。
 
 ## HTTP 路由
 
@@ -47,7 +96,7 @@ bootstrap 密码通过指定环境变量读取，仅在第一次创建管理员�
 
 `params.namespace` 由认证层注入，浏览器显式传此字段会被拒绝。allowlist 只包括 platform-v1 的 agent session/run/catalog、workshop 和 knowledge 方法；钱包、服务配置和任意 RPC 代理不公开。回调仍必须对 session/task/run ID 进行注入 namespace 下的所有权检查。
 
-请求 JSON 上限 256 KiB，重复 JSON 字段、非对象和顶层未知参数被拒绝。具体 RPC params 的字段由既有 core/knowledge/workshop validator 校验。每 socket 300 次/分钟，每认证用户 240 次/分钟，认证端点每 socket 20 次/分钟、每邮箱 10 次/分钟，最多 4 个并行密码 KDF；限速键表上限 8192。页面采用严格 CSP，不内嵌脚本、不渲染模型 HTML。
+请求 JSON 上限 256 KiB，重复 JSON 字段、非对象和顶层未知参数被拒绝。具体 RPC params 的字段由既有 core/knowledge/workshop validator 校验。每解析后的客户端地址 300 次/分钟，每认证用户 240 次/分钟，认证端点每客户端地址 20 次/分钟、每邮箱 10 次/分钟，最多 4 个并行密码 KDF；限速键表上限 8192。页面采用严格 CSP，不内嵌脚本、不渲染模型 HTML。
 
 ## 钱包与持久化
 
@@ -94,3 +143,5 @@ node test/platform-browser.mjs
 脚本使用本地 dummy 账户与 fixture RPC，覆盖注册零余额、管理员发放和人工对账、计量对话、恶意 HTML 作为纯文字、工坊取消/续跑/结果、带版本记忆和技能修改、账本与 1440px/390px 布局。它不证明真实 Docker/provider/core 集成；这些属于 foreman 的最终整链验收。SQLite 会打印 Node experimental warning，保留该警告。
 
 补充大数据量浏览器验收沿用上面的三个环境变量，执行 `node test/platform-pagination-browser.mjs`。独立本地夹具覆盖 120 个会话、105 个任务、1205 条消息、230 条用量、126 条流水、105 个管理用户及 105 条待核对请求；验证旧页不受轮询/迟到 latest 响应覆盖、页间无重复、6 位小数积分保真、HTML 作为二进制下载、8 MiB 边界文件字节一致，以及 forbidden/changed/mismatched/oversized 四种错误。所有数字是夹具规模，不是线上性能或稳定性声明。`platform.test.mjs` 另有真实 HTTP 分页 metadata、账户隔离和 artifact allowlist/namespace 测试。
+
+可信代理回归在 `test/platform.test.mjs` 中通过真实 HTTP 请求覆盖：默认/非白名单对端不能伪造 XFF 绕过第 21 次登录限制；白名单后不同客户端独立计数、同客户端和同邮箱仍受限；右到左信任边界、非法/缺失/超长/超段数回退；IPv4-mapped socket、IPv6 等价写法；300/min 请求桶；启动配置拒绝；以及 `--trusted-proxy` 重复参数的实际配置文件输出。测试不部署或修改真实 nginx/Caddy，文档示例按官方说明编写。

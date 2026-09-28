@@ -21,6 +21,10 @@ import (
 // A task-local capability exposes only the selected model generation operation.
 // The child never receives the gateway identity or vendor credential.
 func startModelRelay(ctx context.Context, cfg *ModelGateway, namespace string, profile RuntimeProfile) (string, string, func(), error) {
+	return startModelRelayOn(ctx, cfg, namespace, profile, "tcp", "127.0.0.1:0")
+}
+
+func startModelRelayOn(ctx context.Context, cfg *ModelGateway, namespace string, profile RuntimeProfile, network, address string) (string, string, func(), error) {
 	if cfg == nil || !rpc.ValidNamespace(namespace) {
 		return "", "", nil, errors.New("model gateway unavailable")
 	}
@@ -34,7 +38,7 @@ func startModelRelay(ctx context.Context, cfg *ModelGateway, namespace string, p
 	}
 	transport := &http.Transport{TLSClientConfig: tlsConfig}
 	client := &http.Client{Transport: transport, Timeout: 120 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	listener, e := net.Listen("tcp", "127.0.0.1:0")
+	listener, e := net.Listen(network, address)
 	if e != nil {
 		return "", "", nil, e
 	}
@@ -45,7 +49,15 @@ func startModelRelay(ctx context.Context, cfg *ModelGateway, namespace string, p
 	}
 	token := hex.EncodeToString(secret)
 	path := map[string]string{"responses": "/v1/responses", "chat_completions": "/v1/chat/completions", "anthropic": "/v1/messages"}[profile.Protocol]
+	slots := make(chan struct{}, 8)
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case slots <- struct{}{}:
+			defer func() { <-slots }()
+		default:
+			http.Error(w, "model relay capacity exceeded", 429)
+			return
+		}
 		credential := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if r.Header.Get("X-Api-Key") != "" {
 			credential = r.Header.Get("X-Api-Key")
@@ -111,7 +123,7 @@ func startModelRelay(ctx context.Context, cfg *ModelGateway, namespace string, p
 		w.Header().Set("Cache-Control", "no-store")
 		w.Write(decoded)
 	})
-	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 15 * time.Second}
+	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 15 * time.Second, WriteTimeout: 150 * time.Second}
 	go server.Serve(listener)
 	return "http://" + listener.Addr().String() + "/v1", token, func() { server.Close(); transport.CloseIdleConnections() }, nil
 }

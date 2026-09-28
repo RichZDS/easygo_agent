@@ -51,6 +51,7 @@ type EngineConfig struct {
 }
 
 type Config struct {
+	Sandbox         SandboxConfig             `json:"sandbox,omitempty"`
 	RuntimeProfiles map[string]RuntimeProfile `json:"runtime_profiles,omitempty"`
 	ModelGateway    *ModelGateway             `json:"model_gateway,omitempty"`
 	Root            string                    `json:"root"`

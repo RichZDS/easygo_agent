@@ -12,7 +12,7 @@ import (
 )
 
 func writeRuntimeJSON(path string, value any) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	if err := mkdirNoSymlinks(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
 	for dir := filepath.Dir(path); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
@@ -64,6 +64,17 @@ func (r *CommandRunner) configureRuntime(ctx context.Context, in Invocation, arg
 			return nil, nil, cleanup, errors.New("runtime credential is unset")
 		}
 	}
+	args, err := configureRuntimeEndpoint(in, args, env, baseURL, key, writeRuntimeJSON)
+	if err != nil {
+		cleanup()
+		return nil, nil, func() {}, err
+	}
+	return args, []string{key}, cleanup, nil
+}
+
+// writeConfig maps container paths to controller paths without rewriting content.
+func configureRuntimeEndpoint(in Invocation, args []string, env map[string]string, baseURL, key string, writeConfig func(string, any) error) ([]string, error) {
+	p := in.Workflow.RuntimeSpec
 	env["EASYGO_RUNTIME_API_KEY"] = key
 	model := p.model()
 	home := env["HOME"]
@@ -93,9 +104,8 @@ func (r *CommandRunner) configureRuntime(ctx context.Context, in Invocation, arg
 		env["PI_OFFLINE"] = "1"
 		env["PI_TELEMETRY"] = "0"
 		config := map[string]any{"providers": map[string]any{"easygo": map[string]any{"baseUrl": baseURL, "api": apiName(p.Protocol), "apiKey": "${EASYGO_RUNTIME_API_KEY}", "models": []any{map[string]any{"id": model, "name": model, "reasoning": false, "input": []string{"text"}, "contextWindow": 128000, "maxTokens": 8192}}}}}
-		if err := writeRuntimeJSON(filepath.Join(dir, "models.json"), config); err != nil {
-			cleanup()
-			return nil, nil, func() {}, err
+		if err := writeConfig(filepath.Join(dir, "models.json"), config); err != nil {
+			return nil, err
 		}
 		session := in.SessionID
 		if session == "" {
@@ -117,9 +127,8 @@ func (r *CommandRunner) configureRuntime(ctx context.Context, in Invocation, arg
 			"tools":   map[string]any{"allow": tools, "fs": map[string]any{"workspaceOnly": true}},
 			"plugins": map[string]any{"enabled": false},
 		}
-		if err := writeRuntimeJSON(env["OPENCLAW_CONFIG_PATH"], config); err != nil {
-			cleanup()
-			return nil, nil, func() {}, err
+		if err := writeConfig(env["OPENCLAW_CONFIG_PATH"], config); err != nil {
+			return nil, err
 		}
 		session := in.SessionID
 		if session == "" {
@@ -127,5 +136,5 @@ func (r *CommandRunner) configureRuntime(ctx context.Context, in Invocation, arg
 		}
 		args = append(args, "--session-id", session, "--message", in.Workflow.Instructions+"\n\nUser input:\n"+in.Input)
 	}
-	return args, []string{key}, cleanup, nil
+	return args, nil
 }

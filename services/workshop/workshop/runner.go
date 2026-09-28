@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -147,27 +148,34 @@ func (r *CommandRunner) Run(ctx context.Context, in Invocation, emit func(Event)
 	}
 	defer cleanup()
 	secrets = append(secrets, runtimeSecrets...)
+	return runNative(ctx, in.Workflow.Engine, r.maxOutput, secrets, emit, func(childCtx context.Context, stdout, stderr io.Writer) error {
+		cmd := exec.CommandContext(childCtx, engine.Binary, args...)
+		cmd.Dir = in.Workspace
+		for name, value := range env {
+			cmd.Env = append(cmd.Env, name+"="+value)
+		}
+		sort.Strings(cmd.Env)
+		cmd.Stdin = strings.NewReader(in.Workflow.Instructions + "\n\nUser input:\n" + in.Input)
+		if err := configureProcess(cmd); err != nil {
+			return err
+		}
+		cmd.WaitDelay = time.Second
+		cmd.Stdout, cmd.Stderr = stdout, stderr
+		err := cmd.Run()
+		killProcessGroup(cmd)
+		return err
+	})
+}
+
+// runNative keeps parsing, output limits, redaction and terminal/session checks
+// identical across explicit host and mandatory Docker execution.
+func runNative(ctx context.Context, engine string, maxOutput int, secrets []string, emit func(Event) error, execute func(context.Context, io.Writer, io.Writer) error) (Result, error) {
 	redact := redactor(secrets)
 	childCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	cmd := exec.CommandContext(childCtx, engine.Binary, args...)
-	cmd.Dir = in.Workspace
-	for name, value := range env {
-		cmd.Env = append(cmd.Env, name+"="+value)
-	}
-	sort.Strings(cmd.Env)
-	cmd.Stdin = strings.NewReader(in.Workflow.Instructions + "\n\nUser input:\n" + in.Input)
-	if err := configureProcess(cmd); err != nil {
-		return Result{}, err
-	}
-	cmd.WaitDelay = time.Second
-	parser := &streamParser{engine: in.Workflow.Engine, emit: emit, redact: redact, limit: r.maxOutput, cancel: cancel}
+	parser := &streamParser{engine: engine, emit: emit, redact: redact, limit: maxOutput, cancel: cancel}
 	diagnostics := &boundedBuffer{limit: diagnosticLimit + maxSecretLength(secrets)}
-	cmd.Stdout, cmd.Stderr = parser, diagnostics
-	err = cmd.Run()
-	// WaitDelay prevents inherited pipes from holding the copy goroutines forever;
-	// kill any remaining members even when the parent exits on its own.
-	killProcessGroup(cmd)
+	err := execute(childCtx, parser, diagnostics)
 	parseErr := parser.finish()
 	result := parser.result
 	text := redact(diagnostics.buf.String())

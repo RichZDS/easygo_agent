@@ -10,15 +10,16 @@ go test ./...
 go run ./cmd/server --config /absolute/path/to/config.json
 ```
 
-配置包括 `listen`、`tls`、`authorization` 和 `workshop`。本机启动时使用本机可访问的证书与数据路径；Docker 示例使用 `/data/workshop`，整个目录都在工坊专属数据卷中。
+配置包括 `listen`、`tls`、`authorization` 和 `workshop`。托管部署显式设置 `workshop.sandbox.mode="docker"`，并把控制器内的 `root` 映射到 Docker daemon 可见的 `sandbox.host_root`；启动时会验证映射。完整配置和离线容器验证命令见 [任务容器说明](../../deploy/runtime/README.md)。
 
 ```bash
 # 仓库根目录
-docker build -f services/workshop/Dockerfile .
+docker build -f services/workshop/Dockerfile -t easygo-workshop-controller:local .
+docker build -f deploy/runtime/Dockerfile -t easygo-task-runtime:local .
 ```
 
-镜像安装 Node 26、Python、git，以及固定版本 Codex 0.157.1、Claude Code 2.1.281、Pi 0.87.1 和 OpenClaw 2026.9.6。对应构建参数是 `CODEX_VERSION`、`CLAUDE_CODE_VERSION`、`PI_VERSION`、`OPENCLAW_VERSION`；更改版本后需验证 CLI 参数和事件兼容性。进程以 UID 1000 运行，不挂 Docker socket。
+控制器镜像只包含 Go 服务和 Docker 客户端；Docker socket 与服务证书只挂载给控制器。独立任务镜像安装 Node 26、Python、git，以及固定版本 Codex 0.157.1、Claude Code 2.1.281、Pi 0.87.1 和 OpenClaw 2026.9.6。构建参数为 `CODEX_VERSION`、`CLAUDE_CODE_VERSION`、`PI_VERSION`、`OPENCLAW_VERSION`；更改版本后需验证 CLI 参数和事件兼容性。每次调用创建一个 UID 1000、无外部网络、只读根文件系统且有资源上限的容器，只挂本任务工作区和一次性模型 relay socket。
 
-示例 Codex 引擎只接收 allowlist 中的 `CODEX_API_KEY`。CLI 默认家目录位于每个任务工作区的 `.workshop-home`，随数据卷持久化；不使用宿主登录目录。进程退出码为 0 仍不足以认定成功，必须收到引擎终态并核验配置的产物。
+旧的非托管本机示例通过 allowlist 接收 `CODEX_API_KEY`；Docker 模式禁止该路径，所有 runtime 必须使用 gateway profile。CLI 默认家目录位于每个任务工作区的 `.workshop-home`，随数据卷持久化；不使用宿主登录目录。进程退出码为 0 仍不足以认定成功，必须收到引擎终态并核验配置的产物。
 
 部署、权限、证书和验证边界见 [服务说明](../README.md)。

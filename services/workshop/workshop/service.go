@@ -80,8 +80,29 @@ func New(cfg Config, runner Runner) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err = os.MkdirAll(root, 0700); err != nil {
+	if cfg.Sandbox.Mode == "docker" {
+		err = mkdirNoSymlinks(root, 0700)
+	} else {
+		err = os.MkdirAll(root, 0700)
+	}
+	if err != nil {
 		return nil, err
+	}
+	if cfg.Sandbox.Mode != "" && cfg.Sandbox.Mode != "host" && cfg.Sandbox.Mode != "docker" {
+		return nil, fmt.Errorf("%w: unknown sandbox mode", ErrInvalid)
+	}
+	if cfg.Sandbox.Mode == "docker" {
+		if err := noSymlinks(root); err != nil {
+			return nil, err
+		}
+		if runner != nil {
+			return nil, errors.New("Docker mode cannot accept a replacement runner")
+		}
+		for _, e := range cfg.Engines {
+			if len(e.EnvAllowlist) != 0 {
+				return nil, errors.New("Docker mode forbids environment allowlists")
+			}
+		}
 	}
 	root, err = filepath.EvalSymlinks(root)
 	if err != nil {
@@ -97,6 +118,9 @@ func New(cfg Config, runner Runner) (*Service, error) {
 		}
 		if p.GatewayModel != "" && cfg.ModelGateway == nil {
 			return nil, fmt.Errorf("%w: model gateway required", ErrInvalid)
+		}
+		if cfg.Sandbox.Mode == "docker" && p.GatewayModel == "" {
+			return nil, errors.New("Docker mode requires gateway runtime profiles")
 		}
 		s.runtimes[id] = p
 	}
@@ -124,12 +148,20 @@ func New(cfg Config, runner Runner) (*Service, error) {
 		}
 		w.Artifacts = append([]string(nil), w.Artifacts...)
 		w.AllowedRuntimes = append([]string(nil), w.AllowedRuntimes...)
+		if cfg.Sandbox.Mode == "docker" && w.RuntimeSpec == nil {
+			return nil, errors.New("Docker mode requires workflow runtime profiles")
+		}
 		s.workflows[w.Name] = w
 	}
 	if runner == nil {
-		s.runner, err = NewCommandRunner(cfg.Engines, cfg.MaxOutputBytes)
-		if err == nil {
-			s.runner.(*CommandRunner).gateway = cfg.ModelGateway
+		if cfg.Sandbox.Mode == "docker" {
+			cfg.Root = root
+			s.runner, err = NewDockerRunner(cfg)
+		} else {
+			s.runner, err = NewCommandRunner(cfg.Engines, cfg.MaxOutputBytes)
+			if err == nil {
+				s.runner.(*CommandRunner).gateway = cfg.ModelGateway
+			}
 		}
 		if err != nil {
 			return nil, err
@@ -148,6 +180,15 @@ func New(cfg Config, runner Runner) (*Service, error) {
 	s.db, err = bolt.Open(filepath.Join(root, "workshop.db"), 0600, &bolt.Options{Timeout: 200 * time.Millisecond})
 	if err != nil {
 		return nil, fmt.Errorf("open workshop store: %w", err)
+	}
+	if docker, ok := s.runner.(*DockerRunner); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		err = docker.Initialize(ctx)
+		cancel()
+		if err != nil {
+			_ = s.db.Close()
+			return nil, fmt.Errorf("initialize Docker isolation: %w", err)
+		}
 	}
 	err = s.db.Update(func(tx *bolt.Tx) error {
 		for _, name := range [][]byte{tasksBucket, eventsBucket, keysBucket} {

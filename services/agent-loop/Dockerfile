@@ -20,7 +20,8 @@ WORKDIR /app
 COPY services/agent-loop/package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
+COPY services/agent-loop/web ./web
 RUN mkdir -p /data && chown 1000:1000 /data
 USER 1000:1000
-EXPOSE 8442
+EXPOSE 8442 8080
 CMD ["node", "dist/server.js", "--config", "/run/easygo/config.json"]

@@ -6,12 +6,14 @@ import { pathToFileURL } from 'node:url';
 import { Authorizer, tlsOptions } from './rpc.js';
 import { Store } from './store.js';
 import { Loop } from './loop.js';
+import { Knowledge } from './knowledge/index.js';
+import { createPlatform } from './platform/server.js';
 import { parseJSON } from './strict-json.mjs';
 import { METHODS, type Config } from './types.js';
 import { fields, integer, namespace, object, rpcFailure, RpcError, string } from './validation.js';
 
 export function parseConfig(value: unknown): Config {
-  const c = fields(value, ['listen', 'tls', 'authorization', 'database', 'gateway', 'workshop', 'model', 'streaming', 'max_steps', 'context_bytes', 'concurrency', 'system_prompt']);
+  const c = fields(value, ['listen', 'tls', 'authorization', 'database', 'gateway', 'workshop', 'model', 'streaming', 'max_steps', 'context_bytes', 'concurrency', 'system_prompt','platform','knowledge']);
   const tls = fields(c.tls, ['cert_file', 'key_file', 'ca_file']);
   for (const k of ['cert_file', 'key_file', 'ca_file']) string(tls[k], 4096);
   if (!Array.isArray(c.authorization)) throw new Error('authorization must be an array');
@@ -32,6 +34,7 @@ export function parseConfig(value: unknown): Config {
   if (c.system_prompt !== undefined && (typeof c.system_prompt !== 'string' || Buffer.byteLength(c.system_prompt) > 65536)) throw new Error('Invalid system_prompt');
   if (c.streaming !== undefined && typeof c.streaming !== 'boolean') throw new Error('Invalid streaming');
   integer(c.concurrency, 4, 32, 1); integer(c.max_steps, 20, 100, 0); integer(c.context_bytes, 128000, 4 * 1024 * 1024, 512);
+  if(c.knowledge!==undefined){const k=fields(c.knowledge,['database','profile_limit','consolidate_interval_ms']);string(k.database,4096);integer(k.profile_limit,5,20,1);integer(k.consolidate_interval_ms,86400000,2147483647,1000);}
   return c as unknown as Config;
 }
 async function readBody(req: IncomingMessage): Promise<unknown> {
@@ -58,8 +61,19 @@ export async function startServer(input: Config) {
   const store = new Store(config.database ?? '/data/agent.sqlite');
   let loop: Loop;
   try { loop = new Loop(config, store); } catch (error) { store.close(); throw error; }
-  let closing = false;
-  function dispatch(method: string, value: unknown) {
+  let closing = false, ready = false;
+  let platform: Awaited<ReturnType<typeof createPlatform>> | undefined;
+  let knowledge: Knowledge | undefined;
+  function dispatch(method: string, value: unknown): unknown | Promise<unknown> {
+    if (method==='platform.wallet.reserve' || method==='platform.wallet.settle') {
+      if(!platform) throw new RpcError(-32601,'platform_disabled');
+      return method.endsWith('.reserve') ? platform.wallet.reserve(value) : platform.wallet.settle(value);
+    }
+    if(method.startsWith('agent.memory.') || method.startsWith('agent.skills.')) {
+      if(!knowledge) throw new RpcError(-32601,'knowledge_disabled');
+      return knowledge.dispatch(method,value);
+    }
+    if(method.startsWith('workshop.')) return loop.workshopCall(method,object(value));
     const allowed: Record<string, string[]> = {
       'agent.session.create': [], 'agent.session.list': ['offset', 'limit'], 'agent.session.history': ['session_id', 'after', 'limit'],
       'agent.workshop.catalog': [], 'agent.run.start': ['session_id', 'input', 'idempotency_key', 'workshop_runtime'], 'agent.run.get': ['run_id'], 'agent.run.cancel': ['run_id'], 'agent.run.events': ['run_id', 'after', 'limit']
@@ -86,7 +100,7 @@ export async function startServer(input: Config) {
     let id: string | null = null; let identity: string | undefined; let method: string | undefined; let ns: string | undefined; let errorCode: string | undefined;
     const started = Date.now();
     try {
-      if (closing) throw new RpcError(-32029, 'shutting_down');
+      if (closing || !ready) throw new RpcError(-32029, 'shutting_down');
       if (req.url === '/healthz' && req.method === 'GET') {
         identity = authorization.authorize(req.socket as TLSSocket, 'health'); method = 'health'; loop.assertAvailable();
         res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"status":"ok"}'); return;
@@ -114,21 +128,27 @@ export async function startServer(input: Config) {
       console.info(JSON.stringify({ rpc_id: id, identity, method, namespace: ns, elapsed_ms: Date.now() - started, error_code: errorCode }));
     }
   }
+  try {
+    if(config.knowledge) knowledge=new Knowledge(config.knowledge,{generate:(ns,messages)=>loop.knowledgeGenerate(ns,messages)});
+    if(config.platform) platform=await createPlatform(config.platform,{rpc:async(method,params)=>{if(!ready||closing)throw new RpcError(-32029,'starting_or_stopping');return await dispatch(method,params);}});
+  }catch(error){await knowledge?.close();await loop.close();store.close();throw error;}
   const server = https.createServer({ ...options, requestCert: true, maxHeaderSize: 16384 }, (req, res) => { void handle(req, res); });
   server.requestTimeout = 30_000; server.headersTimeout = 15_000; server.timeout = 30_000;
   try {
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(address.port, address.host, () => { server.removeListener('error', reject); resolve(); }); });
-  } catch (error) { await loop.close(); store.close(); throw error; }
+  } catch (error) { await platform?.close();await knowledge?.close(); await loop.close(); store.close(); throw error; }
+  ready=true;
+  if(knowledge)loop.attachKnowledge(knowledge);
   loop.kick();
   let closePromise: Promise<void> | undefined;
   return {
-    server, address: server.address(),
+    server, address: server.address(), platform_address:platform?.address,
     close(): Promise<void> {
       closePromise ??= (async () => {
         closing = true;
         const closed = new Promise<void>((resolve, reject) => server.close(err => err ? reject(err) : resolve()));
         server.closeAllConnections();
-        await loop.close(); store.close(); await closed;
+        await loop.close(); await platform?.close(); store.close(); await closed;
       })();
       return closePromise;
     }

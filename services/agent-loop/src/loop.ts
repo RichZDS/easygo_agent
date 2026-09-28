@@ -1,6 +1,7 @@
 import type { Config, Message, Request, Response, Run } from './types.js';
 import { RpcClient } from './rpc.js';
 import { Store } from './store.js';
+import type { Knowledge } from './knowledge/index.js';
 import { executeTool, recoverableToolError, TOOLS } from './tools.js';
 import { object, RpcError, string } from './validation.js';
 
@@ -28,6 +29,8 @@ export function modelResponse(value: unknown): Response {
 export class Loop {
   private active = new Map<string, { controller: AbortController; promise: Promise<void>; session: string }>();
   private stopped = false;
+  private knowledge?: Knowledge;
+  private background = new AbortController();
   private heartbeat: NodeJS.Timeout;
   private gateway: RpcClient;
   private workshop: RpcClient;
@@ -35,7 +38,7 @@ export class Loop {
     this.gateway = new RpcClient(config.tls, config.gateway);
     this.workshop = new RpcClient(config.tls, config.workshop);
     this.heartbeat = setInterval(() => {
-      try { store.heartbeat(); }
+      try { store.heartbeat(); this.syncKnowledge(); }
       catch { this.stopped = true; for (const work of this.active.values()) work.controller.abort(new RpcError(-32603, 'ownership_lost')); this.gateway.close(); this.workshop.close(); }
     }, 5000);
     this.heartbeat.unref();
@@ -49,6 +52,23 @@ export class Loop {
     const result = await this.workshop.call('workshop.workflows', { namespace: ns });
     if (!Array.isArray(result)) throw new RpcError(-32000, 'invalid_workshop_catalog');
     return result;
+  }
+  attachKnowledge(knowledge: Knowledge) { this.knowledge=knowledge; this.syncKnowledge(); knowledge.start(); }
+  private syncKnowledge() {
+    if (!this.knowledge || this.stopped) return;
+    for (const item of this.store.knowledgePending()) {
+      try { this.knowledge.recordCompleted(item.namespace,item.run_id,item.messages);this.store.acknowledgeKnowledge(item.run_id); }
+      catch { console.error(JSON.stringify({kind:'knowledge_ingestion_pending',run_id:item.run_id})); }
+    }
+  }
+  async knowledgeGenerate(ns:string,messages:Message[]):Promise<Response> {
+    this.assertAvailable();
+    return modelResponse(await this.gateway.call('gateway.generate',{namespace:ns,request:{model:this.config.model??'chat',messages,tool_choice:'none',max_output_tokens:2048},stream:false},AbortSignal.any([this.background.signal,AbortSignal.timeout(60000)])));
+  }
+  async workshopCall(method:string,params:Record<string,unknown>):Promise<unknown> {
+    this.assertAvailable();
+    if (!['workshop.submit','workshop.get','workshop.list','workshop.cancel','workshop.resume','workshop.result','workshop.events'].includes(method)) throw new RpcError(-32601,'method_not_found');
+    return this.workshop.call(method,params,this.background.signal);
   }
   kick() {
     if (this.stopped) return;
@@ -69,14 +89,15 @@ export class Loop {
     return this.store.finish(run, 'canceled', undefined, undefined, { code: 'canceled', message: 'Run canceled' });
   }
   async close() {
-    this.stopped = true; clearInterval(this.heartbeat);
+    this.stopped = true; clearInterval(this.heartbeat); this.background.abort(new RpcError(-32000,'interrupted'));
     for (const work of this.active.values()) work.controller.abort(new RpcError(-32000, 'interrupted'));
     this.gateway.close(); this.workshop.close();
     await Promise.all([...this.active.values()].map(a => a.promise));
+    await this.knowledge?.close();
   }
-  private request(messages: Message[], enabled: boolean): Request {
+  private request(run:Run, messages: Message[], enabled: boolean): Request {
     const system: Message[] = this.config.system_prompt ? [{ role: 'system', content: [{ type: 'text', text: this.config.system_prompt }] }] : [];
-    return { model: this.config.model ?? 'chat', messages: [...system, ...messages], ...(enabled ? { tools: TOOLS } : { tool_choice: 'none' }) };
+    return { model: this.config.model ?? 'chat', messages: [...system,...(this.knowledge?.prompt(run.namespace)??[]), ...messages], ...(enabled ? { tools: [...TOOLS,...(this.knowledge?.tools()??[])] } : { tool_choice: 'none' }) };
   }
   private async generate(run: Run, request: Request, signal: AbortSignal, summary = false): Promise<Response> {
     signal.throwIfAborted(); this.store.assertOwner();
@@ -88,8 +109,9 @@ export class Loop {
   }
   private async compact(run: Run, messages: Message[], enabled: boolean, signal: AbortSignal): Promise<Message[]> {
     const budget = this.config.context_bytes ?? 128_000;
-    const size = (m: Message[]) => Buffer.byteLength(JSON.stringify(this.request(m, enabled)));
+    const size = (m: Message[]) => Buffer.byteLength(JSON.stringify(this.request(run,m, enabled)));
     if (size(messages) <= budget) return messages;
+    if (size([])>budget) throw new RpcError(-32000,'context_budget_exceeded','System knowledge exceeds context budget');
     // Called only at coherent barriers: never split a tool-call/result batch.
     const response = await this.generate(run, {
       model: this.config.model ?? 'chat', tool_choice: 'none',
@@ -115,11 +137,11 @@ export class Loop {
       for (let step = 0; step <= (this.config.max_steps ?? 20); step++) {
         const enabled = step < (this.config.max_steps ?? 20);
         messages = await this.compact(run, messages, enabled, signal);
-        const response = await this.generate(run, this.request(messages, enabled), signal);
+        const response = await this.generate(run, this.request(run,messages, enabled), signal);
         const calls = response.message.content.filter(b => b.type === 'tool_call');
         if (!calls.length) {
           signal.throwIfAborted();
-          this.store.finish(run, 'completed', [...messages, response.message], response); return;
+          this.store.finish(run, 'completed', [...messages, response.message], response); this.syncKnowledge(); return;
         }
         // Persist the complete response before validating or invoking any side effect.
         this.store.append(run, response.message, { usage: response.usage, cost: response.cost, finish_reason: response.finish_reason });
@@ -133,7 +155,8 @@ export class Loop {
         for (const call of calls) {
           signal.throwIfAborted(); this.store.assertOwner();
           let result: unknown;
-          try { result = await executeTool(call, run, this.workshop, signal); }
+          const knowledgeTool=this.knowledge?.tools().some(t=>t.name===call.name)??false;
+          try { result = knowledgeTool ? await this.knowledge!.execute(call,run.namespace,signal) : await executeTool(call, run, this.workshop, signal); }
           catch (error) {
             signal.throwIfAborted();
             const code = error instanceof RpcError ? error.reason : error instanceof Error && error.name === 'TimeoutError' ? 'deadline_exceeded' : 'tool_failed';
@@ -141,7 +164,7 @@ export class Loop {
             const message: Message = { role: 'tool', content: [{ type: 'tool_result', id: call.id, name: call.name, text: JSON.stringify(data), is_error: true }] };
             // Failed commits still throw before any subsequent tool or model call.
             this.store.append(run, message, {}); messages.push(message);
-            if (!recoverableToolError(error)) throw error;
+            if (!recoverableToolError(error) && !(knowledgeTool && error instanceof RpcError && [-32004,-32009].includes(error.code))) throw error;
             continue;
           }
           signal.throwIfAborted();

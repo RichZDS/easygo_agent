@@ -18,6 +18,8 @@ export interface TLSConfig { cert_file: string; key_file: string; ca_file: strin
 export interface Authorization { id: string; cert_file: string; methods: string[]; namespaces: string[] }
 export interface Endpoint { url: string; peer_certificate_file: string }
 export interface Config {
+  platform?: import('./platform/server.js').PlatformConfig;
+  knowledge?: import('./knowledge/index.js').KnowledgeConfig;
   listen?: string; tls: TLSConfig; authorization: Authorization[]; database?: string;
   gateway: Endpoint; workshop: Endpoint; model?: string; streaming?: boolean;
   max_steps?: number; context_bytes?: number; concurrency?: number; system_prompt?: string;

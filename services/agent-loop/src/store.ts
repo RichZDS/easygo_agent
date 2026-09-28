@@ -23,7 +23,8 @@ export class Store {
         CREATE TABLE IF NOT EXISTS messages (seq INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES sessions(id), run_id TEXT NOT NULL REFERENCES runs(id), message TEXT NOT NULL, metadata TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL REFERENCES runs(id), kind TEXT NOT NULL, data TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS messages_session ON messages(session_id, seq);
-        CREATE INDEX IF NOT EXISTS events_run ON events(run_id, seq);`);
+        CREATE INDEX IF NOT EXISTS events_run ON events(run_id, seq);
+        CREATE TABLE IF NOT EXISTS knowledge_outbox (run_id TEXT PRIMARY KEY REFERENCES runs(id), namespace TEXT NOT NULL);`);
       this.db.exec('BEGIN IMMEDIATE');
       const previous = this.db.prepare('SELECT * FROM ownership WHERE id=1').get() as Row | undefined;
       if (previous && Number(previous.expires) > Date.now()) throw new RpcError(-32009, 'database_owned', 'Database already has an active owner');
@@ -78,7 +79,8 @@ export class Store {
   history(ns: string, id: string, after: number, limit: number) {
     this.session(ns, id);
     const rows = this.db.prepare('SELECT seq,run_id,message,metadata FROM messages WHERE session_id=? AND seq>? ORDER BY seq LIMIT ?').all(id, after, limit + 1) as Row[];
-    return { messages: rows.slice(0, limit).map(r => ({ seq: r.seq, run_id: r.run_id, ...JSON.parse(String(r.message)), metadata: JSON.parse(String(r.metadata)) })), next_after: rows.length > limit ? rows[limit - 1]?.seq ?? after : null };
+    const runRows = this.db.prepare("SELECT * FROM runs WHERE namespace=? AND session_id=? ORDER BY CASE WHEN status IN ('queued','running') THEN 0 ELSE 1 END, seq DESC LIMIT 101").all(ns,id) as Row[];
+    return { runs:runRows.slice(0,100).map(row=>{const raw=String(row.input);const points=[...raw];return {...this.runView(row),input:points.slice(0,1024).join(''),input_truncated:points.length>1024};}), runs_truncated:runRows.length>100, messages: rows.slice(0, limit).map(r => ({ seq: r.seq, run_id: r.run_id, ...JSON.parse(String(r.message)), metadata: JSON.parse(String(r.metadata)) })), next_after: rows.length > limit ? rows[limit - 1]?.seq ?? after : null };
   }
   start(ns: string, session: string, input: string, key: string, runtime = ''): Run {
     return this.transaction(() => {
@@ -143,12 +145,19 @@ export class Store {
         if (!context || !response || current.status !== 'running') throw new Error('Invalid completion');
         this.message(run, response.message, { usage: response.usage, cost: response.cost, finish_reason: response.finish_reason });
         this.db.prepare('UPDATE sessions SET context=? WHERE id=?').run(JSON.stringify(context), run.session_id);
+        this.db.prepare('INSERT OR IGNORE INTO knowledge_outbox(run_id,namespace) VALUES(?,?)').run(run.id,run.namespace);
       }
       this.db.prepare('UPDATE runs SET status=?,result=?,error=? WHERE id=?').run(status, response ? JSON.stringify(response) : null, error ? JSON.stringify(error) : null, run.id);
       this.event(run.id, 'terminal', { status, ...(error ? { error } : {}) });
       return this.get(run.namespace, run.id);
     });
   }
+  knowledgePending(limit = 100): Array<{namespace:string;run_id:string;messages:Message[]}> {
+    this.assertOwner();
+    const rows=this.db.prepare('SELECT namespace,run_id FROM knowledge_outbox ORDER BY rowid LIMIT ?').all(limit) as Row[];
+    return rows.map(row=>({namespace:String(row.namespace),run_id:String(row.run_id),messages:(this.db.prepare('SELECT message FROM messages WHERE run_id=? ORDER BY seq').all(row.run_id!) as Row[]).map(m=>JSON.parse(String(m.message)) as Message)}));
+  }
+  acknowledgeKnowledge(runID:string) {this.transaction(()=>this.db.prepare('DELETE FROM knowledge_outbox WHERE run_id=?').run(runID));}
   events(ns: string, id: string, after: number, limit: number) {
     this.get(ns, id);
     const rows = this.db.prepare('SELECT * FROM events WHERE run_id=? AND seq>? ORDER BY seq LIMIT ?').all(id, after, limit + 1) as Row[];

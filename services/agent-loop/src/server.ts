@@ -75,7 +75,7 @@ export async function startServer(input: Config) {
     }
     if(method.startsWith('workshop.')) return loop.workshopCall(method,object(value));
     const allowed: Record<string, string[]> = {
-      'agent.session.create': [], 'agent.session.list': ['offset', 'limit'], 'agent.session.history': ['session_id', 'after', 'limit'],
+      'agent.session.create': [], 'agent.session.list': ['offset', 'limit'], 'agent.session.history': ['session_id', 'after', 'before', 'limit'],
       'agent.workshop.catalog': [], 'agent.run.start': ['session_id', 'input', 'idempotency_key', 'workshop_runtime'], 'agent.run.get': ['run_id'], 'agent.run.cancel': ['run_id'], 'agent.run.events': ['run_id', 'after', 'limit']
     };
     if (!METHODS.includes(method)) throw new RpcError(-32601, 'method_not_found');
@@ -85,7 +85,7 @@ export async function startServer(input: Config) {
       case 'agent.workshop.catalog': return loop.workshopCatalog(ns);
       case 'agent.session.create': return store.createSession(ns);
       case 'agent.session.list': return store.listSessions(ns, integer(p.offset, 0, 2147483647), integer(p.limit, 20, 100));
-      case 'agent.session.history': return store.history(ns, string(p.session_id), integer(p.after, 0, Number.MAX_SAFE_INTEGER), integer(p.limit, 100, 1000));
+      case 'agent.session.history': return store.history(ns, string(p.session_id), integer(p.after, 0, Number.MAX_SAFE_INTEGER), integer(p.limit, 100, 1000), p.before===undefined?undefined:integer(p.before,0,Number.MAX_SAFE_INTEGER,1));
       case 'agent.run.start': {
         loop.assertAvailable();
         const run = store.start(ns, string(p.session_id), string(p.input, 32768), string(p.idempotency_key, 256), p.workshop_runtime === undefined ? '' : string(p.workshop_runtime));

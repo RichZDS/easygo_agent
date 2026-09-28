@@ -272,3 +272,18 @@ test('read pagination exposes all rows with exact end cursors and namespace-boun
   assert.equal(artifact.status, 200); assert.equal(seen.at(-1).params.namespace, user.data.user.namespace); assert.equal(seen.at(-1).method, 'workshop.artifact');
   assert.equal((await call('/api/rpc', { method: 'workshop.artifact', params: { namespace: 'other', task_id: 'task', path: 'result.txt' } }, user.cookie)).status, 400);
 });
+
+
+test('non-string settlement/reconciliation enums never mutate holds or usage', async t => {
+  const {store,wallet}=await fixture(t);grant(store,1000000);wallet.reserve(reserve('strict-enum'));
+  const before=store.walletView('account-a');
+  for(const value of [['settle'],['release'],{},null,1,true]) {
+    assert.throws(()=>wallet.resolve({namespace:'account-a',request_id:'strict-enum',decision:value,reason:'malformed enum',idempotency_key:'bad'},'admin'),reason('invalid_decision'));
+    assert.deepEqual(store.walletView('account-a'),before);
+  }
+  for(const value of [['complete'],['rejected'],['uncertain'],{},null,1,true]) {
+    assert.throws(()=>wallet.settle(settle('strict-enum',{outcome:value})),reason('invalid_outcome'));
+    assert.deepEqual(store.walletView('account-a'),before);
+  }
+  assert.equal(store.usage('account-a')[0].settlement,null);
+});

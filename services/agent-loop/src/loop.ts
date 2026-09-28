@@ -67,7 +67,7 @@ export class Loop {
   }
   async workshopCall(method:string,params:Record<string,unknown>):Promise<unknown> {
     this.assertAvailable();
-    if (!['workshop.submit','workshop.get','workshop.list','workshop.cancel','workshop.resume','workshop.result','workshop.events'].includes(method)) throw new RpcError(-32601,'method_not_found');
+    if (!['workshop.submit','workshop.get','workshop.list','workshop.cancel','workshop.resume','workshop.result','workshop.events','workshop.artifact'].includes(method)) throw new RpcError(-32601,'method_not_found');
     return this.workshop.call(method,params,this.background.signal);
   }
   kick() {

@@ -76,11 +76,13 @@ export class Store {
     const sessions = this.db.prepare('SELECT id,namespace,created_at FROM sessions WHERE namespace=? ORDER BY rowid LIMIT ? OFFSET ?').all(ns, limit + 1, offset);
     return { sessions: sessions.slice(0, limit), next_offset: sessions.length > limit ? offset + limit : null };
   }
-  history(ns: string, id: string, after: number, limit: number) {
+  history(ns: string, id: string, after: number, limit: number, before?: number) {
     this.session(ns, id);
-    const rows = this.db.prepare('SELECT seq,run_id,message,metadata FROM messages WHERE session_id=? AND seq>? ORDER BY seq LIMIT ?').all(id, after, limit + 1) as Row[];
+    if(before!==undefined&&after!==0) throw new RpcError(-32602,'conflicting_cursors');
+    const rows = (before===undefined ? this.db.prepare('SELECT seq,run_id,message,metadata FROM messages WHERE session_id=? AND seq>? ORDER BY seq LIMIT ?').all(id, after, limit + 1) : this.db.prepare('SELECT seq,run_id,message,metadata FROM messages WHERE session_id=? AND seq<? ORDER BY seq DESC LIMIT ?').all(id,before,limit+1)) as Row[];
+    const page=rows.slice(0,limit);if(before!==undefined)page.reverse();
     const runRows = this.db.prepare("SELECT * FROM runs WHERE namespace=? AND session_id=? ORDER BY CASE WHEN status IN ('queued','running') THEN 0 ELSE 1 END, seq DESC LIMIT 101").all(ns,id) as Row[];
-    return { runs:runRows.slice(0,100).map(row=>{const raw=String(row.input);const points=[...raw];return {...this.runView(row),input:points.slice(0,1024).join(''),input_truncated:points.length>1024};}), runs_truncated:runRows.length>100, messages: rows.slice(0, limit).map(r => ({ seq: r.seq, run_id: r.run_id, ...JSON.parse(String(r.message)), metadata: JSON.parse(String(r.metadata)) })), next_after: rows.length > limit ? rows[limit - 1]?.seq ?? after : null };
+    return { runs:runRows.slice(0,100).map(row=>{const raw=String(row.input);const points=[...raw];return {...this.runView(row),input:points.slice(0,1024).join(''),input_truncated:points.length>1024};}), runs_truncated:runRows.length>100, messages: page.map(r => ({ seq: r.seq, run_id: r.run_id, ...JSON.parse(String(r.message)), metadata: JSON.parse(String(r.metadata)) })), next_after: before===undefined && rows.length > limit ? rows[limit - 1]?.seq ?? after : null, previous_before: before!==undefined && rows.length>limit ? page[0]?.seq??null : null };
   }
   start(ns: string, session: string, input: string, key: string, runtime = ''): Run {
     return this.transaction(() => {

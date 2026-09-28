@@ -135,7 +135,7 @@ export class Wallet {
   resolve(value: unknown, actor: string) {
     const p = fields(value, ['namespace', 'request_id', 'decision', 'usage', 'reason', 'idempotency_key']);
     const ns = namespace(p.namespace), request = string(p.request_id, 256), reason = string(p.reason, 1024), key = string(p.idempotency_key, 256);
-    if (!['release', 'settle'].includes(String(p.decision))) throw new RpcError(-32602, 'invalid_decision');
+    if (typeof p.decision !== 'string' || !['release', 'settle'].includes(p.decision)) throw new RpcError(-32602, 'invalid_decision');
     let usage: Record<string, unknown> | undefined;
     if (p.decision === 'settle') {
       const u = fields(p.usage, ['known', 'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens']);
@@ -172,7 +172,7 @@ export class Wallet {
   settle(value: unknown) {
     const p = fields(value, ['namespace', 'request_id', 'usage', 'outcome', 'provider_status', 'source']);
     const ns = namespace(p.namespace), id = string(p.request_id, 256), source = string(p.source, 128);
-    if (!['complete', 'rejected', 'uncertain'].includes(String(p.outcome))) throw new RpcError(-32602, 'invalid_outcome');
+    if (typeof p.outcome !== 'string' || !['complete', 'rejected', 'uncertain'].includes(p.outcome)) throw new RpcError(-32602, 'invalid_outcome');
     const u = fields(p.usage, ['known', 'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens']);
     if (typeof u.known !== 'boolean') throw new RpcError(-32602, 'invalid_usage');
     const input = count(u.input_tokens), output = count(u.output_tokens);

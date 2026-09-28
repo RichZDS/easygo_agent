@@ -224,7 +224,7 @@ async function poll() {
       if (state.run !== id) return;
       $('run-status').replaceChildren(badge(run.status)); $('cancel-run').disabled = !['queued', 'running'].includes(run.status);
       $('run-events').textContent = pretty(await rpc('agent.run.events', { run_id: id, limit: 1000 })); if (state.historyBefore === Number.MAX_SAFE_INTEGER) await history();
-      if (!['queued', 'running'].includes(run.status)) { state.run = null; if (run.error) notify(`执行${labels[run.status] || run.status}：${run.error.code || '请查看事件'}`); await wallet(); }
+      if (!['queued', 'running'].includes(run.status)) { state.run = null; if (run.error) {const code=run.error.upstream?.data?.code||run.error.code;notify(errors[code]||`执行${labels[run.status]||run.status}：${code||'请查看事件'}`);} await wallet(); }
     }
     if (state.page === 'workshop' && state.task) await taskDetail();
   } catch (e) { $('connection').textContent = '连接中断，稍后重试'; } finally { state.polling = false; }

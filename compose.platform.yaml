@@ -33,7 +33,8 @@ services:
     ports:
       - "127.0.0.1:${EASYGO_PLATFORM_PORT:-8090}:8080"
     environment:
-      EASYGO_ADMIN_PASSWORD: ${EASYGO_ADMIN_PASSWORD:?set bootstrap admin password}
+      # Needed only until the bootstrap admin exists; without it a first start fails closed.
+      EASYGO_ADMIN_PASSWORD: ${EASYGO_ADMIN_PASSWORD:-}
     volumes:
       - "${EASYGO_PLATFORM_STATE}/pki/agent-loop:/run/easygo/identity:ro"
       - "${EASYGO_PLATFORM_STATE}/pki/public:/run/easygo/trust:ro"

@@ -47,12 +47,12 @@ export EASYGO_PLATFORM_STATE=/srv/easygo/state
 export EASYGO_PLATFORM_PORT=8090                 # 只绑 127.0.0.1
 export EASYGO_DOCKER_SOCKET=/path/to/dedicated/docker.sock
 export EASYGO_DOCKER_GID=$(stat -c %g "$EASYGO_DOCKER_SOCKET")
-export EASYGO_ADMIN_PASSWORD=...                 # 仅首次创建管理员时需要，>=12 字符
+export EASYGO_ADMIN_PASSWORD=...                 # 首次启动必需（>=12 字符），之后可不设
 export DEEPSEEK_API_KEY=...
 docker compose -f compose.platform.yaml up -d
 ```
 
-4. **管理员初始化**：agent-loop 首次启动时用 `bootstrap_admin.email` + `EASYGO_ADMIN_PASSWORD` 创建管理员。管理员已存在后，该变量不再被读取，可以从环境里删掉；它也不能把已有普通用户静默提升为管理员。公开注册的账户一律是普通用户、余额 0。
+4. **管理员初始化**：agent-loop 首次启动时用 `bootstrap_admin.email` + `EASYGO_ADMIN_PASSWORD` 创建管理员；此时变量缺失或不足 12 字符会直接启动失败。管理员已存在后，该变量不再被读取，Compose 里也是可选的，可以从环境里删掉。它不能把已有普通用户静默提升为管理员。公开注册的账户一律是普通用户、余额 0。
 
 5. 冒烟：浏览器打开 origin，用管理员登录，注册一个测试用户，给它发少量积分，发一条消息，确认钱包页出现一条已结算的用量。仓库里的 `scripts/test-platform-compose.mjs` 和 `services/agent-loop/test/platform-live-browser.mjs` 只适用于**夹具模型**部署（`configure-platform.mjs --fixture-url`），不要对真实供应商部署运行。
 
@@ -89,14 +89,14 @@ node scripts/configure-platform.mjs --state /srv/easygo/state \
 | 状态 | 怎么产生 | 含义 |
 |---|---|---|
 | `pending` | 网关拿不到可信用量：供应商连接中断、网关崩溃后重启、客户端断开导致流被取消 | 供应商可能已经算了钱，平台不知道算了多少 |
-| `reserved` | 正常在途请求（几秒内会自己结算）；或网关在预留成功、记下「已激活」之前崩溃（极窄窗口） | 长时间停在这里的，同上，且网关侧没有记录 |
+| `reserved` | 正常在途请求（几秒内会自己结算）；或网关在钱包预留成功、本地记为「已激活」之前崩溃（极窄窗口） | 长时间停在这里的，同上。网关本地只留着一条 `authorizing` 记录，重启时不会为它补发回执，只能由管理员处理 |
 
 处理：`POST /api/admin/usage/resolve {namespace, request_id, decision, usage?, reason, idempotency_key}`。
 
 - `decision:"release"`：确认供应商没计费，解冻、不扣费；
 - `decision:"settle"`：必须带 `usage:{known:true,input_tokens,output_tokens,...}`，按预留时的费率快照扣费；
 - decision 只接受字符串字面量，其他类型（数组、对象等）一律 400，不改动账本；
-- 每次处理都写入不可变审计记录。处理之后再到达的供应商回执只保存原始用量作为证据，不会二次扣费或再次解冻。
+- 每次处理都写入不可变审计记录。处理之后再到达的回执：如果这笔请求此前还没有任何原始回执，就只保存原始用量作为证据，不会二次扣费或再次解冻；如果已经有过一条回执（例如用量未知的那条），与之不同的新回执会被拒绝（`settlement_conflict`），原记录保持不变。
 
 **没有超时自动退款**：待核对的积分会一直冻结，直到管理员处理。建议每天看一次待核对列表，并对照供应商控制台的用量。已知的超额使用（实际用量超过预留）照实扣费，允许余额为负，之后不再放行该账户的新请求。
 
@@ -107,12 +107,12 @@ node scripts/configure-platform.mjs --state /srv/easygo/state \
 | 故障 | 恢复方式 | 账务结果 |
 |---|---|---|
 | agent-loop（钱包）在 CLI 原生调用途中崩溃 | 网关把供应商回执写进 bbolt outbox，每秒重试结算，钱包回来后送达 | 恰好扣一次 |
-| agent-loop 在主链流式调用途中崩溃 | 网关看到客户端断开，按「用量未知」记为 pending；该 run 重启后标记为 `interrupted`，不重放 | 积分冻结，待管理员核对，结算后恰好一次 |
+| agent-loop 在主链流式调用途中崩溃 | 网关看到客户端断开。若取消前已拿到供应商报告的用量，按已知用量结算；否则按「用量未知」记为 pending。该 run 重启后标记为 `interrupted`，不重放 | 已知用量：恰好扣一次；未知：积分冻结，待管理员核对后恰好一次（本次实测走的是未知分支） |
 | ai-gateway 在向供应商发出请求后崩溃 | 重启时把在途记录转成 `uncertain` 回执送给钱包 | 积分冻结，出现在待核对列表 |
-| workshop 在任务容器运行中崩溃 | 重启时回收自己标签的孤儿容器，任务标记 `interrupted`，需用户显式 resume | 不重放、不计费 |
+| workshop 在任务容器运行中崩溃 | 重启时回收自己标签的孤儿容器，任务标记 `interrupted`，需用户显式 resume | 不重放；崩溃前已发生的模型调用照常按网关回执计费 |
 | 三个服务正常重启 | — | 钱包、用量记录、历史完全一致 |
 
-**agent-loop 崩溃后约 30 秒才能重新启动**：数据库持有者租约为 30 秒，崩溃留下的租约到期前，新进程会以 `database_owned` 退出。这是有意的 fail-closed 设计，防止两个进程同时写库。Compose 的 `restart: unless-stopped` 会自动重试；实测从被杀到恢复服务约 24–28 秒。正常 `docker compose stop` 会释放租约，没有这个等待。
+**agent-loop 崩溃后约 30 秒才能重新启动**：数据库持有者租约为 30 秒，崩溃留下的租约到期前，新进程会以 `database_owned` 退出。这是有意的 fail-closed 设计，防止两个进程同时写库。Compose 的 `restart: unless-stopped` 会自动重试；等待时间取决于最后一次心跳，最长约 30 秒加上重启间隔，实测样本为 24–30 秒，不是 SLA。正常 `docker compose stop` 会释放租约，没有这个等待。
 
 ## 7. 备份与恢复
 

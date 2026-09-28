@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EasyGo · 工作台</title>
+<link rel="stylesheet" href="/style.css">
+<script type="module" src="/app.js">
+</script>
+</head>
+<body>
+<a class="skip" href="#main">跳到主内容</a>
+<div id="notice" role="status" aria-live="polite">
+</div>
+<section id="auth" class="auth-shell">
+<div class="auth-story">
+<a class="brand" href="/">E<span>↗</span> EASYGO</a>
+<div>
+<p class="eyebrow">YOUR IDEAS, IN MOTION</p>
+<h1>把想法交给 Agent，<br>把进展握在手里。</h1>
+<p>对话、任务、长期记忆和每一笔用量，<br>在同一个工作台里清晰可见。</p>
+</div>
+<small>专属账户 · 独立工作空间 · 按实际用量记账</small>
+</div>
+<div class="auth-card">
+<p class="eyebrow">开始工作</p>
+<h2 id="auth-title">欢迎回来</h2>
+<p id="auth-description" class="muted">登录你的 EasyGo 工作台。</p>
+<form id="auth-form">
+<label>邮箱<input name="email" type="email" autocomplete="username" maxlength="254" required>
+</label>
+<label>密码<input name="password" type="password" autocomplete="current-password" minlength="12" maxlength="1024" required>
+<small>至少 12 个字符</small>
+</label>
+<button class="primary" id="auth-submit">登录</button>
+<p id="auth-error" class="error" role="alert">
+</p>
+</form>
+<button id="auth-switch" class="text-button">还没有账户？注册</button>
+</div>
+</section>
+<div id="shell" hidden>
+<aside>
+<a class="brand" href="/">E<span>↗</span> EASYGO</a>
+<p class="eyebrow">WORKSPACE</p>
+<nav aria-label="主导航">
+<button data-page="overview" class="active">◫ <span>总览</span>
+</button>
+<button data-page="chat">↗ <span>对话</span>
+</button>
+<button data-page="workshop">▦ <span>任务工坊</span>
+</button>
+<button data-page="memory">◇ <span>长期记忆</span>
+</button>
+<button data-page="skills">✳ <span>技能库</span>
+</button>
+<button data-page="wallet">◉ <span>额度与用量</span>
+</button>
+<button data-page="admin" id="admin-nav" hidden>⚙ <span>管理</span>
+</button>
+</nav>
+<div class="identity">
+<span id="identity">
+</span>
+<button id="logout" class="text-button">退出登录</button>
+</div>
+</aside>
+<main id="main" tabindex="-1">
+<header>
+<div>
+<p class="eyebrow">EASYGO / WORKSPACE</p>
+<h1 id="page-title">总览</h1>
+</div>
+<div class="header-right">
+<span class="live-dot">
+</span>
+<span id="connection">已连接</span>
+<button id="refresh" class="secondary">刷新</button>
+</div>
+</header>
+<section data-view="overview">
+<div class="welcome">
+<div>
+<p class="eyebrow">READY WHEN YOU ARE</p>
+<h2>下一件事，从这里开始。</h2>
+<p>开启对话，让 Agent 为你规划和执行。</p>
+<button class="primary" data-go="chat">新建对话 ↗</button>
+</div>
+<div class="orbit" aria-hidden="true">
+<span>思考</span>
+<strong>E↗</strong>
+<span>执行</span>
+</div>
+</div>
+<div class="metrics">
+<article>
+<p>可用额度</p>
+<strong id="overview-available">—</strong>
+<small>credits</small>
+</article>
+<article>
+<p>执行中冻结</p>
+<strong id="overview-held">—</strong>
+<small>等待实际用量结算</small>
+</article>
+<article>
+<p>账户余额</p>
+<strong id="overview-balance">—</strong>
+<small>包含冻结额度</small>
+</article>
+</div>
+<div class="card">
+<div class="section-title">
+<h2>最近任务</h2>
+<button data-go="workshop" class="text-button">查看工坊 →</button>
+</div>
+<div id="recent-tasks" class="stack">
+</div>
+</div>
+</section>
+<section data-view="chat" hidden>
+<div class="split">
+<div class="card">
+<div class="section-title">
+<h2>会话</h2>
+<button id="new-session" class="secondary">＋ 新建</button>
+</div>
+<div id="sessions" class="stack">
+</div>
+</div>
+<div class="card chat-panel">
+<div class="section-title">
+<h2 id="session-title">选择或创建会话</h2>
+<span id="run-status" class="badge">就绪</span>
+</div>
+<div id="messages" class="messages" aria-live="polite">
+</div>
+<details>
+<summary>本次执行事件</summary>
+<pre id="run-events">
+</pre>
+</details>
+<form id="chat-form">
+<label>工坊运行时<select id="chat-runtime">
+<option value="">默认运行时</option>
+</select>
+</label>
+<label class="sr-only" for="chat-input">消息</label>
+<textarea id="chat-input" required maxlength="32768" placeholder="描述你想完成的事情…" rows="3">
+</textarea>
+<div class="actions">
+<button type="button" id="cancel-run" class="secondary" disabled>取消执行</button>
+<button class="primary" id="send-chat">发送 ↗</button>
+</div>
+</form>
+</div>
+</div>
+</section>
+<section data-view="workshop" hidden>
+<div class="split">
+<div>
+<form id="task-form" class="card">
+<h2>新建任务</h2>
+<label>工作流<select id="workflow" required>
+</select>
+</label>
+<label>运行时<select id="task-runtime">
+<option value="">默认运行时</option>
+</select>
+</label>
+<label>任务说明<textarea id="task-input" required rows="4" maxlength="32768" placeholder="目标、约束和交付内容">
+</textarea>
+</label>
+<button class="primary">提交任务</button>
+</form>
+<div class="card">
+<h2>任务列表</h2>
+<div id="tasks" class="stack">
+</div>
+</div>
+</div>
+<div class="card">
+<div class="section-title">
+<h2>任务详情</h2>
+<span id="task-status" class="badge">待选择</span>
+</div>
+<pre id="task-detail">选择任务查看进展。</pre>
+<div class="actions">
+<button id="cancel-task" class="secondary" disabled>取消任务</button>
+<button id="task-result" class="secondary" disabled>读取结果</button>
+</div>
+<form id="resume-form">
+<label>续跑指令<textarea id="resume-input" rows="2" required placeholder="说明接下来要做什么">
+</textarea>
+</label>
+<button class="primary" id="resume-task" disabled>继续任务 ↗</button>
+</form>
+<details open>
+<summary>结果与产物</summary>
+<pre id="task-output">
+</pre>
+</details>
+<details>
+<summary>执行事件</summary>
+<pre id="task-events">
+</pre>
+</details>
+</div>
+</div>
+</section>
+<section data-view="memory" hidden>
+<div class="section-intro">
+<p>让后续对话记住你的偏好和经验。这里的内容仅属于你的账户。</p>
+<button id="consolidate" class="secondary">整理已完成对话</button>
+</div>
+<div class="split">
+<div class="card">
+<h2>记忆条目</h2>
+<div id="memory-list" class="stack">
+</div>
+</div>
+<div class="card">
+<h2>编辑记忆</h2>
+<form id="memory-form">
+<input id="memory-id" type="hidden">
+<input id="memory-version" type="hidden">
+<label>类别<select id="memory-kind">
+<option value="preference">偏好</option>
+<option value="agent">角色</option>
+<option value="memory">记忆</option>
+<option value="experiment">经验</option>
+<option value="error">错误</option>
+<option value="style">风格</option>
+<option value="prompt">提示</option>
+<option value="constraint">约束</option>
+</select>
+</label>
+<label>内容<textarea id="memory-content" rows="6" required maxlength="4000">
+</textarea>
+</label>
+<button class="primary">保存记忆</button>
+<button type="reset" class="secondary">新条目</button>
+</form>
+<details>
+<summary>导入记忆</summary>
+<form id="memory-import">
+<label>导出的 JSON 数据<textarea name="payload" rows="5" required placeholder='{"entries": [], "dry_run": true}'>
+</textarea>
+</label>
+<button class="secondary">校验 / 导入</button>
+<p class="muted">默认只校验。确认后将 dry_run 改为 false 才会写入。</p>
+<pre class="import-result" aria-live="polite">
+</pre>
+</form>
+</details>
+</div>
+</div>
+</section>
+<section data-view="skills" hidden>
+<p class="muted">技能按需加载。选择条目查看和编辑完整内容。</p>
+<div class="split">
+<div class="card">
+<h2>技能目录</h2>
+<div id="skills-list" class="stack">
+</div>
+</div>
+<div class="card">
+<h2>编辑技能</h2>
+<form id="skill-form">
+<input id="skill-version" type="hidden">
+<label>名称<input id="skill-name" required maxlength="63" pattern="[A-Za-z0-9][A-Za-z0-9_-]*">
+</label>
+<label>描述<input id="skill-description" required maxlength="512">
+</label>
+<label>技能正文<textarea id="skill-body" required rows="10" maxlength="64000">
+</textarea>
+</label>
+<button class="primary">保存技能</button>
+<button type="reset" class="secondary">新技能</button>
+</form>
+<details>
+<summary>导入技能</summary>
+<form id="skills-import">
+<label>导出的 JSON 数据<textarea name="payload" rows="5" required placeholder='{"entries": [], "dry_run": true}'>
+</textarea>
+</label>
+<button class="secondary">校验 / 导入</button>
+<p class="muted">默认只校验。确认后将 dry_run 改为 false 才会写入。</p>
+<pre class="import-result" aria-live="polite">
+</pre>
+</form>
+</details>
+</div>
+</div>
+</section>
+<section data-view="wallet" hidden>
+<p class="muted">按实际输入与输出 token 结算。缓存用量包含在输入中，不重复计费。</p>
+<div class="metrics">
+<article>
+<p>可用额度</p>
+<strong id="wallet-available">—</strong>
+<small>credits</small>
+</article>
+<article>
+<p>冻结额度</p>
+<strong id="wallet-held">—</strong>
+<small>执行中或待核对</small>
+</article>
+<article>
+<p>账户余额</p>
+<strong id="wallet-balance">—</strong>
+<small>credits</small>
+</article>
+</div>
+<div class="card">
+<h2>用量明细</h2>
+<p class="muted">“待核对”的请求仍保留冻结额度，不会自动按免费处理。</p>
+<div class="table-wrap">
+<table>
+<thead>
+<tr>
+<th>时间 / 请求</th>
+<th>模型</th>
+<th>输入 / 输出</th>
+<th>缓存读 / 写</th>
+<th>扣费</th>
+<th>状态</th>
+</tr>
+</thead>
+<tbody id="usage">
+</tbody>
+</table>
+</div>
+</div>
+<div class="card">
+<h2>额度流水</h2>
+<div class="table-wrap">
+<table>
+<thead>
+<tr>
+<th>时间</th>
+<th>类型</th>
+<th>变动 credits</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody id="ledger">
+</tbody>
+</table>
+</div>
+</div>
+</section>
+<section data-view="admin" hidden>
+<div class="split">
+<div class="card">
+<h2>用户与额度</h2>
+<div id="users" class="stack">
+</div>
+<form id="grant-form">
+<label>用户<select id="grant-user" required>
+</select>
+</label>
+<label>发放额度（credits）<input id="grant-amount" inputmode="decimal" required pattern="[0-9]+(\.[0-9]{1,6})?" placeholder="例如 10.5">
+</label>
+<label>发放原因<input id="grant-reason" required maxlength="1024">
+</label>
+<button class="primary">确认发放</button>
+<p class="muted">每次发放都会保留管理员与原因，失败重试不会重复入账。</p>
+</form>
+</div>
+<div class="card">
+<h2>计费标准</h2>
+<p id="tariff-version" class="muted">
+</p>
+<form id="tariff-form">
+<label>每 1000 输入 token 的 credits<input id="tariff-input" inputmode="decimal" required>
+</label>
+<label>每 1000 输出 token 的 credits<input id="tariff-output" inputmode="decimal" required>
+</label>
+<button class="primary">发布新费率</button>
+</form>
+<p class="muted">新费率只应用于之后的请求。已预留的请求保留原费率。</p>
+</div>
+</div>
+<div class="card">
+<h2>待核对用量</h2>
+<p class="muted">请先核实请求已停止及供应商用量。人工释放或结算会终止预留，之后的网关收据将返回冲突。</p>
+<div id="pending-receipts" class="stack">
+</div>
+<form id="resolve-form">
+<label>待核对请求<select id="resolve-request" required>
+</select>
+</label>
+<label>处理方式<select id="resolve-decision">
+<option value="release">确认未计费，释放冻结</option>
+<option value="settle">按核实的实际用量结算</option>
+</select>
+</label>
+<div id="resolve-usage" hidden>
+<div class="metrics">
+<label>输入 token<input id="resolve-input" type="number" min="0" step="1" value="0">
+</label>
+<label>输出 token<input id="resolve-output" type="number" min="0" step="1" value="0">
+</label>
+</div>
+<div class="metrics">
+<label>缓存读取 token<input id="resolve-cache-read" type="number" min="0" step="1" value="0">
+</label>
+<label>缓存写入 token<input id="resolve-cache-write" type="number" min="0" step="1" value="0">
+</label>
+</div>
+</div>
+<label>核对依据与原因<input id="resolve-reason" required maxlength="1024" placeholder="工单、供应商收据或核实过程">
+</label>
+<button class="primary">确认对账</button>
+</form>
+</div>
+</section>
+<footer>EasyGo · 每一步进展，都有迹可循。</footer>
+</main>
+</div>
+</body>
+</html>

@@ -23,6 +23,8 @@ docker build -f services/workshop/Dockerfile   -t easygo-workshop:platform .
 docker build -f deploy/runtime/Dockerfile      -t easygo-task-runtime:platform .
 ```
 
+构建要下载 Go 模块和 npm 包。daemon 若以 `--bridge=none` 运行（如验收用的测试 daemon），构建命令需加 `--network host`；这只用于受信的镜像构建，任务容器始终是 `--network none`。
+
 任务镜像的标签在控制器启动时解析成不可变镜像 ID，之后任务一律用该 ID，不自动拉取。换运行时镜像要重启工坊。
 
 ## 2. 首次部署
@@ -137,7 +139,8 @@ docker compose -f compose.platform.yaml start
 仍然存在的限制，部署前要清楚：
 
 - **不是 VM 隔离**。任务容器与宿主共享内核，内核漏洞可以越界。处理不可信用户的生产环境应把工坊 daemon 放进独立 VM，或换成 gVisor/Kata 类运行时。
-- **持久工作区的磁盘上限是控制器侧配额**（`sandbox.disk_quota_bytes` / `disk_quota_files`）：单文件有硬上限（RLIMIT_FSIZE），总量靠轮询统计，超出时终止任务。两次轮询之间可以短暂超额，超额量取决于写入速度 × 轮询间隔。需要硬性总量上限时，把工坊数据目录放在支持 project quota 的 XFS 上，或放进独立 VM/磁盘。
+- **持久工作区的磁盘上限是控制器侧配额**：`sandbox.disk_quota_bytes`（默认 2 GiB）、`disk_quota_files`（默认 200,000 个条目）、`disk_poll_ms`（默认 2000）。单文件有硬上限（容器 `--ulimit fsize`，超出即 EFBIG）；总量靠轮询统计（按实际占用块计，不跟随符号链接，硬链接只算一次），超出时终止任务、标记 `disk_quota_exceeded`、不登记产物，已超额的任务不能 resume。两次轮询之间可以短暂超额：16 MiB 配额、200 ms 轮询时实测超出约 6–8 MiB。需要硬性总量上限时，把工坊数据目录放在支持 project quota 的 XFS 上，或放进独立 VM/磁盘。
+- **没有租户级或全局的磁盘预算，也不会自动清理已结束任务的工作区**。配额只限制单个任务，同一用户可以提交多个任务把盘占满。开放给不可信用户之前，需要加上按用户的总量预算和工作区保留期限，并给数据盘单独设容量告警。
 - **容量没有测过**。验收的并发与 1 小时 soak 用的是单机、8 个客户端、夹具模型，而且单 IP 每分钟 300 次请求的限速本身就会限制单机压测。那些数字只说明这台机器在该负载下没有泄漏、错账或崩溃，不代表生产吞吐。
 - 平台自己不做供应商侧限流和熔断；上游 429/5xx 按次失败，会产生待核对或释放记录。
 

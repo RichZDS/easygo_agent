@@ -49,6 +49,10 @@ func New(c Config) (*http.Server, *workshop.Service, error) {
 	}
 	service, e := workshop.New(c.Workshop, nil)
 	if e != nil {
+		var pathError *workshop.RelaySocketPathError
+		if errors.As(e, &pathError) {
+			return nil, nil, pathError
+		}
 		return nil, nil, errors.New("cannot initialize workshop")
 	}
 	for k, v := range Methods(service) {

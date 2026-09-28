@@ -46,7 +46,14 @@ Add to the operator-owned `workshop` configuration:
 
 `host_root` is the exact daemon-visible counterpart of `root`. For a containerized
 controller, bind that host directory at `/data/workshop`, preserving UID 1000.
-Use a short root path to keep per-run Unix socket paths under the OS limit.
+Docker startup checks the absolute controller-visible root plus
+`/relays/run-4294967295/model.sock` (the maximum 10-digit Go 1.25 temporary suffix).
+It rejects a worst-case path longer than 107 UTF-8 bytes before creating state or
+contacting Docker. The error reports the limit and measured length and recommends
+shortening root, without printing paths. With this naming scheme root may occupy
+at most 74 bytes. The task's fixed `/run/easygo-relay/model.sock` is 28 bytes; a
+longer daemon-visible `host_root` mount source does not itself violate the UDS
+address limit.
 The controller needs write access as UID 1000 and Docker socket access through the
 operator-selected supplemental group. Do not mount host HOME or copy credentials
 into the task root. Host root/ancestors are trusted operator provisioning and must

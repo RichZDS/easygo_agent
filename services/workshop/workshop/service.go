@@ -83,6 +83,10 @@ func New(cfg Config, runner Runner) (*Service, error) {
 		return nil, err
 	}
 	if cfg.Sandbox.Mode == "docker" {
+		// Fail before creating directories, opening storage or contacting Docker.
+		if err := validateRelaySocketPath(root); err != nil {
+			return nil, err
+		}
 		err = mkdirNoSymlinks(root, 0700)
 	} else {
 		err = os.MkdirAll(root, 0700)

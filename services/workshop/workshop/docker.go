@@ -24,6 +24,35 @@ const managedLabel = "ai.easygo.workshop.managed"
 const rootLabel = "ai.easygo.workshop.root"
 const runtimeWorkspace = "/workspace"
 const runtimeRelay = "/run/easygo-relay"
+const relayDirectory = "relays"
+const relayRunPrefix = "run-"
+const relaySocketName = "model.sock"
+const relaySocketPathLimit = 107
+
+// Go 1.25 os.MkdirTemp appends nextRandom's decimal uint32: at most 10 digits.
+// Share directory/name constants with Run so validation covers the actual path.
+const relayMaxRandomSuffix = "4294967295"
+
+// RelaySocketPathError is safe to surface at startup: it contains lengths only,
+// never operator paths or credentials from other configuration errors.
+type RelaySocketPathError struct{ ActualBytes int }
+
+func (e *RelaySocketPathError) Error() string {
+	return fmt.Sprintf("relay socket path exceeds %d-byte limit: worst-case length %d bytes; shorten workshop root", relaySocketPathLimit, e.ActualBytes)
+}
+func (e *RelaySocketPathError) Unwrap() error { return ErrInvalid }
+
+func validateRelaySocketPath(root string) error {
+	absolute, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	length := len(filepath.Join(absolute, relayDirectory, relayRunPrefix+relayMaxRandomSuffix, relaySocketName))
+	if length > relaySocketPathLimit {
+		return &RelaySocketPathError{ActualBytes: length}
+	}
+	return nil
+}
 
 // SandboxConfig is operator configuration, never accepted from task callers.
 // HostRoot is the daemon-visible path of Config.Root, not a parent directory.
@@ -144,6 +173,9 @@ func normalizeSandbox(c SandboxConfig) (SandboxConfig, error) {
 }
 
 func NewDockerRunner(cfg Config) (*DockerRunner, error) {
+	if err := validateRelaySocketPath(cfg.Root); err != nil {
+		return nil, err
+	}
 	c, err := normalizeSandbox(cfg.Sandbox)
 	if err != nil {
 		return nil, err
@@ -413,14 +445,14 @@ func (r *DockerRunner) Run(ctx context.Context, in Invocation, emit func(Event) 
 			return result, err
 		}
 	}
-	relayParent := filepath.Join(r.root, "relays")
+	relayParent := filepath.Join(r.root, relayDirectory)
 	if err = mkdirNoSymlinks(relayParent, 0700); err != nil {
 		return result, err
 	}
 	if err = noSymlinks(relayParent); err != nil {
 		return result, err
 	}
-	relay, err := os.MkdirTemp(relayParent, "run-")
+	relay, err := os.MkdirTemp(relayParent, relayRunPrefix)
 	if err != nil {
 		return result, err
 	}
@@ -429,7 +461,7 @@ func (r *DockerRunner) Run(ctx context.Context, in Invocation, emit func(Event) 
 	if err != nil {
 		return result, err
 	}
-	socket := filepath.Join(relay, "model.sock")
+	socket := filepath.Join(relay, relaySocketName)
 	_, key, stop, err := startModelRelayOn(ctx, r.gateway, in.Namespace, *p, "unix", socket)
 	if err != nil {
 		return result, err
@@ -438,7 +470,7 @@ func (r *DockerRunner) Run(ctx context.Context, in Invocation, emit func(Event) 
 	if err = os.Chmod(socket, 0600); err != nil {
 		return result, err
 	}
-	env := map[string]string{"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/workspace/.workshop-home", "CODEX_HOME": "/workspace/.workshop-home/codex", "CLAUDE_CONFIG_DIR": "/workspace/.workshop-home/claude", "TMPDIR": "/tmp", "EASYGO_RELAY_SOCKET": runtimeRelay + "/model.sock"}
+	env := map[string]string{"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/workspace/.workshop-home", "CODEX_HOME": "/workspace/.workshop-home/codex", "CLAUDE_CONFIG_DIR": "/workspace/.workshop-home/claude", "TMPDIR": "/tmp", "EASYGO_RELAY_SOCKET": runtimeRelay + "/" + relaySocketName}
 	childIn := in
 	childIn.Workspace = runtimeWorkspace
 	args, err = configureRuntimeEndpoint(childIn, args, env, "http://127.0.0.1:18080/v1", key, func(path string, v any) error {

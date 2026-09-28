@@ -142,6 +142,18 @@ func Methods(service *workshop.Service) map[string]rpc.Method {
 			out, e := service.Result(p.Namespace, p.TaskID, p.RunID, p.Offset, limit)
 			return out, domainError(e)
 		},
+		"workshop.artifact": func(ctx context.Context, raw json.RawMessage, stream *rpc.Stream) (any, *rpc.Error) {
+			var p struct {
+				taskParams
+				RunID string `json:"run_id,omitempty"`
+				Path  string `json:"path"`
+			}
+			if rpc.Decode(raw, &p) != nil || p.TaskID == "" || p.Path == "" {
+				return nil, rpc.InvalidParams()
+			}
+			out, e := service.Artifact(p.Namespace, p.TaskID, p.RunID, p.Path)
+			return out, domainError(e)
+		},
 		"workshop.events": func(ctx context.Context, raw json.RawMessage, s *rpc.Stream) (any, *rpc.Error) {
 			var p struct {
 				taskParams
@@ -168,6 +180,8 @@ func domainError(e error) *rpc.Error {
 		return rpc.Failure(-32602, "unknown_workflow")
 	case errors.Is(e, workshop.ErrInvalid):
 		return rpc.InvalidParams()
+	case errors.Is(e, workshop.ErrArtifactTooLarge):
+		return rpc.Failure(-32013, "artifact_too_large")
 	case errors.Is(e, workshop.ErrConflict):
 		return rpc.Failure(-32009, "conflict")
 	case errors.Is(e, workshop.ErrFull):

@@ -1,8 +1,17 @@
 package workshop
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
+	"io"
+	"path/filepath"
 	"sort"
+	"strings"
 	"unicode/utf8"
+
+	"github.com/google/uuid"
 )
 
 const (
@@ -186,4 +195,108 @@ func (s *Service) Result(namespace, id, runID string, offset, limit int) (*Resul
 	part := prefix(text[offset:], limit)
 	next := offset + len(part)
 	return &ResultPage{TaskID: id, RunID: run.ID, Text: part, Offset: offset, NextOffset: next, TotalBytes: len(text), EOF: next == len(text)}, nil
+}
+
+const maxArtifactDownloadBytes = 8 * 1024 * 1024
+
+var ErrArtifactTooLarge = errors.New("artifact exceeds 8 MiB download limit")
+
+type ArtifactDownload struct {
+	Path       string `json:"path"`
+	SHA256     string `json:"sha256"`
+	Size       int64  `json:"size"`
+	DataBase64 string `json:"data_base64"`
+}
+
+// Artifact returns bytes only for a recorded artifact of an owned, terminal task.
+// The lock spans lookup, descriptor read, digest verification and encoding so a
+// resume/start cannot mutate the workspace while a download is being assembled.
+// All filesystem/storage failures are translated into constant domain errors.
+func (s *Service) Artifact(namespace, id, runID, path string) (*ArtifactDownload, error) {
+	if namespace == "" || id == "" || !filepath.IsLocal(path) || path == "." || filepath.Clean(path) != path || strings.ContainsAny(path, "\\\x00") {
+		return nil, ErrInvalid
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.available() != nil {
+		return nil, ErrClosed
+	}
+	task, err := s.Get(namespace, id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, ErrClosed
+	}
+	if !downloadTerminal(task.Status) {
+		return nil, ErrConflict
+	}
+	var run *Run
+	if runID == "" && len(task.Runs) > 0 {
+		run = &task.Runs[len(task.Runs)-1]
+	} else {
+		for i := range task.Runs {
+			if task.Runs[i].ID == runID {
+				run = &task.Runs[i]
+				break
+			}
+		}
+	}
+	if run == nil {
+		return nil, ErrNotFound
+	}
+	if !downloadTerminal(run.Status) {
+		return nil, ErrConflict
+	}
+	var recorded *Artifact
+	for i := range run.Artifacts {
+		if run.Artifacts[i].Path == path {
+			recorded = &run.Artifacts[i]
+			break
+		}
+	}
+	if recorded == nil {
+		return nil, ErrNotFound
+	}
+	if recorded.Size < 0 || len(recorded.SHA256) != 64 {
+		return nil, ErrConflict
+	}
+	if recorded.Size > maxArtifactDownloadBytes {
+		return nil, ErrArtifactTooLarge
+	}
+	taskUUID, err := uuid.Parse(task.ID)
+	if err != nil || taskUUID.String() != task.ID {
+		return nil, ErrConflict
+	}
+	workspace := filepath.Join(s.root, "workspaces", task.ID)
+	if task.Workspace != workspace {
+		return nil, ErrConflict
+	}
+	f, err := openArtifactDownload(workspace, path)
+	if err != nil {
+		return nil, ErrConflict
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() != recorded.Size {
+		return nil, ErrConflict
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxArtifactDownloadBytes+1))
+	if err != nil || int64(len(data)) != recorded.Size {
+		return nil, ErrConflict
+	}
+	hash := sha256.Sum256(data)
+	if hex.EncodeToString(hash[:]) != recorded.SHA256 {
+		return nil, ErrConflict
+	}
+	return &ArtifactDownload{Path: recorded.Path, SHA256: recorded.SHA256, Size: recorded.Size, DataBase64: base64.StdEncoding.EncodeToString(data)}, nil
+}
+
+func downloadTerminal(status Status) bool {
+	switch status {
+	case Succeeded, Failed, Cancelled, TimedOut, Interrupted:
+		return true
+	default:
+		return false
+	}
 }

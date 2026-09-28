@@ -1,6 +1,9 @@
 package server
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -31,7 +34,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"f
 	if e := os.WriteFile(script, []byte(body), 0700); e != nil {
 		t.Fatal(e)
 	}
-	s, service, e := New(Config{ServerConfig: rpc.ServerConfig{Listen: "127.0.0.1:0", TLS: identity, Authorization: []rpc.Authorization{{ID: "loop", CertFile: caller.CertFile, Methods: []string{"health", "workshop.workflows", "workshop.submit", "workshop.get", "workshop.list", "workshop.cancel", "workshop.resume", "workshop.result", "workshop.events"}, Namespaces: []string{"tenant-a", "tenant-b"}}}}, Workshop: workshop.Config{Root: t.TempDir(), Concurrency: 1, QueueCapacity: 8, Engines: map[string]workshop.EngineConfig{"codex": {Binary: script}}, Workflows: []workshop.Workflow{{Name: "note", Version: "1", Instructions: "write note", Engine: "codex", Model: "fixture", Policy: "workspace-write", TimeoutSeconds: 10, Artifacts: []string{"note.md"}}}}})
+	s, service, e := New(Config{ServerConfig: rpc.ServerConfig{Listen: "127.0.0.1:0", TLS: identity, Authorization: []rpc.Authorization{{ID: "loop", CertFile: caller.CertFile, Methods: []string{"health", "workshop.workflows", "workshop.submit", "workshop.get", "workshop.list", "workshop.cancel", "workshop.resume", "workshop.result", "workshop.events", "workshop.artifact"}, Namespaces: []string{"tenant-a", "tenant-b"}}}}, Workshop: workshop.Config{Root: t.TempDir(), Concurrency: 1, QueueCapacity: 8, Engines: map[string]workshop.EngineConfig{"codex": {Binary: script}}, Workflows: []workshop.Workflow{{Name: "note", Version: "1", Instructions: "write note", Engine: "codex", Model: "fixture", Policy: "workspace-write", TimeoutSeconds: 10, Artifacts: []string{"note.md"}}}}})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -79,6 +82,29 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"f
 	if result["text"] != "fixture answer" || result["eof"] != true {
 		t.Fatalf("result %+v", result)
 	}
+
+	artifactParams := fmt.Sprintf(`{"namespace":"tenant-a","task_id":%q,"run_id":%q,"path":"note.md"}`, id, result["run_id"])
+	artifact := call("artifact", artifactParams).(map[string]any)
+	bytes, decodeErr := base64.StdEncoding.DecodeString(artifact["data_base64"].(string))
+	hash := sha256.Sum256([]byte("artifact"))
+	if decodeErr != nil || string(bytes) != "artifact" || artifact["path"] != "note.md" || artifact["size"] != float64(8) || artifact["sha256"] != hex.EncodeToString(hash[:]) {
+		t.Fatal("artifact response mismatch", artifact)
+	}
+	// A mutated file must conflict rather than return fresh bytes with an old hash.
+	stored, e := service.Get("tenant-a", id)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = os.WriteFile(filepath.Join(stored.Workspace, "note.md"), []byte("modified"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	_, changed := rpctest.Call(t, c, ts.URL, "workshop.artifact", artifactParams)
+	if changed.Error == nil || changed.Error.Code != -32009 || changed.Error.Data.Code != "conflict" {
+		t.Fatalf("artifact mutation: %+v", changed)
+	}
+	if e = os.WriteFile(filepath.Join(stored.Workspace, "note.md"), []byte("artifact"), 0600); e != nil {
+		t.Fatal(e)
+	}
 	page := call("list", `{"namespace":"tenant-a","limit":1}`).(map[string]any)
 	if len(page["tasks"].([]any)) != 1 {
 		t.Fatal("list missing task")
@@ -96,12 +122,19 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"f
 	hanging := call("submit", `{"namespace":"tenant-a","workflow":"note","input":"hang","idempotency_key":"key-2"}`).(map[string]any)
 	hangID := hanging["id"].(string)
 	wait(hangID, "running")
+	_, runningArtifact := rpctest.Call(t, c, ts.URL, "workshop.artifact", fmt.Sprintf(`{"namespace":"tenant-a","task_id":%q,"path":"note.md"}`, hangID))
+	if runningArtifact.Error == nil || runningArtifact.Error.Code != -32009 {
+		t.Fatal("running task returned artifact", runningArtifact)
+	}
 	call("cancel", taskParams(hangID))
 	wait(hangID, "cancelled")
-	for _, method := range []string{"get", "cancel", "resume", "result", "events"} {
+	for _, method := range []string{"get", "cancel", "resume", "result", "events", "artifact"} {
 		params := fmt.Sprintf(`{"namespace":"tenant-b","task_id":%q`, id)
 		if method == "resume" {
 			params += `,"input":"steal"`
+		}
+		if method == "artifact" {
+			params += `,"path":"note.md"`
 		}
 		params += "}"
 		_, out := rpctest.Call(t, c, ts.URL, "workshop."+method, params)
@@ -130,6 +163,11 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"f
 		{"events", fmt.Sprintf(`{"namespace":"tenant-a","task_id":%q,"after":-1}`, id), -32602},
 		{"result", fmt.Sprintf(`{"namespace":"tenant-a","task_id":%q,"limit":32769}`, id), -32602},
 		{"get", fmt.Sprintf(`{"namespace":"tenant-a","task_id":%q,"unknown":1}`, id), -32602},
+		{"artifact", fmt.Sprintf(`{"namespace":"tenant-a","task_id":%q,"path":"../note.md"}`, id), -32602},
+		{"artifact", fmt.Sprintf(`{"namespace":"tenant-a","task_id":%q,"path":".workshop-home/codex/auth.json"}`, id), -32004},
+		{"artifact", fmt.Sprintf(`{"namespace":"tenant-a","task_id":%q,"run_id":"missing","path":"note.md"}`, id), -32004},
+		{"artifact", fmt.Sprintf(`{"namespace":"tenant-a","task_id":%q,"path":"note.md","extra":true}`, id), -32602},
+		{"artifact", fmt.Sprintf(`{"namespace":"tenant-a","task_id":%q}`, id), -32602},
 	} {
 		_, out := rpctest.Call(t, c, ts.URL, "workshop."+tc.method, tc.params)
 		if out.Error == nil || out.Error.Code != tc.code {

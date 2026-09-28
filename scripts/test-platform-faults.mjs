@@ -168,8 +168,11 @@ try{
  }
  const all=await receipts(),w=await wallet();
  const charged=all.reduce((s,r)=>s+r.charged_micros,0);assert.equal(1000000000-w.balance_micros,charged);assert.equal(w.held_micros,0);
- report.final={balance_micros:w.balance_micros,held_micros:w.held_micros,receipts:all.length,charged_micros:charged};
- check('final ledger: balance equals grant minus the sum of recorded charges, no holds left');
+ // The ledger alone is self-consistent even if a caller skipped metering: tie it to
+ // what the provider actually served. Every provider request needs one reservation.
+ assert.ok(all.length<100);assert.equal(all.length,report.model_requests,'provider requests without a wallet reservation');
+ report.final={balance_micros:w.balance_micros,held_micros:w.held_micros,receipts:all.length,provider_requests:report.model_requests,charged_micros:charged};
+ check('final ledger: every provider request reserved once, balance equals grant minus charges, no holds left');
  report.pass=true;
 }catch(e){report.pass=false;report.error=e.stack;console.error(e.stack);process.exitCode=1;}
 finally{delete report.faults.current;clients.forEach(c=>c.close());for(const name of Object.keys(procs).reverse())await stop(name);if(model){model.closeAllConnections();await new Promise(r=>model.close(r));}try{for(const id of await containers())await exec(docker,['--host',endpoint,'rm','--force',id]);}catch{}await save();console.log('REPORT '+join(state,'report.json'));}

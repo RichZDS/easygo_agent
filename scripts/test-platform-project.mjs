@@ -10,7 +10,7 @@ import {promisify} from 'node:util';
 import {once} from 'node:events';
 import net from 'node:net';
 import {mkdir,mkdtemp,writeFile,readFile,readdir,lstat} from 'node:fs/promises';
-import {openSync,closeSync} from 'node:fs';
+import {openSync,closeSync,createReadStream} from 'node:fs';
 import {join,resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {randomUUID} from 'node:crypto';
@@ -37,9 +37,12 @@ async function oracle(workspace){
  const args=['--host',endpoint,'run','--rm','--name','oracle-'+randomUUID().slice(0,12),'--network','none','--read-only','--user','1000:1000','--cap-drop','ALL','--security-opt','no-new-privileges=true','--pids-limit','128','--memory','512m','--memory-swap','512m','--cpus','1','--tmpfs','/tmp:rw,nosuid,nodev,noexec,size=67108864,mode=1777','--mount',`type=bind,src=${workspace},dst=/project,readonly`,'--mount',`type=bind,src=${join(root,'scripts/platform-project-oracle.mjs')},dst=/oracle.mjs,readonly`,'--entrypoint','/usr/local/bin/node',image,'/oracle.mjs','/project'];
  let out,code=0;try{out=(await exec(docker,args,{timeout:90000,maxBuffer:1<<20})).stdout;}catch(e){out=e.stdout??'';code=e.code??1;}
  let result;try{result=JSON.parse(out.trim().split('\n').at(-1));}catch{result={ok:false,failure:'oracle output unreadable'};}
- return {exit:code,wall_ms:Date.now()-started,...result};
+ // A crashed or killed oracle cannot pass on a stale ok:true line.
+ return {exit:code,wall_ms:Date.now()-started,...result,ok:code===0&&result.ok===true};
 }
-async function scanForKey(dir,found=[]){for(const name of await readdir(dir)){const path=join(dir,name),info=await lstat(path);if(info.isDirectory())await scanForKey(path,found);else if(info.isFile()&&info.size<=16<<20&&(await readFile(path,'latin1')).includes(key))found.push(path);}return found;}
+// Streams every regular file of any size; chunks overlap so a key cannot hide across a boundary.
+async function fileHasKey(path){let tail='';for await(const chunk of createReadStream(path,{encoding:'latin1',highWaterMark:1<<20})){const text=tail+chunk;if(text.includes(key))return true;tail=text.slice(-(key.length-1));}return false;}
+async function scanForKey(dir,found=[]){for(const name of await readdir(dir)){const path=join(dir,name),info=await lstat(path);if(info.isDirectory())await scanForKey(path,found);else if(info.isFile()&&await fileHasKey(path))found.push(path);}return found;}
 try{
  const spec=await readFile(join(root,'scripts/platform-project-spec.md'),'utf8');
  await exec('bash',[join(root,'scripts/dev-pki.sh'),join(state,'pki')]);
@@ -66,7 +69,9 @@ try{
  for(const [name,p]of [['ai-gateway',gp],['workshop',wp],['agent-loop',ap]]){const tls=identity('client');const c=createRPCClient({url:ep(name,p).url,certFile:tls.cert_file,keyFile:tls.key_file,caFile:tls.ca_file,peerCertificateFile:cert(name)});clients.push(c);await until(async()=>{try{return await c.health();}catch{return false;}},30000,250);}
  const admin=browser(origin),user=browser(origin);await admin.request('/api/login',{email:'admin@example.test',password:adminPassword});
  const account=(await user.request('/api/register',{email:'builder@example.test',password:'builder-'+randomUUID()},'POST',201)).user;
- // The platform wallet is the spend cap: the gateway refuses provider calls once it is exhausted.
+ // The grant bounds spend: admission stops once available credits run out. Only a
+ // request whose actual usage exceeds its own conservative reservation can overshoot,
+ // and that overage is recorded as debt, not dropped.
  await admin.request('/api/admin/credits',{user_id:account.id,amount_micros:budgetCredits*1000000,reason:'live project benchmark budget',idempotency_key:'live-budget'});
  const catalog=await user.rpc('agent.workshop.catalog');report.catalog=catalog;
  const terminal=async id=>until(async()=>{const t=await user.rpc('workshop.get',{task_id:id});return !['queued','running','cancelling'].includes(t.status)&&t;},(taskSeconds+120)*1000,5000);
@@ -84,7 +89,12 @@ try{
  const receipts=(await user.request('/api/usage')).receipts;const w=await user.request('/api/wallet');
  report.usage={requests:receipts.length,statuses:Object.fromEntries([...new Set(receipts.map(r=>r.status))].map(k=>[k,receipts.filter(r=>r.status===k).length])),input_tokens:receipts.reduce((s,r)=>s+(r.settlement?.usage?.input_tokens??0),0),cache_read_tokens:receipts.reduce((s,r)=>s+(r.settlement?.usage?.cache_read_tokens??0),0),output_tokens:receipts.reduce((s,r)=>s+(r.settlement?.usage?.output_tokens??0),0),charged_micros:receipts.reduce((s,r)=>s+r.charged_micros,0)};
  report.wallet={balance_micros:w.balance_micros,held_micros:w.held_micros};assert.equal(budgetCredits*1000000-w.balance_micros,report.usage.charged_micros);
- const leaked=await scanForKey(join(state,'workshop-data'));report.key_in_task_data=leaked.length;assert.equal(leaked.length,0,'provider key reached task-visible data');
  report.pass=report.rounds.at(-1).oracle.ok===true;if(!report.pass)process.exitCode=1;
 }catch(e){report.pass=false;report.error=String(e.stack).split(key).join('<REDACTED>');console.error(report.error);process.exitCode=1;}
-finally{clients.forEach(c=>c.close());for(const c of children.reverse())await stop(c);await save();for(const f of ['gateway.log','workshop.log','loop.log','report.json'])try{if((await readFile(join(state,f),'latin1')).includes(key))console.error('KEY FOUND IN '+f);}catch{}console.log('REPORT '+join(state,'report.json'));}
+finally{
+ clients.forEach(c=>c.close());for(const c of children.reverse())await stop(c);
+ // After every process stopped: nothing under the state directory (task workspaces,
+ // native HOMEs, service logs, configs, report) may contain the provider key.
+ try{const leaked=await scanForKey(state);report.key_leaks=leaked.length;if(leaked.length){report.pass=false;process.exitCode=1;console.error('PROVIDER KEY FOUND IN '+leaked.length+' state file(s)');}}catch(e){report.pass=false;report.key_scan_error=e.message;process.exitCode=1;}
+ await save();console.log('REPORT '+join(state,'report.json'));
+}

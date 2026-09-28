@@ -123,9 +123,14 @@ tool call and actual artifact, plus cancellation cleanup. Model responses are
 synthetic, provider keys are unnecessary. An unsupported nested CLI sandbox must
 fail visibly; never weaken the outer container isolation to pass the fixture.
 
-With the current native Codex `workspace-write` sandbox, hosts that disallow
-unprivileged user namespaces can reject its nested bwrap helper. Text generation
-and resume still work, but an exec tool cannot create the requested artifact; the
-native fixture reports this as a failure. Resolving that compatibility issue must
-preserve the outer Docker constraints and read-only workflow mounts. The host
-runner's native sandbox policy must not be changed to accommodate containers.
+Codex's nested bwrap helper cannot create user namespaces under the constrained
+container policy on some hosts. After successful Docker initialization and mount
+validation, DockerRunner replaces only Codex's inner `sandbox_mode` with
+`danger-full-access`, retaining `approval_policy=never`. The process is still
+inside the mandatory network-none, nonroot, read-only-rootfs, capability-free,
+no-new-privileges, resource-limited Docker container. Read-only workflows retain
+the OS-enforced read-only workspace and only task-private native HOME is writable.
+This override is internal to Docker command construction, not an RPC option. It
+cannot activate through the host CommandRunner, whose sandbox policy is unchanged.
+The real-native fixture also asks Codex's exec tool to write under a read-only
+workflow and verifies the filesystem rejects it.

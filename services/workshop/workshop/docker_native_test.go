@@ -53,7 +53,7 @@ func TestDockerNativeRuntimes(t *testing.T) {
 				bodies = append(bodies, string(p.Body))
 				currentPhase := phase
 				issueTool := false
-				if currentPhase == "tools" {
+				if currentPhase == "tools" || currentPhase == "readonly" {
 					toolRequests++
 					issueTool = toolRequests == 1
 				}
@@ -72,7 +72,7 @@ func TestDockerNativeRuntimes(t *testing.T) {
 					return map[string]any{"content_type": "text/event-stream", "body": rec.Body.Bytes()}, nil
 				}
 				answer := "native-fixture-first"
-				if currentPhase == "tools" {
+				if currentPhase == "tools" || currentPhase == "readonly" {
 					answer = "native-tool-done"
 				}
 				if currentPhase == "text" && strings.Contains(string(p.Body), "resume-probe") {
@@ -177,6 +177,37 @@ func TestDockerNativeRuntimes(t *testing.T) {
 				t.Errorf("native tool failed: run=%v artifact=%v content=%q result=%+v callbacks=%d last-body=%s", toolErr, artifactErr, artifact, result, calls, evidence)
 			} else {
 				t.Logf("native tool artifact=%q session=%s callbacks=%d", artifact, result.SessionID, calls)
+			}
+			if tc.engine == "codex" {
+				// The inner override must not defeat Workflow.Policy: exercise a real exec
+				// tool against the outer read-only mount, using a fresh artifact path.
+				if err := os.Remove(filepath.Join(workspace, "native-artifact.txt")); err != nil && !os.IsNotExist(err) {
+					t.Fatal(err)
+				}
+				mu.Lock()
+				phase = "readonly"
+				toolRequests = 0
+				mu.Unlock()
+				in.Workflow.Policy = "read-only"
+				readCtx, readStop := context.WithTimeout(ctx, 60*time.Second)
+				_, readErr := r.Run(readCtx, in, func(event Event) error {
+					if event.Kind == "diagnostic" {
+						t.Log("readonly diagnostic: " + event.Text)
+					}
+					return nil
+				})
+				readStop()
+				_, statErr := os.Stat(filepath.Join(workspace, "native-artifact.txt"))
+				mu.Lock()
+				readonlyBody := bodies[len(bodies)-1]
+				readonlyCalls := toolRequests
+				phase = "cancel"
+				mu.Unlock()
+				if readErr != nil || !os.IsNotExist(statErr) || readonlyCalls < 2 || !strings.Contains(strings.ToLower(readonlyBody), "read-only file system") {
+					t.Fatalf("real Codex read-only mount not proven: run=%v stat=%v requests=%d body=%s", readErr, statErr, readonlyCalls, readonlyBody)
+				}
+				t.Log("native Codex exec write rejected by read-only filesystem; no artifact created")
+				in.Workflow.Policy = "workspace-write"
 			}
 			cancelCtx, stopNative := context.WithCancel(ctx)
 			done := make(chan error, 1)

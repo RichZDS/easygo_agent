@@ -440,6 +440,23 @@ func (r *DockerRunner) Run(ctx context.Context, in Invocation, emit func(Event) 
 		}
 	}()
 	options := r.taskContainerOptions(name, host, relayHost, filepath.Join(host, ".workshop-home"), in.Workflow.Policy)
+	// Codex's nested bwrap cannot create user namespaces under this container's
+	// security policy. Only this initialized Docker path delegates isolation to
+	// the mandatory outer container and its workflow-specific workspace mounts.
+	// Host CommandRunner and approval_policy=never remain unchanged.
+	if in.Workflow.Engine == "codex" {
+		replaced := false
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == "-c" && args[i+1] == `sandbox_mode="`+in.Workflow.Policy+`"` {
+				args[i+1] = `sandbox_mode="danger-full-access"`
+				replaced = true
+			}
+		}
+		if !replaced {
+			return result, errors.New("missing native Codex sandbox override")
+		}
+	}
+
 	keys := make([]string, 0, len(env))
 	for k := range env {
 		keys = append(keys, k)

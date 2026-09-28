@@ -110,7 +110,11 @@ func (f *fakeDocker) command(ctx context.Context, in io.Reader, out, diag io.Wri
 }
 func dockerFixture(t *testing.T) (*DockerRunner, *fakeDocker, Invocation) {
 	t.Helper()
-	root := t.TempDir()
+	root, err := os.MkdirTemp("/tmp", "docker-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(root) })
 	c, e := normalizeSandbox(SandboxConfig{Mode: "docker", Image: "fixture:local", Owner: "test-owner", Endpoint: "unix:///tmp/dummy-docker.sock", HostRoot: root})
 	if e != nil {
 		t.Fatal(e)
@@ -387,5 +391,49 @@ func TestDockerReadOnlyWorkspaceAllowsOnlyNativeHomeWrites(t *testing.T) {
 	}
 	if len(mounts) != 3 || !strings.HasSuffix(mounts[0], ",readonly") || !strings.Contains(mounts[2], "dst=/workspace/.workshop-home,") || strings.Contains(mounts[2], ",readonly") {
 		t.Fatalf("read-only mounts: %v", mounts)
+	}
+}
+
+func TestCodexInnerPolicyChangesOnlyAfterDockerInitialization(t *testing.T) {
+	for _, policy := range []string{"read-only", "workspace-write"} {
+		t.Run(policy, func(t *testing.T) {
+			r, f, in := dockerFixture(t)
+			in.Workflow.Policy = policy
+			hostArgs, err := engineArgs(in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Contains(hostArgs, `sandbox_mode="`+policy+`"`) || slices.Contains(hostArgs, `sandbox_mode="danger-full-access"`) {
+				t.Fatal("host policy changed")
+			}
+			r.gateway = nativeRelayFixture(t, func(context.Context, json.RawMessage, *rpc.Stream) (any, *rpc.Error) { return nil, nil })
+			f.start = func(ctx context.Context, c *fakeContainer, stdin io.Reader, out, diag io.Writer) error {
+				if !slices.Contains(c.args, `sandbox_mode="danger-full-access"`) || !slices.Contains(c.args, `approval_policy="never"`) {
+					t.Fatal("missing Docker-only native overrides")
+				}
+				if !slices.Contains(c.args, "--read-only") || option(c.args, "--network") != "none" || option(c.args, "--user") != "1000:1000" || option(c.args, "--cap-drop") != "ALL" || option(c.args, "--security-opt") != "no-new-privileges=true" {
+					t.Fatal("outer isolation changed")
+				}
+				workspaceRO := false
+				for i, arg := range c.args {
+					if arg == "--mount" && strings.Contains(c.args[i+1], ",dst=/workspace,") {
+						workspaceRO = strings.HasSuffix(c.args[i+1], ",readonly")
+					}
+				}
+				if workspaceRO != (policy == "read-only") {
+					t.Fatal("workspace policy not enforced")
+				}
+				fakeSuccess(out)
+				return nil
+			}
+			if _, err = r.Run(context.Background(), in, func(Event) error { return nil }); err != nil {
+				t.Fatal(err)
+			}
+			r.initialized = false
+			before := len(f.calls)
+			if _, err = r.Run(context.Background(), in, func(Event) error { return nil }); err == nil || len(f.calls) != before {
+				t.Fatal("override ran without initialized Docker")
+			}
+		})
 	}
 }

@@ -25,6 +25,10 @@ type NativeResponse struct {
 func (g *Gateway) Native(ctx context.Context, alias, protocol, requestID string, raw json.RawMessage) (out NativeResponse, err error) {
 	start := time.Now()
 	obs := Observation{RequestID: requestID, Model: alias}
+	if obs.RequestID == "" {
+		obs.RequestID = newRequestID()
+	}
+	var settle func(Observation) error
 	defer func() {
 		obs.Latency = time.Since(start)
 		if err != nil {
@@ -33,6 +37,15 @@ func (g *Gateway) Native(ctx context.Context, alias, protocol, requestID string,
 				obs.ErrorCode = e.Code
 			} else {
 				obs.ErrorCode = "invalid_response"
+			}
+		}
+		if settle != nil {
+			if e := settle(obs); e != nil {
+				obs.ErrorCode = "billing_unavailable"
+				if err == nil {
+					err = fail("billing_unavailable", "usage could not be durably recorded")
+					out = NativeResponse{}
+				}
 			}
 		}
 		if g.observer != nil {
@@ -65,6 +78,10 @@ func (g *Gateway) Native(ctx context.Context, alias, protocol, requestID string,
 	data, e := json.Marshal(body)
 	if e != nil || int64(len(data)) > g.bodyLimit {
 		return out, fail("request_too_large", "native request exceeds limit")
+	}
+	data, settle, e = g.admit(ctx, m, obs.RequestID, alias, "gateway.native", data)
+	if e != nil {
+		return out, e
 	}
 	req, e := http.NewRequestWithContext(ctx, http.MethodPost, m.Endpoint, bytes.NewReader(data))
 	if e != nil {

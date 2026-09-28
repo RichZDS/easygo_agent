@@ -12,9 +12,12 @@ import (
 	"easygo-agent/rpc"
 	"easygo-agent/services/ai-gateway/ai"
 	"easygo-agent/services/ai-gateway/gateway"
+	"easygo-agent/services/ai-gateway/meter"
 )
 
 type Config struct {
+	Meter    *meter.Config    `json:"meter,omitempty"`
+	Billing  gateway.Billing  `json:"-"`
 	Observer gateway.Observer `json:"-"`
 	rpc.ServerConfig
 	gateway.FileConfig
@@ -50,6 +53,13 @@ func New(c Config) (*http.Server, error) {
 		return nil, e
 	}
 	config.Observer = c.Observer
+	if c.Meter != nil && c.Billing == nil {
+		return nil, errors.New("configured meter lifecycle must be initialized")
+	}
+	config.Billing = c.Billing
+	if c.Meter != nil {
+		config.BillingMaxOutputTokens = c.Meter.MaxOutputTokens
+	}
 	g, e := gateway.New(config)
 	if e != nil {
 		return nil, e
@@ -77,7 +87,7 @@ func Methods(g *gateway.Gateway) map[string]rpc.Method {
 			if rpc.Decode(raw, &p) != nil || p.Model == "" || len(p.Body) == 0 {
 				return nil, rpc.InvalidParams()
 			}
-			result, err := g.Native(ctx, p.Model, p.Protocol, s.ID(), p.Body)
+			result, err := g.Native(gateway.WithNamespace(ctx, p.Namespace), p.Model, p.Protocol, s.ID(), p.Body)
 			if err != nil {
 				return nil, domainError(err)
 			}
@@ -97,7 +107,7 @@ func Methods(g *gateway.Gateway) map[string]rpc.Method {
 			if p.Stream {
 				emit = func(event ai.Event) error { return s.Delta(event) }
 			}
-			result, e := g.Complete(ctx, *p.Request, emit)
+			result, e := g.Complete(gateway.WithNamespace(ctx, p.Namespace), *p.Request, emit)
 			if e != nil {
 				return nil, domainError(e)
 			}
@@ -115,6 +125,14 @@ func domainError(err error) *rpc.Error {
 	var e *gateway.Error
 	if errors.As(err, &e) {
 		switch e.Code {
+		case "insufficient_credits":
+			return rpc.Failure(-32002, e.Code)
+		case "duplicate_request":
+			return rpc.Failure(-32009, e.Code)
+		case "billing_identity_required":
+			return rpc.Failure(-32003, e.Code)
+		case "billing_unavailable":
+			return rpc.Failure(-32000, e.Code)
 		case "invalid_request", "invalid_parameters", "unsupported_capability", "request_too_large":
 			return rpc.Failure(-32602, e.Code)
 		case "unknown_model":

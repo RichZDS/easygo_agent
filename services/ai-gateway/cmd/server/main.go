@@ -4,6 +4,7 @@ import (
 	"context"
 	"easygo-agent/rpc"
 	"easygo-agent/services/ai-gateway/gateway"
+	"easygo-agent/services/ai-gateway/meter"
 	"easygo-agent/services/ai-gateway/server"
 	"errors"
 	"flag"
@@ -44,6 +45,14 @@ func run(args []string) error {
 			Kind string `json:"kind"`
 			gateway.Observation
 		}{"model", o})
+	}
+	if config.Meter != nil {
+		manager, e := meter.New(*config.Meter, config.TLS)
+		if e != nil {
+			return e
+		}
+		defer manager.Close()
+		config.Billing = manager
 	}
 	httpServer, err := server.New(config)
 	if err != nil {

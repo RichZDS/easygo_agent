@@ -45,12 +45,14 @@ type Model struct {
 }
 
 type Config struct {
-	Models           map[string]Model
-	HTTPClient       *http.Client
-	Observer         Observer
-	MaxResponseBytes int64
-	MaxStreamBytes   int64
-	MaxEventBytes    int
+	Billing                Billing
+	BillingMaxOutputTokens int
+	Models                 map[string]Model
+	HTTPClient             *http.Client
+	Observer               Observer
+	MaxResponseBytes       int64
+	MaxStreamBytes         int64
+	MaxEventBytes          int
 }
 
 // Observation deliberately excludes payloads, upstream error text and credentials.
@@ -71,6 +73,8 @@ type Observation struct {
 type Observer func(Observation)
 
 type Gateway struct {
+	billing                Billing
+	billingMaxOutput       int
 	models                 map[string]Model
 	client                 *http.Client
 	observer               Observer
@@ -112,6 +116,14 @@ func New(c Config) (*Gateway, error) {
 	}
 	if g.bodyLimit < 1 || g.streamLimit < 1 || g.eventLimit < 1 {
 		return nil, fail("invalid_config", "limits must be positive")
+	}
+	g.billing = c.Billing
+	g.billingMaxOutput = c.BillingMaxOutputTokens
+	if g.billingMaxOutput == 0 {
+		g.billingMaxOutput = 4096
+	}
+	if g.billingMaxOutput < 1 || g.billingMaxOutput > 131072 {
+		return nil, fail("invalid_config", "billing output cap must be 1..131072")
 	}
 	g.client = safeClient(c.HTTPClient)
 	for alias, m := range c.Models {
@@ -213,6 +225,7 @@ func newRequestID() string {
 func (g *Gateway) Complete(ctx context.Context, r ai.Request, emit func(ai.Event) error) (out ai.Response, err error) {
 	start := time.Now()
 	obs := Observation{RequestID: r.RequestID, Model: r.Model}
+	var settle func(Observation) error
 	if obs.RequestID == "" {
 		obs.RequestID = newRequestID()
 	}
@@ -226,6 +239,15 @@ func (g *Gateway) Complete(ctx context.Context, r ai.Request, emit func(ai.Event
 				obs.ErrorCode = e.Code
 			} else {
 				obs.ErrorCode = "internal_error"
+			}
+		}
+		if settle != nil {
+			if e := settle(obs); e != nil {
+				obs.ErrorCode = "billing_unavailable"
+				if err == nil {
+					err = fail("billing_unavailable", "usage could not be durably recorded")
+					out = ai.Response{}
+				}
 			}
 		}
 		if g.observer != nil {
@@ -250,6 +272,10 @@ func (g *Gateway) Complete(ctx context.Context, r ai.Request, emit func(ai.Event
 	}
 	if int64(len(data)) > g.bodyLimit {
 		return out, fail("request_too_large", "encoded request exceeds limit")
+	}
+	data, settle, e = g.admit(ctx, m, obs.RequestID, r.Model, "gateway.generate", data)
+	if e != nil {
+		return out, e
 	}
 	req, e := http.NewRequestWithContext(ctx, http.MethodPost, m.Endpoint, bytes.NewReader(data))
 	if e != nil {

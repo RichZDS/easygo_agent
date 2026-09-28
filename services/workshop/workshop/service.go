@@ -27,21 +27,23 @@ var keysBucket = []byte("idempotency")
 // Service owns an exclusive bbolt lock and a bounded set of worker goroutines.
 // Namespace must come from a trusted caller, never model-generated arguments.
 type Service struct {
-	mu        sync.Mutex
-	db        *bolt.DB
-	root      string
-	workflows map[string]Workflow
-	runtimes  map[string]RuntimeProfile
-	runner    Runner
-	queue     chan string
-	slots     chan struct{}
-	stop      chan struct{}
-	active    map[string]context.CancelFunc
-	wg        sync.WaitGroup
-	closed    bool
-	closeOnce sync.Once
-	closeErr  error
-	err       error // durability failure: reject subsequent mutations
+	mu              sync.Mutex
+	db              *bolt.DB
+	root            string
+	workflows       map[string]Workflow
+	runtimes        map[string]RuntimeProfile
+	runner          Runner
+	queue           chan string
+	slots           chan struct{}
+	stop            chan struct{}
+	active          map[string]context.CancelFunc
+	resumeScans     map[string]struct{}
+	resumeQuotaScan func(context.Context, string) error // nil uses Docker CheckDiskQuota; test seam
+	wg              sync.WaitGroup
+	closed          bool
+	closeOnce       sync.Once
+	closeErr        error
+	err             error // durability failure: reject subsequent mutations
 }
 
 // Workflows returns a name-sorted metadata catalog. Each call returns independent
@@ -108,7 +110,7 @@ func New(cfg Config, runner Runner) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Service{root: root, workflows: map[string]Workflow{}, runtimes: map[string]RuntimeProfile{}, runner: runner, queue: make(chan string, cfg.Concurrency+cfg.QueueCapacity), slots: make(chan struct{}, cfg.Concurrency+cfg.QueueCapacity), stop: make(chan struct{}), active: map[string]context.CancelFunc{}}
+	s := &Service{root: root, workflows: map[string]Workflow{}, runtimes: map[string]RuntimeProfile{}, runner: runner, queue: make(chan string, cfg.Concurrency+cfg.QueueCapacity), slots: make(chan struct{}, cfg.Concurrency+cfg.QueueCapacity), stop: make(chan struct{}), active: map[string]context.CancelFunc{}, resumeScans: map[string]struct{}{}}
 	for id, p := range cfg.RuntimeProfiles {
 		if strings.TrimSpace(id) == "" || len(id) > 128 {
 			return nil, ErrInvalid
@@ -472,8 +474,39 @@ func (s *Service) Resume(namespace, id, input string) (*Task, error) {
 		return nil, ErrConflict
 	}
 	if docker, ok := s.runner.(*DockerRunner); ok {
-		if err := docker.CheckDiskQuota(context.Background(), task.Workspace); err != nil {
+		if _, exists := s.resumeScans[task.ID]; exists {
+			return nil, ErrConflict
+		}
+		scanID, workspace, sessionID, runCount := task.ID, task.Workspace, task.SessionID, len(task.Runs)
+		s.resumeScans[scanID] = struct{}{}
+		// Also release single-flight state during panic unwinding; the inner closure
+		// restores the lock before any outer defers run.
+		defer delete(s.resumeScans, scanID)
+		scan := docker.CheckDiskQuota
+		if s.resumeQuotaScan != nil {
+			scan = s.resumeQuotaScan
+		}
+		scanErr := func() error {
+			s.mu.Unlock()
+			defer s.mu.Lock()
+			return s.scanResumeQuota(scan, workspace)
+		}()
+		delete(s.resumeScans, scanID)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		if err := s.available(); err != nil {
 			return nil, err
+		}
+		task, err = s.Get(namespace, id)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return nil, ErrConflict
+			}
+			return nil, err
+		}
+		if !terminal(task.Status) || task.ID != scanID || task.Workspace != workspace || task.SessionID != sessionID || len(task.Runs) != runCount {
+			return nil, ErrConflict
 		}
 	}
 	select {
@@ -495,6 +528,31 @@ func (s *Service) Resume(namespace, id, input string) (*Task, error) {
 	}
 	s.queue <- id
 	return task, nil
+}
+
+const resumeQuotaScanTimeout = 30 * time.Second
+
+// The service stop channel is the existing shutdown authority. The watcher is
+// joined before returning, including quick scans, so it cannot leak per request.
+func (s *Service) scanResumeQuota(scan func(context.Context, string) error, workspace string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), resumeQuotaScanTimeout)
+	defer cancel()
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		select {
+		case <-s.stop:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	err := scan(ctx, workspace)
+	if err == nil {
+		err = ctx.Err()
+	}
+	cancel()
+	<-stopped
+	return err
 }
 
 func (s *Service) worker() {

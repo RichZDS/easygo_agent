@@ -226,6 +226,8 @@ func (g *Gateway) Complete(ctx context.Context, r ai.Request, emit func(ai.Event
 	start := time.Now()
 	obs := Observation{RequestID: r.RequestID, Model: r.Model}
 	var settle func(Observation) error
+	var accounting *accountingReader
+	var price *Pricing
 	if obs.RequestID == "" {
 		obs.RequestID = newRequestID()
 	}
@@ -233,6 +235,10 @@ func (g *Gateway) Complete(ctx context.Context, r ai.Request, emit func(ai.Event
 		obs.Latency = time.Since(start)
 		obs.Usage = out.Usage
 		obs.Cost = out.Cost
+		if accounting != nil {
+			obs.Usage = accounting.Usage()
+			obs.Cost = calculateCost(obs.Usage, price)
+		}
 		if err != nil {
 			var e *Error
 			if errors.As(err, &e) {
@@ -262,6 +268,7 @@ func (g *Gateway) Complete(ctx context.Context, r ai.Request, emit func(ai.Event
 		return out, fail("unknown_model", "model alias is not configured")
 	}
 	obs.Protocol = m.Protocol
+	price = m.Price
 	body, e := encodeRequest(m, r, emit != nil)
 	if e != nil {
 		return out, e
@@ -309,7 +316,19 @@ func (g *Gateway) Complete(ctx context.Context, r ai.Request, emit func(ai.Event
 	}
 	defer resp.Body.Close()
 	obs.HTTPStatus = resp.StatusCode
+	var responseReader io.Reader = resp.Body
+	if m.Protocol != "custom" {
+		limit := g.bodyLimit
+		if emit != nil {
+			limit = g.streamLimit
+		}
+		accounting = newAccountingReader(resp.Body, m.Protocol, resp.Header.Get("Content-Type"), limit, g.eventLimit)
+		responseReader = accounting
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if accounting != nil {
+			_, _ = io.Copy(io.Discard, accounting)
+		}
 		return out, &Error{Code: "upstream_http_error", Message: "upstream rejected request", Status: resp.StatusCode}
 	}
 	if emit != nil {
@@ -326,13 +345,19 @@ func (g *Gateway) Complete(ctx context.Context, r ai.Request, emit func(ai.Event
 			}
 			return nil
 		}
-		out, e = decodeStream(resp.Body, m, r.Model, g.streamLimit, g.eventLimit, wrapped)
+		out, e = decodeStream(responseReader, m, r.Model, g.streamLimit, g.eventLimit, wrapped)
 	} else {
 		var raw []byte
-		raw, e = readBounded(resp.Body, g.bodyLimit)
+		raw, e = readBounded(responseReader, g.bodyLimit)
 		if e == nil {
 			out, e = decodeResponse(m, r.Model, raw)
 		}
+	}
+	// Only semantic terminal failures may be followed by a final usage frame.
+	// Callback cancellation/protocol errors must stop the upstream immediately.
+	var semantic *Error
+	if e != nil && accounting != nil && ctx.Err() == nil && errors.As(e, &semantic) && (semantic.Code == "incomplete_response" || semantic.Code == "refused_response") {
+		_, _ = io.Copy(io.Discard, accounting)
 	}
 	if ctx.Err() != nil {
 		return ai.Response{}, caused("canceled", "request canceled", ctx.Err())

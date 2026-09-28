@@ -6,10 +6,14 @@ import (
 	"io"
 	"strconv"
 
+	"easygo-agent/rpc"
 	"easygo-agent/services/ai-gateway/ai"
 )
 
 func decodeObject(raw []byte) (object, error) {
+	if rpc.ValidateJSON(raw) != nil {
+		return nil, fail("invalid_response", "invalid response JSON")
+	}
 	d := json.NewDecoder(bytes.NewReader(raw))
 	d.UseNumber()
 	var o object

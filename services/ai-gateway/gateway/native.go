@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -29,8 +30,14 @@ func (g *Gateway) Native(ctx context.Context, alias, protocol, requestID string,
 		obs.RequestID = newRequestID()
 	}
 	var settle func(Observation) error
+	var accounting *accountingReader
+	var price *Pricing
 	defer func() {
 		obs.Latency = time.Since(start)
+		if accounting != nil {
+			obs.Usage = accounting.Usage()
+			obs.Cost = calculateCost(obs.Usage, price)
+		}
 		if err != nil {
 			var e *Error
 			if errors.As(err, &e) {
@@ -57,6 +64,7 @@ func (g *Gateway) Native(ctx context.Context, alias, protocol, requestID string,
 		return out, fail("unknown_model", "model alias is not configured")
 	}
 	obs.Protocol = m.Protocol
+	price = m.Price
 	if protocol != m.Protocol || protocol == "custom" {
 		return out, fail("unsupported_capability", "runtime protocol does not match model route")
 	}
@@ -108,7 +116,13 @@ func (g *Gateway) Native(ctx context.Context, alias, protocol, requestID string,
 	}
 	defer res.Body.Close()
 	obs.HTTPStatus = res.StatusCode
+	accountingLimit := g.bodyLimit
+	if accountingLimit > 8<<20 {
+		accountingLimit = 8 << 20
+	}
+	accounting = newAccountingReader(res.Body, protocol, res.Header.Get("Content-Type"), accountingLimit, g.eventLimit)
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, accounting)
 		return out, &Error{Code: "upstream_http_error", Message: "upstream rejected request", Status: res.StatusCode}
 	}
 	// A unary RPC carries base64 bytes; cap at 8MiB even if other gateway limits
@@ -117,7 +131,7 @@ func (g *Gateway) Native(ctx context.Context, alias, protocol, requestID string,
 	if limit > 8<<20 {
 		limit = 8 << 20
 	}
-	raw, e = readBounded(res.Body, limit)
+	raw, e = readBounded(accounting, limit)
 	if e != nil {
 		return out, e
 	}

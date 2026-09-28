@@ -1,5 +1,7 @@
 # 选择 Agent 框架与模型
 
+更新：已完成 DeepSeek 真实 API、四框架续跑与文件工具验收，见 [真实接口验收](deepseek-live-verification.md)。下文初轮夹具测试范围保留用于区分证据。
+
 工坊新增运行配置层。调用方只选择管理员公布的配置 ID；一个配置明确绑定框架、模型路由及协议。工作流可允许多个配置，例如同一个写作任务选择 `pi-main`、`openclaw-main`、`codex-responses` 或 `claude-messages`。不同模型可以再配不同 ID，不需要更换 Agent Loop。
 
 部署仍是网关、TS Loop、工坊三个服务。Codex、Claude Code、Pi、OpenClaw 在工坊里作为子进程运行，OpenClaw 使用 `agent --local`，不再启动一个公开 Gateway。

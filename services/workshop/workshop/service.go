@@ -242,7 +242,7 @@ func New(cfg Config, runner Runner) (*Service, error) {
 				return err
 			}
 			if a := task.Runs[len(task.Runs)-1].Acceptance; a != nil && a.State == "interrupted" {
-				if err := appendEvent(tx, task, Event{Kind: "acceptance", Acceptance: &AcceptanceEvent{State: "interrupted"}}); err != nil {
+				if err := appendEvent(tx, task, Event{Kind: "acceptance", Acceptance: &AcceptanceEvent{State: "interrupted", FalseGreen: a.FalseGreen}}); err != nil {
 					return err
 				}
 			}
@@ -816,7 +816,7 @@ func (s *Service) Close() error {
 					return err
 				}
 				if a := task.Runs[len(task.Runs)-1].Acceptance; a != nil && a.State == "interrupted" {
-					if err := appendEvent(tx, task, Event{Kind: "acceptance", Acceptance: &AcceptanceEvent{State: "interrupted"}}); err != nil {
+					if err := appendEvent(tx, task, Event{Kind: "acceptance", Acceptance: &AcceptanceEvent{State: "interrupted", FalseGreen: a.FalseGreen}}); err != nil {
 						return err
 					}
 				}

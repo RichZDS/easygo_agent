@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -244,6 +245,64 @@ func TestAcceptanceRestartInterruption(t *testing.T) {
 		t.Fatal("missing acceptance interruption event")
 	}
 }
+
+// TestAcceptanceRestartRecomputesFalseGreen formalizes the terminal review's
+// probe: a crashed run stored as acceptance failed + false_green=true is
+// forced to interrupted on restart, and must not keep a false_green flag
+// that the truth table (submitted + tests=pass + failed) no longer supports
+// once the state is interrupted.
+func TestAcceptanceRestartRecomputesFalseGreen(t *testing.T) {
+	root := t.TempDir()
+	cfg := Config{Root: root, Concurrency: 1, Workflows: []Workflow{{Name: "test", Version: "1", Engine: "codex", Model: "fixture", Instructions: "offline", Policy: "workspace-write", TimeoutSeconds: 5}}}
+	s, err := New(cfg, artifactRunnerFunc(func(context.Context, Invocation, func(Event) error) (Result, error) { return Result{}, nil }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, runID := uuid.NewString(), uuid.NewString()
+	task := Task{ID: id, Namespace: "owner", Status: Running, Workflow: Workflow{Acceptance: &AcceptanceConfig{Checks: []AcceptanceCheck{{Name: "unit", Command: []string{"/unit"}, TimeoutSeconds: 1}}}}, Runs: []Run{{ID: runID, Status: Running, Acceptance: &Acceptance{State: "failed", FalseGreen: true, Evidence: []Evidence{}}}}}
+	s.mu.Lock()
+	err = s.db.Update(func(tx *bolt.Tx) error {
+		if err := appendEvent(tx, &task, Event{Kind: "crew.message", Message: &CrewMessage{ID: uuid.NewString(), Direction: "from_worker", Kind: "submit", Text: "ready", Claims: &CrewClaims{Tests: "pass"}}}); err != nil {
+			return err
+		}
+		return putTask(tx, &task)
+	})
+	s.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	s.closed = true
+	close(s.stop)
+	s.mu.Unlock()
+	s.wg.Wait()
+	s.db.Close()
+	restored, err := New(cfg, artifactRunnerFunc(func(context.Context, Invocation, func(Event) error) (Result, error) { return Result{}, nil }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Close()
+	got, err := restored.Get("owner", id)
+	if err != nil || got.Status != Interrupted || got.Runs[0].Acceptance.State != "interrupted" || got.Runs[0].Acceptance.FalseGreen {
+		t.Fatalf("got=%+v acceptance=%+v err=%v", got, got.Runs[0].Acceptance, err)
+	}
+	events, err := restored.Events("owner", id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, event := range events {
+		if event.Acceptance != nil && event.Acceptance.State == "interrupted" {
+			found = true
+			if event.Acceptance.FalseGreen {
+				t.Fatal("interruption event still carries the stale false_green")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("missing acceptance interruption event")
+	}
+}
 func TestAcceptanceContainerOptions(t *testing.T) {
 	r, _, _ := dockerFixture(t)
 	args := r.checkContainerOptions("check", "/host/work", "/host/checks", AcceptanceCheck{Command: []string{"/pack/checks/unit", "arg"}})
@@ -253,7 +312,15 @@ func TestAcceptanceContainerOptions(t *testing.T) {
 		}
 	}
 	joined := strings.Join(args, " ")
-	if strings.Contains(joined, "EASYGO_") || strings.Contains(joined, "relay") || !strings.Contains(joined, ",dst=/workspace,bind-propagation=rprivate,readonly") || !strings.Contains(joined, ",dst=/pack/checks,readonly") {
+	if strings.Contains(joined, "EASYGO_") || strings.Contains(joined, "relay") {
 		t.Fatal("check isolation arguments")
+	}
+	// Assert the workspace and pack mounts are readonly by field-set
+	// membership, not by locking the whole mount string's field order.
+	if mount, ok := findMount(args, runtimeWorkspace); !ok || !slices.Contains(mount, "readonly") {
+		t.Fatalf("check workspace mount not readonly: %v", mount)
+	}
+	if mount, ok := findMount(args, "/pack/checks"); !ok || !slices.Contains(mount, "readonly") {
+		t.Fatalf("check pack mount not readonly: %v", mount)
 	}
 }

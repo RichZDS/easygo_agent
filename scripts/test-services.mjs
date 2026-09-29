@@ -116,8 +116,8 @@ try {
       }
     }
     if (prompt.includes('RECOVER_TOOL_ERROR')) {
-      if (!last) tool = { name: 'calculator', arguments: JSON.stringify({ operation: 'divide', a: 1, b: 0 }) };
-      else { assert.match(last.content, /division_by_zero/); content = 'RECOVERED_TOOL_ERROR'; }
+      if (!last) tool = { name: 'workshop_get', arguments: JSON.stringify({}) };
+      else { assert.match(last.content, /invalid_string/); content = 'RECOVERED_TOOL_ERROR'; }
     }
     const id = `call-${providerCalls}`;
     const message = tool ? { role: 'assistant', content: null, tool_calls: [{ id, type: 'function', function: tool }] } : { role: 'assistant', content };

@@ -15,6 +15,19 @@ before(() => { pki = certificates(); });
 after(() => pki.close());
 const envelope = (method, params = {}, id = 'test') => ({ jsonrpc: '2.0', id, method, params: { namespace: 'demo', ...params } });
 
+test('pack assistant instructions reach model requests and missing roles reject startup', async () => {
+  const h = await harness(pki, {config:{pack_dir:new URL('../../../packs/base',import.meta.url).pathname},gateway:(b,res)=>{
+    assert.match(b.params.request.messages[0].content[0].text,/outcome and platform acceptance/);
+    assert.equal(b.params.request.tools.some(t=>t.name==='calculator'),false);
+    json(res,b.id,response());
+  }});
+  try {
+    const run = await start(h);
+    assert.equal((await terminal(h,run.id)).status,'completed');
+    await assert.rejects(startServer({...h.config,database:join(h.dir,'missing-role.sqlite'),pack_dir:join(h.dir,'absent')}), /ENOENT/);
+  } finally {await h.close();}
+});
+
 test('public mTLS surface: cert trust/pins, exact methods/namespaces, health and strict envelopes', async () => {
   const h = await harness(pki);
   try {
@@ -47,12 +60,12 @@ for (const streaming of [false, true]) test(`real gateway ${streaming ? 'SSE' : 
     assert.equal(b.params.stream, streaming);
     const reply = messages.some(m => m.role === 'tool') ? response('final') : response('', [
       { type: 'reasoning', text: 'reasoning', provider_state: opaque },
-      tool('calculator', { operation: 'multiply', a: 6, b: 7 }, 'calc'),
+      tool('workshop_get', {}, 'local-error'),
       tool('workshop_submit', { workflow: 'fixture', input: 'work' }, 'submit')
     ]);
     if (messages.some(m => m.role === 'tool')) {
       assert.deepEqual(messages.find(m => m.role === 'assistant').content[0].provider_state, opaque);
-      assert.deepEqual(JSON.parse(messages.find(m => m.role === 'tool').content[0].text), { result: 42 });
+      assert.deepEqual(JSON.parse(messages.find(m => m.role === 'tool').content[0].text), { code: 'invalid_string' });
     }
     if (streaming) await sse(res, b.id, reply); else json(res, b.id, reply);
   }});
@@ -209,7 +222,7 @@ test('unknown or model-controlled scope/tool parameters recover without forbidde
 test('step cap permits exactly one final no-tools turn', async () => {
   const h = await harness(pki, { config: { max_steps: 1 }, gateway: (b, res) => {
     if (b.params.request.tool_choice === 'none') { assert.equal(b.params.request.tools, undefined); json(res, b.id, response('limited final')); }
-    else json(res, b.id, response('', [tool('calculator', { operation: 'add', a: 1, b: 2 })]));
+    else json(res, b.id, response('', [tool('workshop_get', {})]));
   }});
   try { const run = await start(h); const done = await terminal(h, run.id); assert.equal(done.status, 'completed'); assert.equal(h.gateway.calls.length, 2); assert.equal(done.result.message.content[0].text, 'limited final'); }
   finally { await h.close(); }
@@ -432,7 +445,8 @@ test('workshop result/list limits match server bounds in model schemas and execu
 
 
 for (const [name, args, code] of [
-  ['calculator', { operation: 'divide', a: 3, b: 0 }, 'division_by_zero'],
+  ['workshop_get', {}, 'invalid_string'],
+  ['calculator', {}, 'unknown_tool'],
   ['workshop_get', { task_id: 42 }, 'invalid_string'],
   ['workshop_get', null, 'invalid_params']
 ]) test(`${name} ordinary argument error commits before the next model completes`, async () => {
@@ -459,7 +473,7 @@ test('failed error-result commit prevents the next tool and model call', async (
   const gate = deferred();
   const h = await harness(pki, { gateway: async (b, res) => {
     await gate.promise;
-    json(res, b.id, response('', [tool('calculator', { operation: 'divide', a: 3, b: 0 }, 'bad'), tool('workshop_submit', { workflow: 'fixture', input: 'must not execute' }, 'later')]));
+    json(res, b.id, response('', [tool('workshop_get', {}, 'bad'), tool('workshop_submit', { workflow: 'fixture', input: 'must not execute' }, 'later')]));
   }});
   try {
     const run = await start(h); await until(() => h.gateway.calls.length === 1);

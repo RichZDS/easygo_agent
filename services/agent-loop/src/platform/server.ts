@@ -13,7 +13,7 @@ export interface PlatformConfig {
 }
 export const PUBLIC_METHODS = new Set([
   'agent.session.create', 'agent.session.list', 'agent.session.history', 'agent.run.start', 'agent.run.get', 'agent.run.cancel', 'agent.run.events', 'agent.workshop.catalog',
-  'workshop.submit', 'workshop.get', 'workshop.list', 'workshop.cancel', 'workshop.resume', 'workshop.result', 'workshop.events', 'workshop.artifact',
+  'workshop.submit', 'workshop.get', 'workshop.list', 'workshop.cancel', 'workshop.resume', 'workshop.result', 'workshop.events', 'workshop.artifact', 'workshop.message', 'workshop.evidence',
   'agent.memory.list', 'agent.memory.upsert', 'agent.memory.delete', 'agent.memory.consolidate', 'agent.memory.import',
   'agent.skills.list', 'agent.skills.get', 'agent.skills.upsert', 'agent.skills.delete', 'agent.skills.import'
 ]);

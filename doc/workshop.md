@@ -265,7 +265,36 @@ run 结束后 `outcome` 按最后一条 submit/blocked/ask 判定为 submitted/b
 | write | `path` 为工作区相对路径，`text` 为文件内容 |
 | inbox | 轮询至收到消息；`text` 可指定匹配片段，`after` 缺省 0，`timeout_ms` 缺省 5000、上限 60000 |
 | duplicate | 用相同 `client_id`/`kind`/`text` 连续 POST 两次，核对同一回执；kind 缺省 report，submit 时另带 tests |
+| echo_input | 回显完整 User input 原文到本 run result，UTF-8 边界截断到 64 KiB |
+| write-denied | 尝试写 `path`，仅写入被拒绝才通过，用于检查脚本隔离证明 |
 | silent | 只发 native 成功终止事件，不发 crew 消息，然后退出 |
 | exit | `exit_code` 为 0 时 native 成功退出，为 1..125 时失败退出 |
 
 命令回执和 inbox 响应作为 native 文本事件输出，便于场景库检查。脚本结束默认 native 成功退出。`silent` 在空脚本或只有此动作时产生 outcome=none。
+
+
+## P1 平台验收与证据
+
+Docker 模式的工作流可以配置：
+
+```json
+{
+  "acceptance": {
+    "checks": [
+      {"name":"npm-test","command":["/pack/checks/npm-test.sh"],"timeout_seconds":300}
+    ]
+  }
+}
+```
+
+检查数为 1..8，名字唯一、由小写字母/数字/连字符组成且最多 32 字符；命令首项须为绝对路径，超时为 1..1800 秒。host 模式配置 acceptance 会拒绝启动。声明检查时必须配置 `pack_dir`，并有 `checks/` 目录。
+
+启动时把可信 `pack_dir/checks` 复制到 `<root>/packs/<sha256>/checks`；拒绝符号链接，目录 0555，文件去掉写权限并保留执行位。该副本在任务工作区之外，修改原始 pack 不会改变当前服务已选定的副本。base 包的 npm-test.sh 要求 package.json 存在 test 脚本，以离线模式运行 npm test。
+
+CLI 成功并收集产物后，任务继续保持 running。平台计算工作区树哈希，再按顺序在新容器执行每个检查：工作区和 pack 副本只读、无网络、无 relay 和凭证，沿用任务资源限制；超时或取消会强制回收容器。树哈希按相对路径排序，对路径、类型、大小、文件内容摘要进行确定性编码；排除根层 `.workshop-home`，符号链接只记录链接目标。
+
+全部退出 0 为 passed；非 0 或超时为 failed；容器/存储等基础设施故障为 error。CLI 失败或缺少产物时为 skipped；检查期间取消为 cancelled，重启未完成检查为 interrupted。run 的执行状态与 acceptance 分开：CLI 和产物阶段成功时，即使验收 failed/error，任务执行终态仍按契约为 succeeded。报审 submit 自称 tests=pass，而最终验收 failed 时标记 false_green。
+
+每项实际执行的检查记录命令、退出码、超时、耗时、输出字节数和工作区摘要，输出写入 `<root>/evidence/<task_id>/<evidence_id>.log`，最多保留 1 MiB。`output_bytes` 是收到的完整字节数，`output_truncated` 表示截断；分页的 total_bytes 是实际保存的字节数。UTF-8 分页不拆开有效字符；无效字节在返回 text 时替换，offset 仍按原始已存字节计数。
+
+`workshop.evidence` 不带 evidence_id 时返回有 namespace/task_id/run_id 的列表对象；指定 evidence_id 时返回有完整身份字段的输出页。摘要提供 acceptance_state、false_green、evidence_count。读取只限所属 namespace，检查输出不经施工者转述。

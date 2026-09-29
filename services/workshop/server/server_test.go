@@ -34,7 +34,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"f
 	if e := os.WriteFile(script, []byte(body), 0700); e != nil {
 		t.Fatal(e)
 	}
-	s, service, e := New(Config{ServerConfig: rpc.ServerConfig{Listen: "127.0.0.1:0", TLS: identity, Authorization: []rpc.Authorization{{ID: "loop", CertFile: caller.CertFile, Methods: []string{"health", "workshop.workflows", "workshop.submit", "workshop.get", "workshop.list", "workshop.cancel", "workshop.resume", "workshop.result", "workshop.events", "workshop.artifact", "workshop.message"}, Namespaces: []string{"tenant-a", "tenant-b"}}}}, Workshop: workshop.Config{Root: t.TempDir(), Concurrency: 1, QueueCapacity: 8, Engines: map[string]workshop.EngineConfig{"codex": {Binary: script}}, Workflows: []workshop.Workflow{{Name: "note", Version: "1", Instructions: "write note", Engine: "codex", Model: "fixture", Policy: "workspace-write", TimeoutSeconds: 10, Artifacts: []string{"note.md"}}}}})
+	s, service, e := New(Config{ServerConfig: rpc.ServerConfig{Listen: "127.0.0.1:0", TLS: identity, Authorization: []rpc.Authorization{{ID: "loop", CertFile: caller.CertFile, Methods: []string{"health", "workshop.workflows", "workshop.submit", "workshop.get", "workshop.list", "workshop.cancel", "workshop.resume", "workshop.result", "workshop.events", "workshop.artifact", "workshop.message", "workshop.evidence"}, Namespaces: []string{"tenant-a", "tenant-b"}}}}, Workshop: workshop.Config{Root: t.TempDir(), Concurrency: 1, QueueCapacity: 8, Engines: map[string]workshop.EngineConfig{"codex": {Binary: script}}, Workflows: []workshop.Workflow{{Name: "note", Version: "1", Instructions: "write note", Engine: "codex", Model: "fixture", Policy: "workspace-write", TimeoutSeconds: 10, Artifacts: []string{"note.md"}}}}})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -88,6 +88,10 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"f
 	if messageConflict.Error == nil || messageConflict.Error.Code != -32009 {
 		t.Fatal("message conflict", messageConflict)
 	}
+	evidence := call("evidence", taskParams(id)).(map[string]any)
+	if evidence["namespace"] != "tenant-a" || evidence["task_id"] != id || evidence["acceptance_state"] != "skipped" || len(evidence["evidence"].([]any)) != 0 {
+		t.Fatal("evidence list identity/defaults", evidence)
+	}
 	result := call("result", taskParams(id)).(map[string]any)
 	if result["text"] != "fixture answer" || result["eof"] != true {
 		t.Fatalf("result %+v", result)
@@ -138,7 +142,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"f
 	}
 	call("cancel", taskParams(hangID))
 	wait(hangID, "cancelled")
-	for _, method := range []string{"get", "cancel", "resume", "result", "events", "artifact", "message"} {
+	for _, method := range []string{"get", "cancel", "resume", "result", "events", "artifact", "message", "evidence"} {
 		params := fmt.Sprintf(`{"namespace":"tenant-b","task_id":%q`, id)
 		if method == "resume" {
 			params += `,"input":"steal"`
@@ -169,6 +173,8 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"f
 	}{
 		{"submit", `{"namespace":"tenant-a","workflow":"note","input":"hello"}`, -32602},
 		{"submit", `{"namespace":"tenant-a","workflow":"note","input":"different","idempotency_key":"key-1"}`, -32009},
+		{"evidence", fmt.Sprintf(`{"namespace":"tenant-a","task_id":%q,"limit":3}`, id), -32602},
+		{"evidence", fmt.Sprintf(`{"namespace":"tenant-a","task_id":%q,"evidence_id":"missing"}`, id), -32004},
 		{"list", `{"namespace":"tenant-a","limit":0}`, -32602},
 		{"list", `{"namespace":"tenant-a","limit":null}`, -32602},
 		{"list", `{"namespace":"tenant-a","offset":-1}`, -32602},

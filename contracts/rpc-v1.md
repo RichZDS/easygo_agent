@@ -115,7 +115,7 @@ TS 服务拥有自己的持久化会话、队列、原始消息与事件。按�
 
 ## P1 Harness 扩展（v1.3）
 
-本节为 P1 契约。施工者通道、outcome 和 pack 角色说明由 W-1 实现；acceptance、evidence 和检查容器由 W-2 实现。
+本节为 P1 契约。工坊已实现施工者通道、outcome、pack 角色说明、acceptance、evidence 和检查容器。
 
 `workshop.events` 保持 Event 数组形状，以 mTLS 对端和请求 namespace/task_id 限定身份。读取方先校验 `workshop.get` 身份，再以其 `run_ids` 验证每条事件归属，并校验结构、枚举和严格递增且大于 after 的序号；任一条不合格则整体拒绝。
 

@@ -68,6 +68,13 @@ func crewScript(actions []crewAction, input string) int {
 				text = text[:end]
 			}
 			crewOutput([]byte(text))
+		case "write-denied":
+			denied := os.WriteFile(a.Path, []byte("worker must not change checks"), 0600) != nil
+			if !denied {
+				fmt.Fprintln(os.Stderr, "worker unexpectedly wrote protected checks")
+				return 6
+			}
+			crewOutput([]byte("worker write denied: " + a.Path))
 		case "inbox":
 			timeout := a.TimeoutMS
 			if timeout == 0 {

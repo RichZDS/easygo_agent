@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -39,6 +40,12 @@ func invocationPrompt(in Invocation) string {
 	prompt := in.Workflow.Instructions
 	if in.WorkerInstructions != "" {
 		prompt = in.WorkerInstructions + "\n\n" + prompt
+	}
+	if in.Workflow.Acceptance != nil {
+		prompt += "\n\nAcceptance checks the platform will run after you finish:"
+		for _, check := range in.Workflow.Acceptance.Checks {
+			prompt += "\n- " + check.Name + ": " + strings.Join(check.Command, " ")
+		}
 	}
 	return prompt + "\n\nUser input:\n" + in.Input
 }

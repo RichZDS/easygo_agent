@@ -27,7 +27,8 @@
         "workshop.resume",
         "workshop.result",
         "workshop.events",
-        "workshop.message"
+        "workshop.message",
+        "workshop.evidence"
       ],
       "namespaces": [
         "*"

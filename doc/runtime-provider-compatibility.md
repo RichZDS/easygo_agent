@@ -266,3 +266,48 @@ WORKSHOP_NATIVE_OPENCLAW=/tmp/easygo-native-runtimes/openclaw-cli \
 ```
 
 Run from `services/workshop` on the integrated implementation with loopback listeners permitted. The review's independent version/status extraction is preserved in `/tmp/crew/runtime-a928/native-cli/foreman-version-confirmation.json` and `foreman-log-confirmation.json`. The latter records the source log SHA-256 and both session/text/usage records per runtime. The initial failing logs remain historical evidence; the current integrated parser defect status is **fixed and passing**.
+
+
+## P1 Docker shell tools (2026-09-29)
+
+This section adds the Docker execution distinction to the historical host-runner
+notes above. Fixed image `easygo-task-runtime:platform` was queried offline on
+2026-09-29 with the dedicated daemon, `--network none`, fresh temporary HOME,
+read-only root and no credentials. Observed versions: Claude Code 2.1.281,
+Pi 0.87.1, OpenClaw 2026.9.6 (`eb377ac`). No model was called.
+
+| Runtime | Docker-only tool policy | Host CommandRunner |
+| --- | --- | --- |
+| Claude | Append `Bash` to `--tools`, add `--allowedTools Bash`; retain `--bare`, `--restricted`, `--strict-mcp-config` and noninteractive permission handling | Existing file-only tools and policy unchanged |
+| Pi | Append `bash` to `--tools`; retain extension/context discovery restrictions | Existing file-only tools unchanged |
+| OpenClaw | Append `exec` to `tools.allow`, set `tools.exec={"host":"gateway","mode":"full"}`; keep plugins disabled and the existing file policy | No exec tool or exec policy injected |
+
+The installed Claude help explicitly says `--restricted` removes command tools
+**unless `--tools` names them**. Therefore explicit Bash works with restricted
+mode; removing it or using bypassPermissions is unnecessary. Its `--bare` help
+states built-in features remain available. The explicit Bash allow rule permits
+noninteractive shell calls without changing host settings. Pi help lists `bash`
+as a built-in command execution tool.
+
+OpenClaw's installed config schema identifies the `exec` tool and accepts
+`host=gateway`, `mode=full`. An offline `config validate --json` returned valid,
+and `exec-policy show --json` reported effective mode/security `full` and ask
+`off`, including when no approval store exists. Here “gateway” means the embedded
+CLI process's local execution target **inside the task container**, not the
+Workshop controller or a new service.
+
+Both workspace-write and read-only Docker workflows receive shell tools. The
+outer container enforces network isolation, UID/resource limits, a read-only root,
+and the workflow's workspace mount policy. A read-only workspace remains read-only
+regardless of shell availability; its native HOME submount retains the existing
+write permission. No MCP or network tools were added. Host mode continues to
+exclude shell from Claude/Pi/OpenClaw; only Codex can invoke easygo-crew there,
+and only when a model relay supplies the crew environment.
+
+Evidence: `/tmp/crew/acl-530e/workshop/w4-versions.log`, `w4-claude-help.log`,
+`w4-pi-help.log`, `w4-openclaw-schema.json`, `w4-openclaw-exec-schema.json`,
+`w4-openclaw-validate.log`. Parameter/config tests cover each CLI × policy ×
+initial/resumed run through DockerRunner and the host configuration path. These
+checks establish supported flags, effective local policy and adapter wiring;
+real model tool selection, successful easygo-crew execution by each native CLI,
+and native-session tool behavior still require the foreman's model proof.

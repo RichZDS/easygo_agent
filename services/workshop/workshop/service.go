@@ -27,23 +27,25 @@ var keysBucket = []byte("idempotency")
 // Service owns an exclusive bbolt lock and a bounded set of worker goroutines.
 // Namespace must come from a trusted caller, never model-generated arguments.
 type Service struct {
-	mu              sync.Mutex
-	db              *bolt.DB
-	root            string
-	workflows       map[string]Workflow
-	runtimes        map[string]RuntimeProfile
-	runner          Runner
-	queue           chan string
-	slots           chan struct{}
-	stop            chan struct{}
-	active          map[string]context.CancelFunc
-	resumeScans     map[string]struct{}
-	resumeQuotaScan func(context.Context, string) error // nil uses Docker CheckDiskQuota; test seam
-	wg              sync.WaitGroup
-	closed          bool
-	closeOnce       sync.Once
-	closeErr        error
-	err             error // durability failure: reject subsequent mutations
+	workerInstructions string
+	packChecks         string
+	mu                 sync.Mutex
+	db                 *bolt.DB
+	root               string
+	workflows          map[string]Workflow
+	runtimes           map[string]RuntimeProfile
+	runner             Runner
+	queue              chan string
+	slots              chan struct{}
+	stop               chan struct{}
+	active             map[string]context.CancelFunc
+	resumeScans        map[string]struct{}
+	resumeQuotaScan    func(context.Context, string) error // nil uses Docker CheckDiskQuota; test seam
+	wg                 sync.WaitGroup
+	closed             bool
+	closeOnce          sync.Once
+	closeErr           error
+	err                error // durability failure: reject subsequent mutations
 }
 
 // Workflows returns a name-sorted metadata catalog. Each call returns independent
@@ -115,6 +117,10 @@ func New(cfg Config, runner Runner) (*Service, error) {
 		return nil, err
 	}
 	s := &Service{root: root, workflows: map[string]Workflow{}, runtimes: map[string]RuntimeProfile{}, runner: runner, queue: make(chan string, cfg.Concurrency+cfg.QueueCapacity), slots: make(chan struct{}, cfg.Concurrency+cfg.QueueCapacity), stop: make(chan struct{}), active: map[string]context.CancelFunc{}, resumeScans: map[string]struct{}{}}
+	s.workerInstructions, err = readWorkerInstructions(cfg.PackDir)
+	if err != nil {
+		return nil, err
+	}
 	for id, p := range cfg.RuntimeProfiles {
 		if strings.TrimSpace(id) == "" || len(id) > 128 {
 			return nil, ErrInvalid
@@ -131,6 +137,10 @@ func New(cfg Config, runner Runner) (*Service, error) {
 		s.runtimes[id] = p
 	}
 	for _, w := range cfg.Workflows {
+		if w.Acceptance != nil && cfg.Sandbox.Mode != "docker" {
+			return nil, fmt.Errorf("%w: acceptance requires Docker mode", ErrInvalid)
+		}
+		w.Acceptance = cloneAcceptance(w.Acceptance)
 		if w.RuntimeSpec != nil {
 			return nil, fmt.Errorf("%w: runtime_spec is reserved for task snapshots", ErrInvalid)
 		}
@@ -158,6 +168,14 @@ func New(cfg Config, runner Runner) (*Service, error) {
 			return nil, errors.New("Docker mode requires workflow runtime profiles")
 		}
 		s.workflows[w.Name] = w
+	}
+	needsChecks := false
+	for _, w := range s.workflows {
+		needsChecks = needsChecks || w.Acceptance != nil
+	}
+	s.packChecks, err = snapshotChecks(root, cfg.PackDir, needsChecks)
+	if err != nil {
+		return nil, err
 	}
 	if runner == nil {
 		if cfg.Sandbox.Mode == "docker" {
@@ -210,6 +228,9 @@ func New(cfg Config, runner Runner) (*Service, error) {
 			}
 			if !terminal(task.Status) {
 				finish(&task, Interrupted, "service restarted; explicit resume required")
+				if err := finishCrewOutcome(tx, &task); err != nil {
+					return err
+				}
 				recovered = append(recovered, &task)
 			}
 			return nil
@@ -219,6 +240,11 @@ func New(cfg Config, runner Runner) (*Service, error) {
 		for _, task := range recovered {
 			if err := putTask(tx, task); err != nil {
 				return err
+			}
+			if a := task.Runs[len(task.Runs)-1].Acceptance; a != nil && a.State == "interrupted" {
+				if err := appendEvent(tx, task, Event{Kind: "acceptance", Acceptance: &AcceptanceEvent{State: "interrupted"}}); err != nil {
+					return err
+				}
 			}
 			if err := appendEvent(tx, task, Event{Kind: "state", Text: string(Interrupted)}); err != nil {
 				return err
@@ -238,6 +264,9 @@ func New(cfg Config, runner Runner) (*Service, error) {
 }
 
 func validateWorkflow(w Workflow) error {
+	if err := validateAcceptance(w.Acceptance); err != nil {
+		return err
+	}
 	if w.Name == "" || w.Version == "" || w.Instructions == "" || w.Model == "" || !knownEngine(w.Engine) || (w.Policy != "read-only" && w.Policy != "workspace-write") || w.TimeoutSeconds < 1 || w.TimeoutSeconds > 86400 {
 		return fmt.Errorf("%w: workflow needs name/version/instructions/model, known engine, explicit policy and timeout 1..86400", ErrInvalid)
 	}
@@ -310,6 +339,7 @@ func (s *Service) Submit(req SubmitRequest) (*Task, error) {
 	default:
 		return nil, ErrFull
 	}
+	w.Acceptance = cloneAcceptance(w.Acceptance)
 	w.Artifacts = append([]string(nil), w.Artifacts...)
 	w.AllowedRuntimes = append([]string(nil), w.AllowedRuntimes...)
 	id := uuid.NewString()
@@ -319,7 +349,7 @@ func (s *Service) Submit(req SubmitRequest) (*Task, error) {
 		return nil, err
 	}
 	now := time.Now().UTC()
-	task := &Task{ID: id, Namespace: req.Namespace, IdempotencyKey: req.IdempotencyKey, Workflow: w, Input: req.Input, Workspace: workspace, Status: Queued, CreatedAt: now, UpdatedAt: now, Runs: []Run{{ID: uuid.NewString(), Input: req.Input, Status: Queued}}}
+	task := &Task{ID: id, Namespace: req.Namespace, IdempotencyKey: req.IdempotencyKey, Workflow: w, Input: req.Input, Workspace: workspace, Status: Queued, CreatedAt: now, UpdatedAt: now, Runs: []Run{{ID: uuid.NewString(), Input: req.Input, Status: Queued, Acceptance: skippedAcceptance()}}}
 	err = s.db.Update(func(tx *bolt.Tx) error {
 		if err := putTask(tx, task); err != nil {
 			return err
@@ -443,6 +473,9 @@ func (s *Service) Cancel(namespace, id string) (*Task, error) {
 		}
 		if task.Status == Queued {
 			finish(task, Cancelled, "cancelled before start")
+			if err := finishCrewOutcome(tx, task); err != nil {
+				return err
+			}
 		} else {
 			task.Status = Cancelling
 			task.Runs[len(task.Runs)-1].Status = Cancelling
@@ -473,6 +506,9 @@ func (s *Service) Resume(namespace, id, input string) (*Task, error) {
 	task, err := s.Get(namespace, id)
 	if err != nil {
 		return nil, err
+	}
+	if len(task.Runs) >= 256 {
+		return nil, ErrRunLimit
 	}
 	if !terminal(task.Status) || task.SessionID == "" {
 		return nil, ErrConflict
@@ -509,6 +545,9 @@ func (s *Service) Resume(namespace, id, input string) (*Task, error) {
 			}
 			return nil, err
 		}
+		if len(task.Runs) >= 256 {
+			return nil, ErrRunLimit
+		}
 		if !terminal(task.Status) || task.ID != scanID || task.Workspace != workspace || task.SessionID != sessionID || len(task.Runs) != runCount {
 			return nil, ErrConflict
 		}
@@ -519,8 +558,11 @@ func (s *Service) Resume(namespace, id, input string) (*Task, error) {
 		return nil, ErrFull
 	}
 	task.Status, task.UpdatedAt = Queued, time.Now().UTC()
-	task.Runs = append(task.Runs, Run{ID: uuid.NewString(), Input: input, ResumeSessionID: task.SessionID, Status: Queued})
+	task.Runs = append(task.Runs, Run{ID: uuid.NewString(), Input: input, ResumeSessionID: task.SessionID, Status: Queued, Acceptance: skippedAcceptance()})
 	err = s.db.Update(func(tx *bolt.Tx) error {
+		if err := resumeCrewInput(tx, task); err != nil {
+			return err
+		}
 		if err := putTask(tx, task); err != nil {
 			return err
 		}
@@ -610,7 +652,7 @@ func (s *Service) execute(id string) {
 	}
 	s.mu.Unlock()
 	defer cancel()
-	result, runErr := s.runner.Run(ctx, Invocation{Namespace: task.Namespace, Workflow: task.Workflow, Workspace: task.Workspace, Input: run.Input, SessionID: run.ResumeSessionID}, func(event Event) error {
+	result, runErr := s.runner.Run(ctx, Invocation{Crew: runCrew{service: s, namespace: task.Namespace, taskID: task.ID, runID: run.ID}, WorkerInstructions: s.workerInstructions, Namespace: task.Namespace, Workflow: task.Workflow, Workspace: task.Workspace, Input: run.Input, SessionID: run.ResumeSessionID}, func(event Event) error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		err := s.db.Update(func(tx *bolt.Tx) error {
@@ -636,6 +678,9 @@ func (s *Service) execute(id string) {
 	if runErr == nil {
 		artifacts, runErr = collectArtifacts(task.Workspace, task.Workflow.Artifacts)
 	}
+	if runErr == nil {
+		runErr = s.runAcceptance(ctx, task)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.active, id)
@@ -658,8 +703,14 @@ func (s *Service) execute(id string) {
 			status, reason = Failed, runErr.Error()
 		}
 		finish(current, status, reason)
+		if err := finishCrewOutcome(tx, current); err != nil {
+			return err
+		}
 		r := &current.Runs[len(current.Runs)-1]
-		r.Text, r.Usage, r.Artifacts = result.Text, result.Usage, artifacts
+		r.Text, r.Usage = result.Text, result.Usage
+		if status == Succeeded {
+			r.Artifacts = artifacts
+		}
 		if result.SessionID != "" {
 			current.SessionID, r.SessionID = result.SessionID, result.SessionID
 		}
@@ -677,7 +728,23 @@ func finish(task *Task, status Status, reason string) {
 	now := time.Now().UTC()
 	task.Status, task.UpdatedAt = status, now
 	run := &task.Runs[len(task.Runs)-1]
+	previousStatus := run.Status
 	run.Status, run.FinishedAt, run.Error = status, &now, reason
+	run.Outcome = "none"
+	if run.Acceptance == nil {
+		run.Acceptance = skippedAcceptance()
+	}
+	if status == Interrupted && task.Workflow.Acceptance != nil && (previousStatus == Running || previousStatus == Cancelling) {
+		run.Acceptance.State = "interrupted"
+	}
+	if run.Acceptance.State == "running" {
+		switch status {
+		case Cancelled, TimedOut:
+			run.Acceptance.State = "cancelled"
+		case Interrupted:
+			run.Acceptance.State = "interrupted"
+		}
+	}
 }
 
 func collectArtifacts(workspace string, paths []string) ([]Artifact, error) {
@@ -735,6 +802,9 @@ func (s *Service) Close() error {
 				}
 				if !terminal(task.Status) {
 					finish(&task, Interrupted, "service stopped; explicit resume required")
+					if err := finishCrewOutcome(tx, &task); err != nil {
+						return err
+					}
 					tasks = append(tasks, &task)
 				}
 				return nil
@@ -744,6 +814,11 @@ func (s *Service) Close() error {
 			for _, task := range tasks {
 				if err := putTask(tx, task); err != nil {
 					return err
+				}
+				if a := task.Runs[len(task.Runs)-1].Acceptance; a != nil && a.State == "interrupted" {
+					if err := appendEvent(tx, task, Event{Kind: "acceptance", Acceptance: &AcceptanceEvent{State: "interrupted"}}); err != nil {
+						return err
+					}
 				}
 				if err := appendEvent(tx, task, Event{Kind: "state", Text: string(Interrupted)}); err != nil {
 					return err

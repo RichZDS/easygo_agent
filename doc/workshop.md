@@ -243,3 +243,76 @@ recovery; it does not claim to simulate a machine power loss.
 Design references were read only: reference runner C's engine profiles, subprocess launch and
 resume logic, normalized activity and workflow models. The implementation avoids
 its business workflow state machine, deployment hooks and compatibility layers.
+
+
+## P1 施工者通道
+
+配置 `pack_dir` 可加载 `<pack_dir>/roles/worker.md`（可选，UTF-8，最多 16 KiB）。controller 镜像内置 `/opt/easygo/packs/base`。工坊在工作流说明之前插入施工者说明，保留 `User input:\n` 输入分隔符；未配置 pack 时沿用原输入。
+
+任务容器和带模型 relay 的 host 任务会收到 `EASYGO_CREW_URL`、`EASYGO_CREW_TOKEN`。`easygo-crew` 复用该 relay，通过 `report` 汇报、`ask` 提问、`blocked` 报卡住、`submit --tests pass|fail|not_run` 报审，用 `inbox [--after N]` 收取工头消息。每次提交有持久化 id/sequence 回执；网络失败最多重试三次，复用 client_id。没有通道时命令退出 2。
+
+工头用 `workshop.message` 写入任务收件箱，用 `workshop.events` 读取 `crew.message` 和 `crew.read`。消息支持幂等键；运行中可读取，任务停止后收到的未读消息在下次 resume 输入中补入并标记已读。每个 run 的施工者消息最多 200 条，收件箱每页最多 50 条。JSON 字段、大小和鉴权要求见 [P1 契约](../contracts/rpc-v1.md#p1-harness-扩展v13)。
+
+run 结束后 `outcome` 按最后一条 submit/blocked/ask 判定为 submitted/blocked/asked；没有则为 none，report 不改变判定。进行中的 run 不输出 outcome。任务最多 256 个 run，get 的 `run_ids` 提供按时间排列的完整 id 集合。
+
+### 离线 crew 夹具
+
+`fixture-cli` 接受 `{"mode":"crew","script":[...]}`。脚本按顺序执行：
+
+| op | 字段与作用 |
+|---|---|
+| crew | `args`：easygo-crew 参数数组，如 `["report","started"]` 或 `["submit","--tests","pass","ready"]` |
+| write | `path` 为工作区相对路径，`text` 为文件内容 |
+| inbox | 轮询至收到消息；`text` 可指定匹配片段，`after` 缺省 0，`timeout_ms` 缺省 5000、上限 60000 |
+| duplicate | 用相同 `client_id`/`kind`/`text` 连续 POST 两次，核对同一回执；kind 缺省 report，submit 时另带 tests |
+| echo_input | 回显完整 User input 原文到本 run result，UTF-8 边界截断到 64 KiB |
+| write-denied | 尝试写 `path`，仅写入被拒绝才通过，用于检查脚本隔离证明 |
+| silent | 只发 native 成功终止事件，不发 crew 消息，然后退出 |
+| exit | `exit_code` 为 0 时 native 成功退出，为 1..125 时失败退出 |
+
+命令回执和 inbox 响应作为 native 文本事件输出，便于场景库检查。脚本结束默认 native 成功退出。`silent` 在空脚本或只有此动作时产生 outcome=none。
+
+
+## P1 平台验收与证据
+
+Docker 模式的工作流可以配置：
+
+```json
+{
+  "acceptance": {
+    "checks": [
+      {"name":"npm-test","command":["/pack/checks/npm-test.sh"],"timeout_seconds":300}
+    ]
+  }
+}
+```
+
+检查数为 1..8，名字唯一、由小写字母/数字/连字符组成且最多 32 字符；命令首项须为绝对路径，超时为 1..1800 秒。host 模式配置 acceptance 会拒绝启动。声明检查时必须配置 `pack_dir`，并有 `checks/` 目录。
+
+启动时把可信 `pack_dir/checks` 复制到 `<root>/packs/<sha256>/checks`；拒绝符号链接，目录 0555，文件去掉写权限并保留执行位。该副本在任务工作区之外，修改原始 pack 不会改变当前服务已选定的副本。base 包的 npm-test.sh 要求 package.json 存在 test 脚本，以离线模式运行 npm test。
+
+CLI 成功并收集产物后，任务继续保持 running。平台计算工作区树哈希，再按顺序在新容器执行每个检查：工作区和 pack 副本只读、无网络、无 relay 和凭证，沿用任务资源限制；超时或取消会强制回收容器。树哈希按相对路径排序，对路径、类型、大小、文件内容摘要进行确定性编码；排除根层 `.workshop-home`，符号链接只记录链接目标。
+
+全部退出 0 为 passed；非 0 或超时为 failed；容器/存储等基础设施故障为 error。CLI 失败或缺少产物时为 skipped；检查期间取消为 cancelled，重启未完成检查为 interrupted。run 的执行状态与 acceptance 分开：CLI 和产物阶段成功时，即使验收 failed/error，任务执行终态仍按契约为 succeeded。报审 submit 自称 tests=pass，而最终验收 failed 时标记 false_green。
+
+每项实际执行的检查记录命令、退出码、超时、耗时、输出字节数和工作区摘要，输出写入 `<root>/evidence/<task_id>/<evidence_id>.log`，最多保留 1 MiB。`output_bytes` 是收到的完整字节数，`output_truncated` 表示截断；分页的 total_bytes 是实际保存的字节数。UTF-8 分页不拆开有效字符；无效字节在返回 text 时替换，offset 仍按原始已存字节计数。
+
+`workshop.evidence` 不带 evidence_id 时返回有 namespace/task_id/run_id 的列表对象；指定 evidence_id 时返回有完整身份字段的输出页。摘要提供 acceptance_state、false_green、evidence_count。读取只限所属 namespace，检查输出不经施工者转述。
+
+### 容器回收在高负载下的韧性
+
+高负载下 `docker rm` 可能在单次 20 秒预算内做不完，但这不代表容器仍然危险：一旦确认它已经不在运行，剩下的只是占一点磁盘（rootfs 只读、日志驱动为 none）。回收因此分三层：
+
+- **有界重试**：`cleanup` 内部最多尝试 3 次 `remove`，每次独立 20 秒预算，两次之间退避 1 秒、2 秒。任意一次成功即算成功；前一次 `rm` 若已在 daemon 侧生效，下一次 `ps` 为空同样算成功。
+- **确认后延迟回收**：3 次都失败时，用一个独立的 20 秒上下文做一次状态确认：`ps` 为空判成功；否则 `inspect` 该容器，只有恰好一个对象、owner 三个标签全部匹配，并且 `State.Running=false`、`Paused=false`、`Restarting=false`，且 `Status` 属于 `created`/`exited`/`dead`/`removing`，才判为"已停止、待回收"——不置位 `cleanupFailure`，把名字记入待回收集合（上限 32，超限按失败即关闭处理），`cleanup` 返回哨兵错误 `errCleanupDeferred`。**其余任何情况**（仍在运行、确认阶段 `ps`/`inspect` 失败或解析失败、标签不符）保持原有的失败即关闭：置位 `cleanupFailure`，`Run` 和 `runCheck` 的准入随之拒绝新工作，直到运维介入。
+- **准入时的尽力清扫**：`Run`、`runCheck` 通过 `initialized` 和 `cleanupFailure` 检查之后，顺手对待回收集合做一次总预算 20 秒的清扫，逐个重新校验标签后 `remove`；同一时刻只允许一个清扫在跑，其余调用直接跳过；清扫失败不阻止准入。重启后仍由 `Initialize` 的孤儿回收兜底。
+
+`errCleanupDeferred` 只改变"要不要置位失败即关闭"，不改变已经得到的检查结果：`runCheck` 遇到该哨兵错误会保留原有的退出码、`timedOut` 和 `err`（包括超时判成 failed 而不是 error），只有真正失败即关闭时才把 `err` 覆盖成 `check container cleanup failed`；`Run` 遇到该哨兵错误不追加 `admission disabled`；`Initialize` 的探针容器遇到该哨兵错误视为初始化成功。证据的 `duration_ms` 只计算"创建到 `start --attach` 返回"这段检查本身的时间，不再把回收（包括重试和确认）算进去。
+
+## Docker 与 host 的 shell 工具
+
+Docker 模式下，Claude、Pi、OpenClaw 分别开放 `Bash`、`bash`、`exec`，用于调用 easygo-crew 和执行测试。只读工作流同样开放 shell，工作区写保护由只读挂载执行；无网络、UID/资源限额和只读根文件系统继续由外层容器保证。未增加 MCP 或网络工具。
+
+Claude 显式配置 `--tools …,Bash --allowedTools Bash`；固定版本允许在 `--restricted` 中显式加入 Bash，因此保留 restricted/bare。OpenClaw 的 exec 目标固定为容器内本地执行，mode=full 避免无交互环境等待许可。Pi 只在已有工具白名单中加入 bash。以上改写只由初始化通过的 DockerRunner 执行。
+
+host 模式保持原有工具范围：Claude/Pi/OpenClaw 只有文件工具，不能调用 easygo-crew；Codex 可执行 shell，但仍需配置模型 relay 才有 crew 通道。参数与固定版本的离线取证见 [运行时兼容性说明](runtime-provider-compatibility.md#p1-docker-shell-tools-2026-09-29)。

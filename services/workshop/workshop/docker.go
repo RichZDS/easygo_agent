@@ -76,14 +76,18 @@ type SandboxConfig struct {
 type dockerCommand func(context.Context, io.Reader, io.Writer, io.Writer, ...string) error
 
 type DockerRunner struct {
-	cfg            SandboxConfig
-	root           string
-	gateway        *ModelGateway
-	maxOutput      int
-	command        dockerCommand
-	mu             sync.Mutex
-	cleanupFailure error
-	initialized    bool
+	cfg                 SandboxConfig
+	root                string
+	gateway             *ModelGateway
+	maxOutput           int
+	command             dockerCommand
+	mu                  sync.Mutex
+	cleanupFailure      error
+	initialized         bool
+	finalQuotaTimeout   time.Duration // test seam; zero keeps the 30-second final scan budget
+	pendingCleanup      map[string]struct{}
+	sweeping            bool
+	cleanupRetryBackoff [2]time.Duration // test seam; zero keeps the 1s/2s backoff
 }
 
 var ownerPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$`)
@@ -308,16 +312,166 @@ func (r *DockerRunner) remove(ctx context.Context, name string) error {
 	return err
 }
 
+const cleanupRetryAttempts = 3
+const maxPendingCleanup = 32
+
+// errCleanupDeferred marks a cleanup that could not remove a container this
+// process has independently confirmed is stopped and therefore no longer
+// dangerous. Callers use errors.Is to keep the result they already have
+// instead of failing closed; the name is left for sweepPendingCleanup.
+var errCleanupDeferred = errors.New("container confirmed stopped; removal deferred")
+
+func stoppedStatus(status string) bool {
+	switch status {
+	case "created", "exited", "dead", "removing":
+		return true
+	}
+	return false
+}
+
+// confirmCleanup runs under its own budget after remove has already failed
+// repeatedly. gone means a successful, empty filtered list: as conclusive as
+// a successful remove. A nil error with gone=false means the container is
+// confirmed stopped, not running/pausing/restarting, and owned by this
+// process; the caller may defer its removal. Any other outcome - a transport
+// failure, an unparseable or ambiguous inspect, a label mismatch, or a
+// container that is still active - is an error, and the caller must fail
+// closed rather than guess.
+func (r *DockerRunner) confirmCleanup(ctx context.Context, name string) (gone bool, err error) {
+	raw, err := r.output(ctx, "ps", "-aq", "--filter", "name=^/"+name+"$")
+	if err != nil {
+		return false, err
+	}
+	if raw == "" {
+		return true, nil
+	}
+	raw, err = r.output(ctx, "inspect", name)
+	if err != nil {
+		return false, err
+	}
+	var objects []struct {
+		State struct {
+			Status     string
+			Running    bool
+			Paused     bool
+			Restarting bool
+		}
+		Config struct{ Labels map[string]string }
+	}
+	if json.Unmarshal([]byte(raw), &objects) != nil || len(objects) != 1 {
+		return false, errors.New("invalid Docker inspect")
+	}
+	for k, v := range r.labels() {
+		if objects[0].Config.Labels[k] != v {
+			return false, errors.New("refusing to defer cleanup of unrelated container")
+		}
+	}
+	st := objects[0].State
+	if st.Running || st.Paused || st.Restarting || !stoppedStatus(st.Status) {
+		return false, errors.New("container still active")
+	}
+	return false, nil
+}
+
+// deferCleanup adds name to the pending-recovery set, bounded so a
+// permanently broken daemon still trips fail-closed instead of growing the
+// set forever.
+func (r *DockerRunner) deferCleanup(name string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.pendingCleanup[name]; !ok {
+		if len(r.pendingCleanup) >= maxPendingCleanup {
+			return errors.New("pending cleanup set exceeds limit")
+		}
+		if r.pendingCleanup == nil {
+			r.pendingCleanup = map[string]struct{}{}
+		}
+		r.pendingCleanup[name] = struct{}{}
+	}
+	return nil
+}
+
+func (r *DockerRunner) clearPendingCleanup(name string) {
+	r.mu.Lock()
+	delete(r.pendingCleanup, name)
+	r.mu.Unlock()
+}
+
+// cleanup retries remove with independent per-attempt 20-second budgets,
+// separated by a 1s/2s backoff, before deciding between three outcomes: nil
+// (removed, or found already gone), errCleanupDeferred (confirmed stopped,
+// left for sweepPendingCleanup), or a fail-closed error latched into
+// cleanupFailure. Any state that is not conclusively "gone or stopped" stays
+// fail-closed, matching the original single-attempt behavior.
 func (r *DockerRunner) cleanup(name string) error {
+	backoff := [cleanupRetryAttempts - 1]time.Duration{time.Second, 2 * time.Second}
+	if r.cleanupRetryBackoff != [2]time.Duration{} {
+		backoff = r.cleanupRetryBackoff
+	}
+	var err error
+	for attempt := 0; attempt < cleanupRetryAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(backoff[attempt-1])
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		err = r.remove(ctx, name)
+		cancel()
+		if err == nil {
+			r.clearPendingCleanup(name)
+			return nil
+		}
+	}
+	confirmCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	gone, confirmErr := r.confirmCleanup(confirmCtx, name)
+	cancel()
+	if confirmErr != nil {
+		r.mu.Lock()
+		r.cleanupFailure = confirmErr
+		r.mu.Unlock()
+		return confirmErr
+	}
+	r.clearPendingCleanup(name)
+	if gone {
+		return nil
+	}
+	if deferErr := r.deferCleanup(name); deferErr != nil {
+		r.mu.Lock()
+		r.cleanupFailure = deferErr
+		r.mu.Unlock()
+		return deferErr
+	}
+	return errCleanupDeferred
+}
+
+// sweepPendingCleanup makes one best-effort, bounded attempt to remove
+// containers this controller previously confirmed stopped but could not
+// remove. It never blocks admission on failure - names that still fail stay
+// in the set - and never overlaps a concurrent sweep, which just skips
+// instead of waiting for the one in progress.
+func (r *DockerRunner) sweepPendingCleanup() {
+	r.mu.Lock()
+	if r.sweeping || len(r.pendingCleanup) == 0 {
+		r.mu.Unlock()
+		return
+	}
+	r.sweeping = true
+	names := make([]string, 0, len(r.pendingCleanup))
+	for name := range r.pendingCleanup {
+		names = append(names, name)
+	}
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.sweeping = false
+		r.mu.Unlock()
+	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	err := r.remove(ctx, name)
-	if err != nil {
-		r.mu.Lock()
-		r.cleanupFailure = err
-		r.mu.Unlock()
+	for _, name := range names {
+		if err := r.remove(ctx, name); err == nil {
+			r.clearPendingCleanup(name)
+		}
 	}
-	return err
 }
 
 // Initialize must run under the Service's exclusive database lock. A second
@@ -380,7 +534,9 @@ func (r *DockerRunner) Initialize(ctx context.Context) (err error) {
 	}
 	name := "easygo-" + uuid.NewString()
 	defer func() {
-		err = errors.Join(err, r.cleanup(name))
+		if cleanupErr := r.cleanup(name); cleanupErr != nil && !errors.Is(cleanupErr, errCleanupDeferred) {
+			err = errors.Join(err, cleanupErr)
+		}
 		if err == nil {
 			r.mu.Lock()
 			r.initialized = true
@@ -413,11 +569,16 @@ func (r *DockerRunner) Run(ctx context.Context, in Invocation, emit func(Event) 
 	if broken != nil {
 		return result, errors.New("Docker cleanup previously failed; operator recovery required")
 	}
+	r.sweepPendingCleanup()
 	p := in.Workflow.RuntimeSpec
 	if p == nil || p.GatewayModel == "" || p.validate() != nil || p.Engine != in.Workflow.Engine || p.model() != in.Workflow.Model {
 		return result, errors.New("Docker requires a matching gateway runtime profile")
 	}
 	args, err := engineArgs(in)
+	if err != nil {
+		return result, err
+	}
+	args, err = dockerRuntimeArgs(in.Workflow.Engine, args)
 	if err != nil {
 		return result, err
 	}
@@ -462,7 +623,7 @@ func (r *DockerRunner) Run(ctx context.Context, in Invocation, emit func(Event) 
 		return result, err
 	}
 	socket := filepath.Join(relay, relaySocketName)
-	_, key, stop, err := startModelRelayOn(ctx, r.gateway, in.Namespace, *p, "unix", socket)
+	_, key, stop, err := startModelRelayOn(ctx, r.gateway, in.Namespace, *p, "unix", socket, in.Crew)
 	if err != nil {
 		return result, err
 	}
@@ -471,6 +632,8 @@ func (r *DockerRunner) Run(ctx context.Context, in Invocation, emit func(Event) 
 		return result, err
 	}
 	env := map[string]string{"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/workspace/.workshop-home", "CODEX_HOME": "/workspace/.workshop-home/codex", "CLAUDE_CONFIG_DIR": "/workspace/.workshop-home/claude", "TMPDIR": "/tmp", "EASYGO_RELAY_SOCKET": runtimeRelay + "/" + relaySocketName}
+	env["EASYGO_CREW_URL"] = "http://127.0.0.1:18080/crew"
+	env["EASYGO_CREW_TOKEN"] = key
 	childIn := in
 	childIn.Workspace = runtimeWorkspace
 	args, err = configureRuntimeEndpoint(childIn, args, env, "http://127.0.0.1:18080/v1", key, func(path string, v any) error {
@@ -478,7 +641,11 @@ func (r *DockerRunner) Run(ctx context.Context, in Invocation, emit func(Event) 
 		if e != nil || !filepath.IsLocal(rel) {
 			return errors.New("runtime config escaped workspace")
 		}
-		return writeRuntimeJSON(filepath.Join(in.Workspace, rel), v)
+		configured, configErr := dockerRuntimeConfig(in.Workflow.Engine, v)
+		if configErr != nil {
+			return configErr
+		}
+		return writeRuntimeJSON(filepath.Join(in.Workspace, rel), configured)
 	})
 	if err != nil {
 		return result, err
@@ -489,7 +656,7 @@ func (r *DockerRunner) Run(ctx context.Context, in Invocation, emit func(Event) 
 	name := "easygo-" + uuid.NewString()
 	// Register cleanup before create: even ambiguous daemon create responses are reaped.
 	defer func() {
-		if e := r.cleanup(name); e != nil {
+		if e := r.cleanup(name); e != nil && !errors.Is(e, errCleanupDeferred) {
 			err = errors.Join(err, errors.New("task container cleanup failed; admission disabled"))
 		}
 	}()
@@ -551,18 +718,25 @@ func (r *DockerRunner) Run(ctx context.Context, in Invocation, emit func(Event) 
 		}
 	}()
 	result, err = runNative(runCtx, in.Workflow.Engine, r.maxOutput, []string{key}, emit, func(childCtx context.Context, stdout, stderr io.Writer) error {
-		return r.command(childCtx, strings.NewReader(in.Workflow.Instructions+"\n\nUser input:\n"+in.Input), stdout, stderr, "start", "--attach", "--interactive", name)
+		return r.command(childCtx, strings.NewReader(invocationPrompt(in)), stdout, stderr, "start", "--attach", "--interactive", name)
 	})
 	stopMonitor()
 	if quotaErr := <-quotaDone; quotaErr != nil {
 		return result, quotaErr
 	}
-	// A short-lived process can finish between polls; it still cannot publish an
-	// over-quota workspace as success. External cancellation keeps its own status.
-	if ctx.Err() == nil {
-		if quotaErr := r.CheckDiskQuota(ctx, in.Workspace); quotaErr != nil {
-			return result, quotaErr
+	// A short-lived process can finish between polls. Cancellation must not
+	// bypass the final quota check, but the scan still has a bounded lifetime.
+	budget := 30 * time.Second
+	if r.finalQuotaTimeout != 0 {
+		budget = r.finalQuotaTimeout
+	}
+	quotaCtx, cancelQuota := context.WithTimeout(context.WithoutCancel(ctx), budget)
+	defer cancelQuota()
+	if quotaErr := r.CheckDiskQuota(quotaCtx, in.Workspace); quotaErr != nil {
+		if errors.Is(quotaErr, context.DeadlineExceeded) && errors.Is(quotaCtx.Err(), context.DeadlineExceeded) {
+			return result, fmt.Errorf("%w: final scan: %w", ErrDiskQuotaScanFailed, quotaErr)
 		}
+		return result, quotaErr
 	}
 	return result, err
 }

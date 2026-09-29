@@ -20,11 +20,11 @@ import (
 
 // A task-local capability exposes only the selected model generation operation.
 // The child never receives the gateway identity or vendor credential.
-func startModelRelay(ctx context.Context, cfg *ModelGateway, namespace string, profile RuntimeProfile) (string, string, func(), error) {
-	return startModelRelayOn(ctx, cfg, namespace, profile, "tcp", "127.0.0.1:0")
+func startModelRelay(ctx context.Context, cfg *ModelGateway, namespace string, profile RuntimeProfile, crew ...CrewChannel) (string, string, func(), error) {
+	return startModelRelayOn(ctx, cfg, namespace, profile, "tcp", "127.0.0.1:0", crew...)
 }
 
-func startModelRelayOn(ctx context.Context, cfg *ModelGateway, namespace string, profile RuntimeProfile, network, address string) (string, string, func(), error) {
+func startModelRelayOn(ctx context.Context, cfg *ModelGateway, namespace string, profile RuntimeProfile, network, address string, crew ...CrewChannel) (string, string, func(), error) {
 	if cfg == nil || !rpc.ValidNamespace(namespace) {
 		return "", "", nil, errors.New("model gateway unavailable")
 	}
@@ -64,6 +64,14 @@ func startModelRelayOn(ctx context.Context, cfg *ModelGateway, namespace string,
 		}
 		if subtle.ConstantTimeCompare([]byte(credential), []byte(token)) != 1 {
 			http.Error(w, "unauthorized", 401)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/crew/") {
+			if len(crew) == 0 || crew[0] == nil {
+				http.NotFound(w, r)
+				return
+			}
+			serveCrew(w, r, crew[0])
 			return
 		}
 		if r.Method != "POST" || r.URL.Path != path || (r.URL.RawQuery != "" && !(profile.Protocol == "anthropic" && r.URL.RawQuery == "beta=true")) {

@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,6 +25,19 @@ type fakeContainer struct {
 	Config struct{ Labels map[string]string }
 	ID     string
 	args   []string
+	State  struct {
+		Status     string
+		Running    bool
+		Paused     bool
+		Restarting bool
+		ExitCode   int
+		Error      string
+	}
+	// Test-only cleanup-resilience knobs, invisible to JSON encoding (lowercase).
+	rmFailReal      int  // rm fails this many times without deleting, then proceeds normally
+	rmAmbiguousOnce bool // next rm deletes the container but still reports an error
+	psFails         bool // ps targeting this name fails outright (transport error)
+	inspectFails    bool // inspect targeting this name/ID fails outright
 }
 type fakeDocker struct {
 	t                      *testing.T
@@ -57,6 +72,14 @@ func (f *fakeDocker) command(ctx context.Context, in io.Reader, out, diag io.Wri
 		io.WriteString(out, c.ID)
 		return nil
 	case "ps":
+		for i := 2; i < len(args)-1; i++ {
+			if args[i] == "--filter" && strings.HasPrefix(args[i+1], "name=") {
+				name := strings.TrimSuffix(strings.TrimPrefix(args[i+1], "name=^/"), "$")
+				if c, ok := f.containers[name]; ok && c.psFails {
+					return errors.New("ps failed")
+				}
+			}
+		}
 		for name, c := range f.containers {
 			match := true
 			for i := 2; i < len(args)-1; i++ {
@@ -79,6 +102,9 @@ func (f *fakeDocker) command(ctx context.Context, in io.Reader, out, diag io.Wri
 	case "inspect":
 		for name, c := range f.containers {
 			if args[1] == name || args[1] == c.ID {
+				if c.inspectFails {
+					return errors.New("inspect failed")
+				}
 				return json.NewEncoder(out).Encode([]*fakeContainer{c})
 			}
 		}
@@ -89,6 +115,15 @@ func (f *fakeDocker) command(ctx context.Context, in io.Reader, out, diag io.Wri
 		}
 		for name, c := range f.containers {
 			if c.ID == args[2] {
+				if c.rmFailReal > 0 {
+					c.rmFailReal--
+					return errors.New("rm failed")
+				}
+				if c.rmAmbiguousOnce {
+					c.rmAmbiguousOnce = false
+					delete(f.containers, name)
+					return errors.New("rm ambiguous: daemon may have already removed it")
+				}
 				delete(f.containers, name)
 				return nil
 			}
@@ -197,6 +232,9 @@ func TestDockerRunUsesUDSOnlyAndCleansUp(t *testing.T) {
 			if a == "--mount" && strings.Contains(c.args[i+1], "/run/easygo-relay") {
 				socketDir = strings.Split(strings.TrimPrefix(c.args[i+1], "type=bind,src="), ",")[0]
 			}
+		}
+		if env["EASYGO_CREW_URL"] != "http://127.0.0.1:18080/crew" || env["EASYGO_CREW_TOKEN"] != env["EASYGO_RUNTIME_API_KEY"] {
+			t.Fatal("crew environment missing or not run-scoped")
 		}
 		if env["HOME"] != "/workspace/.workshop-home" || env["EASYGO_RELAY_SOCKET"] != "/run/easygo-relay/model.sock" || env["EASYGO_RUNTIME_API_KEY"] == "" {
 			t.Fatal(env)
@@ -435,5 +473,319 @@ func TestCodexInnerPolicyChangesOnlyAfterDockerInitialization(t *testing.T) {
 				t.Fatal("override ran without initialized Docker")
 			}
 		})
+	}
+}
+
+// fastCleanupBackoff shortens cleanup's retry backoff for tests without
+// changing the 1s/2s production default.
+func fastCleanupBackoff(r *DockerRunner) {
+	r.cleanupRetryBackoff = [2]time.Duration{time.Millisecond, time.Millisecond}
+}
+
+// registerFakeContainer inserts a container directly into the fake, bypassing
+// create, so cleanup/remove can be exercised in isolation from Run.
+func registerFakeContainer(r *DockerRunner, f *fakeDocker, name string) *fakeContainer {
+	c := &fakeContainer{Name: name, ID: uuid.NewString()}
+	c.Config.Labels = r.labels()
+	f.containers[name] = c
+	return c
+}
+
+func TestDockerCleanupRetrySucceedsOnThirdAttempt(t *testing.T) {
+	r, f, _ := dockerFixture(t)
+	fastCleanupBackoff(r)
+	name := "retry-success"
+	c := registerFakeContainer(r, f, name)
+	c.rmFailReal = 2
+	if err := r.cleanup(name); err != nil {
+		t.Fatal(err)
+	}
+	r.mu.Lock()
+	broken := r.cleanupFailure
+	r.mu.Unlock()
+	if broken != nil {
+		t.Fatal("cleanupFailure set after eventual success")
+	}
+	if _, ok := f.containers[name]; ok {
+		t.Fatal("container not removed")
+	}
+}
+
+func TestDockerCleanupTreatsAmbiguousRmAsSuccessOnNextEmptyPS(t *testing.T) {
+	r, f, _ := dockerFixture(t)
+	fastCleanupBackoff(r)
+	name := "ambiguous"
+	c := registerFakeContainer(r, f, name)
+	c.rmAmbiguousOnce = true
+	if err := r.cleanup(name); err != nil {
+		t.Fatal(err)
+	}
+	r.mu.Lock()
+	broken := r.cleanupFailure
+	r.mu.Unlock()
+	if broken != nil {
+		t.Fatal("cleanupFailure set despite the container already being gone")
+	}
+}
+
+func TestDockerCleanupDefersConfirmedStoppedContainerUntilSweep(t *testing.T) {
+	r, f, _ := dockerFixture(t)
+	fastCleanupBackoff(r)
+	name := "stopped-pending"
+	c := registerFakeContainer(r, f, name)
+	c.rmFailReal = 1000
+	c.State.Status = "exited"
+	err := r.cleanup(name)
+	if !errors.Is(err, errCleanupDeferred) {
+		t.Fatalf("expected errCleanupDeferred, got %v", err)
+	}
+	r.mu.Lock()
+	broken, pending := r.cleanupFailure, len(r.pendingCleanup)
+	r.mu.Unlock()
+	if broken != nil {
+		t.Fatal("cleanupFailure set for a confirmed-stopped container")
+	}
+	if pending != 1 {
+		t.Fatalf("pending cleanup set = %d, want 1", pending)
+	}
+	// The next admission sweep, once the daemon cooperates, removes it.
+	c.rmFailReal = 0
+	r.sweepPendingCleanup()
+	r.mu.Lock()
+	pending = len(r.pendingCleanup)
+	r.mu.Unlock()
+	if pending != 0 {
+		t.Fatal("sweep did not clear the pending container")
+	}
+	if _, ok := f.containers[name]; ok {
+		t.Fatal("swept container not removed")
+	}
+}
+
+func TestDockerCleanupFailsClosedWhenStillRunning(t *testing.T) {
+	r, f, in := dockerFixture(t)
+	fastCleanupBackoff(r)
+	name := "still-running"
+	c := registerFakeContainer(r, f, name)
+	c.rmFailReal = 1000
+	c.State.Running = true
+	err := r.cleanup(name)
+	if err == nil || errors.Is(err, errCleanupDeferred) {
+		t.Fatalf("expected fail-closed, got %v", err)
+	}
+	r.mu.Lock()
+	broken := r.cleanupFailure
+	r.mu.Unlock()
+	if broken == nil {
+		t.Fatal("cleanupFailure not set for a still-running container")
+	}
+	if _, e := r.Run(context.Background(), in, func(Event) error { return nil }); e == nil {
+		t.Fatal("Run admitted after cleanup failure")
+	}
+}
+
+func TestDockerCleanupFailsClosedWhenConfirmationTransportFails(t *testing.T) {
+	for _, mode := range []string{"ps", "inspect"} {
+		t.Run(mode, func(t *testing.T) {
+			r, f, _ := dockerFixture(t)
+			fastCleanupBackoff(r)
+			name := "confirm-transport-" + mode
+			c := registerFakeContainer(r, f, name)
+			// A genuinely stopped container: fail-closed here can only come
+			// from the transport failure below, not from a zero-value state
+			// that would fail closed on its own regardless.
+			c.State.Status = "exited"
+			if mode == "ps" {
+				c.psFails = true
+			} else {
+				c.inspectFails = true
+			}
+			err := r.cleanup(name)
+			if err == nil || errors.Is(err, errCleanupDeferred) {
+				t.Fatalf("expected fail-closed, got %v", err)
+			}
+			r.mu.Lock()
+			broken := r.cleanupFailure
+			r.mu.Unlock()
+			if broken == nil {
+				t.Fatal("cleanupFailure not set after a confirmation transport failure")
+			}
+		})
+	}
+}
+
+func TestDockerCleanupFailsClosedOnLabelMismatchWithoutSendingRm(t *testing.T) {
+	r, f, _ := dockerFixture(t)
+	fastCleanupBackoff(r)
+	name := "mismatched-owner"
+	c := registerFakeContainer(r, f, name)
+	// A genuinely stopped container: fail-closed here can only come from the
+	// label mismatch below, not from a zero-value state that would fail
+	// closed on its own regardless.
+	c.State.Status = "exited"
+	c.Config.Labels[ownerLabel] = "someone-else"
+	before := len(f.calls)
+	err := r.cleanup(name)
+	if err == nil || errors.Is(err, errCleanupDeferred) {
+		t.Fatalf("expected fail-closed, got %v", err)
+	}
+	for _, call := range f.calls[before:] {
+		if call[0] == "rm" {
+			t.Fatal("rm sent despite an owner label mismatch")
+		}
+	}
+	r.mu.Lock()
+	broken := r.cleanupFailure
+	r.mu.Unlock()
+	if broken == nil {
+		t.Fatal("cleanupFailure not set on label mismatch")
+	}
+}
+
+func TestDockerCleanupFailsClosedWhenPendingSetFull(t *testing.T) {
+	r, f, _ := dockerFixture(t)
+	fastCleanupBackoff(r)
+	r.pendingCleanup = map[string]struct{}{}
+	for i := 0; i < maxPendingCleanup; i++ {
+		r.pendingCleanup["filler-"+strconv.Itoa(i)] = struct{}{}
+	}
+	name := "overflow"
+	c := registerFakeContainer(r, f, name)
+	c.rmFailReal = 1000
+	c.State.Status = "exited"
+	err := r.cleanup(name)
+	if err == nil || errors.Is(err, errCleanupDeferred) {
+		t.Fatalf("expected fail-closed at capacity, got %v", err)
+	}
+	r.mu.Lock()
+	broken, pending := r.cleanupFailure, len(r.pendingCleanup)
+	r.mu.Unlock()
+	if broken == nil {
+		t.Fatal("cleanupFailure not set once the pending set is full")
+	}
+	if pending != maxPendingCleanup {
+		t.Fatalf("pending cleanup set changed: %d", pending)
+	}
+}
+
+func TestDockerSweepPendingCleanupOnlyOneAtATime(t *testing.T) {
+	r, f, _ := dockerFixture(t)
+	name := "sweep-race"
+	registerFakeContainer(r, f, name)
+	r.pendingCleanup = map[string]struct{}{name: {}}
+	release := make(chan struct{})
+	started := make(chan struct{})
+	var startedOnce sync.Once
+	orig := r.command
+	r.command = func(ctx context.Context, in io.Reader, out, diag io.Writer, args ...string) error {
+		if args[0] == "rm" {
+			startedOnce.Do(func() { close(started) })
+			<-release
+		}
+		return orig(ctx, in, out, diag, args...)
+	}
+	done := make(chan struct{})
+	go func() {
+		r.sweepPendingCleanup()
+		close(done)
+	}()
+	<-started
+	r.sweepPendingCleanup() // concurrent call must skip, not wait, while a sweep is in flight
+	select {
+	case <-done:
+		t.Fatal("first sweep already finished; the race was not exercised")
+	default:
+	}
+	close(release)
+	<-done
+	if _, ok := f.containers[name]; ok {
+		t.Fatal("container not removed by the sweep")
+	}
+}
+
+// checkFixture builds a workspace and checks directory under the runner's
+// root so hostPath mapping in runCheck succeeds, without going through Run.
+func checkFixture(t *testing.T, r *DockerRunner) (workspace, checks string, check AcceptanceCheck) {
+	t.Helper()
+	workspace = filepath.Join(r.root, "workspaces", uuid.NewString())
+	if err := os.MkdirAll(workspace, 0700); err != nil {
+		t.Fatal(err)
+	}
+	checks = filepath.Join(r.root, "checks-"+uuid.NewString())
+	if err := os.MkdirAll(checks, 0700); err != nil {
+		t.Fatal(err)
+	}
+	return workspace, checks, AcceptanceCheck{Name: "unit", Command: []string{"/pack/checks/unit.sh"}, TimeoutSeconds: 1}
+}
+
+func TestDockerRunCheckPreservesResultWhenCleanupDeferred(t *testing.T) {
+	r, f, _ := dockerFixture(t)
+	fastCleanupBackoff(r)
+	workspace, checks, check := checkFixture(t, r)
+	f.start = func(ctx context.Context, c *fakeContainer, stdin io.Reader, out, diag io.Writer) error {
+		c.rmFailReal = 1000
+		c.State.Status = "exited"
+		c.State.ExitCode = 0
+		return nil
+	}
+	exit, timedOut, duration, err := r.runCheck(context.Background(), workspace, checks, check, io.Discard)
+	if exit != 0 || timedOut || err != nil {
+		t.Fatalf("exit=%d timedOut=%t duration=%s err=%v", exit, timedOut, duration, err)
+	}
+	r.mu.Lock()
+	broken, pending := r.cleanupFailure, len(r.pendingCleanup)
+	r.mu.Unlock()
+	if broken != nil {
+		t.Fatal("cleanupFailure set for a deferred, confirmed-stopped check container")
+	}
+	if pending != 1 {
+		t.Fatalf("pending cleanup set = %d, want 1", pending)
+	}
+}
+
+func TestDockerRunCheckPreservesTimeoutWhenCleanupDeferred(t *testing.T) {
+	r, f, _ := dockerFixture(t)
+	fastCleanupBackoff(r)
+	workspace, checks, check := checkFixture(t, r)
+	f.start = func(ctx context.Context, c *fakeContainer, stdin io.Reader, out, diag io.Writer) error {
+		c.rmFailReal = 1000
+		c.State.Status = "exited"
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	exit, timedOut, duration, err := r.runCheck(context.Background(), workspace, checks, check, io.Discard)
+	if exit != -1 || !timedOut || err != nil {
+		t.Fatalf("exit=%d timedOut=%t duration=%s err=%v", exit, timedOut, duration, err)
+	}
+	r.mu.Lock()
+	broken := r.cleanupFailure
+	r.mu.Unlock()
+	if broken != nil {
+		t.Fatal("cleanupFailure set for a deferred, confirmed-stopped check container")
+	}
+}
+
+func TestDockerRunCheckStillErrorsWhenCleanupFailsClosedDespiteZeroExit(t *testing.T) {
+	r, f, _ := dockerFixture(t)
+	fastCleanupBackoff(r)
+	workspace, checks, check := checkFixture(t, r)
+	f.start = func(ctx context.Context, c *fakeContainer, stdin io.Reader, out, diag io.Writer) error {
+		c.rmFailReal = 1000
+		c.State.Status = "exited"
+		c.State.ExitCode = 0
+		// runCheck's own inspect for exit code never looks at labels, so this
+		// only surfaces later, inside cleanup's confirmation step.
+		c.Config.Labels[ownerLabel] = "tampered"
+		return nil
+	}
+	_, _, _, err := r.runCheck(context.Background(), workspace, checks, check, io.Discard)
+	if err == nil {
+		t.Fatal("expected an error when cleanup fails closed despite exit 0")
+	}
+	r.mu.Lock()
+	broken := r.cleanupFailure
+	r.mu.Unlock()
+	if broken == nil {
+		t.Fatal("cleanupFailure not set")
 	}
 }

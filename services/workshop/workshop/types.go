@@ -5,6 +5,7 @@ package workshop
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -13,22 +14,24 @@ var (
 	ErrWorkflow = errors.New("unknown workflow")
 	ErrFull     = errors.New("workshop capacity reached")
 	ErrConflict = errors.New("task state or idempotency conflict")
+	ErrRunLimit = fmt.Errorf("%w: run_limit", ErrConflict)
 	ErrClosed   = errors.New("workshop closed")
 	ErrInvalid  = errors.New("invalid request")
 )
 
 type Workflow struct {
-	Runtime         string          `json:"runtime,omitempty"`
-	AllowedRuntimes []string        `json:"allowed_runtimes,omitempty"`
-	RuntimeSpec     *RuntimeProfile `json:"runtime_spec,omitempty"` // immutable operator snapshot, no secret values
-	Name            string          `json:"name"`
-	Version         string          `json:"version"`
-	Instructions    string          `json:"instructions"`
-	Engine          string          `json:"engine"` // claude or codex
-	Model           string          `json:"model"`
-	Policy          string          `json:"policy"` // read-only or workspace-write; required
-	TimeoutSeconds  int             `json:"timeout_seconds"`
-	Artifacts       []string        `json:"artifacts,omitempty"` // explicit relative regular-file paths
+	Acceptance      *AcceptanceConfig `json:"acceptance,omitempty"`
+	Runtime         string            `json:"runtime,omitempty"`
+	AllowedRuntimes []string          `json:"allowed_runtimes,omitempty"`
+	RuntimeSpec     *RuntimeProfile   `json:"runtime_spec,omitempty"` // immutable operator snapshot, no secret values
+	Name            string            `json:"name"`
+	Version         string            `json:"version"`
+	Instructions    string            `json:"instructions"`
+	Engine          string            `json:"engine"` // claude or codex
+	Model           string            `json:"model"`
+	Policy          string            `json:"policy"` // read-only or workspace-write; required
+	TimeoutSeconds  int               `json:"timeout_seconds"`
+	Artifacts       []string          `json:"artifacts,omitempty"` // explicit relative regular-file paths
 }
 
 // WorkflowMetadata describes a discoverable workflow without its instructions
@@ -51,6 +54,7 @@ type EngineConfig struct {
 }
 
 type Config struct {
+	PackDir         string                    `json:"pack_dir,omitempty"`
 	Sandbox         SandboxConfig             `json:"sandbox,omitempty"`
 	RuntimeProfiles map[string]RuntimeProfile `json:"runtime_profiles,omitempty"`
 	ModelGateway    *ModelGateway             `json:"model_gateway,omitempty"`
@@ -99,17 +103,19 @@ type Artifact struct {
 }
 
 type Run struct {
-	ID              string     `json:"id"`
-	Input           string     `json:"input"`
-	ResumeSessionID string     `json:"resume_session_id,omitempty"`
-	SessionID       string     `json:"session_id,omitempty"`
-	Status          Status     `json:"status"`
-	StartedAt       *time.Time `json:"started_at,omitempty"`
-	FinishedAt      *time.Time `json:"finished_at,omitempty"`
-	Text            string     `json:"text,omitempty"`
-	Usage           Usage      `json:"usage"`
-	Error           string     `json:"error,omitempty"`
-	Artifacts       []Artifact `json:"artifacts,omitempty"`
+	Acceptance      *Acceptance `json:"acceptance,omitempty"`
+	Outcome         string      `json:"outcome,omitempty"`
+	ID              string      `json:"id"`
+	Input           string      `json:"input"`
+	ResumeSessionID string      `json:"resume_session_id,omitempty"`
+	SessionID       string      `json:"session_id,omitempty"`
+	Status          Status      `json:"status"`
+	StartedAt       *time.Time  `json:"started_at,omitempty"`
+	FinishedAt      *time.Time  `json:"finished_at,omitempty"`
+	Text            string      `json:"text,omitempty"`
+	Usage           Usage       `json:"usage"`
+	Error           string      `json:"error,omitempty"`
+	Artifacts       []Artifact  `json:"artifacts,omitempty"`
 }
 
 type Task struct {
@@ -127,21 +133,26 @@ type Task struct {
 }
 
 type Event struct {
-	Sequence  uint64    `json:"sequence"`
-	RunID     string    `json:"run_id"`
-	Time      time.Time `json:"time"`
-	Kind      string    `json:"kind"`
-	Text      string    `json:"text,omitempty"`
-	SessionID string    `json:"session_id,omitempty"`
-	Usage     *Usage    `json:"usage,omitempty"`
+	Acceptance *AcceptanceEvent `json:"acceptance,omitempty"`
+	Message    *CrewMessage     `json:"message,omitempty"`
+	Read       *CrewRead        `json:"read,omitempty"`
+	Sequence   uint64           `json:"sequence"`
+	RunID      string           `json:"run_id"`
+	Time       time.Time        `json:"time"`
+	Kind       string           `json:"kind"`
+	Text       string           `json:"text,omitempty"`
+	SessionID  string           `json:"session_id,omitempty"`
+	Usage      *Usage           `json:"usage,omitempty"`
 }
 
 type Invocation struct {
-	Namespace string
-	Workflow  Workflow
-	Workspace string
-	Input     string
-	SessionID string
+	Crew               CrewChannel
+	WorkerInstructions string
+	Namespace          string
+	Workflow           Workflow
+	Workspace          string
+	Input              string
+	SessionID          string
 }
 
 type Result struct {

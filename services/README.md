@@ -133,3 +133,27 @@ node scripts/test-harness.mjs --evidence /tmp/harness-run-2
 `--evidence` 必须指向尚无 `report.json` 的目录。可加 `--scenarios S3,S4,S5,S9` 选择场景子集；未选场景在报告的 deferred 中列出，不会被记作通过。镜像需要包含当前 fixture-cli（支持 `echo_input` 和 `write-denied`）与 fixture-check。脚本另行静态编译 fixture-check 放进临时受信 pack，用于验证实际执行的是只读 pack 中的检查程序。
 
 脚本只用随机假凭证，自动生成临时 mTLS 证书，不读取真实模型凭证。任务与验收串行运行，容器限额为 64 MiB 内存、0.1 CPU、128 PID 和 1 MiB `/tmp`；编译使用单个 Go 构建任务。PID 使用运行时默认值：配置下限 16 并不保证能运行 task-shim、CLI 和 easygo-crew 三个 Go 进程。场景证据、构建及服务日志、代码与脚本哈希、退出状态保存在指定目录。服务停止后只解除本次 state 目录的封存权限并清理，不触碰其它任务。失败退出码非 0，详情见 `report.json` 和对应场景 JSON。
+
+### 真实模型样本（付费，维护者手动运行）
+
+`scripts/test-harness-live.mjs` 验证真实 CLI 能用施工者通道完成一次交接，会产生模型费用，不进 CI：
+
+- Codex、Claude Code、Pi、OpenClaw 在 Docker 任务容器里经 ai-gateway 调用 DeepSeek；
+- 每个 CLI 按 `packs/base/roles/worker.md` 用 `easygo-crew` 汇报，最后 `submit`；
+- 平台在独立检查容器里跑 base 包的 `npm-test` 检查；
+- 通过条件：outcome 为 submitted，平台自己的检查确实跑了，并且 false_green 与"自报 pass 但检查失败"一致。模型写的测试过不过属于模型质量，不影响 harness 结论。
+
+```bash
+EASYGO_GO_BIN=/path/to/go \
+EASYGO_DOCKER_TEST_BINARY=/path/to/docker \
+EASYGO_DOCKER_TEST_ENDPOINT=unix:///path/to/dedicated/docker.sock \
+EASYGO_LIVE_KEY_FILE=/path/to/deepseek.key \
+EASYGO_LIVE_RUNTIMES=codex,pi \
+node scripts/test-harness-live.mjs
+```
+
+- key 只从 `EASYGO_LIVE_KEY_FILE` 读取，只以 `DEEPSEEK_API_KEY` 传给网关进程；结束时对整个 state 目录做 key 扫描，`key_leaks` 必须为 0。
+- 运行时镜像在 `easygo-task-runtime:platform`（可用 `EASYGO_LIVE_BASE_IMAGE` 换）上叠加当前的 easygo-crew，生成 `easygo-task-runtime:acl-live`，不重建 CLI 层。
+- state 默认在 `/tmp/eglive` 下。relay 的 Unix socket 路径不能超过 107 字节，所以根目录要短。
+- 结束后删除工作区、二进制、镜像叠加目录和临时 PKI，只保留 `report.json`、日志和配置；设 `EASYGO_LIVE_KEEP=1` 可以全部保留。
+- P1 的结果见 `doc/p1-verification.md`。

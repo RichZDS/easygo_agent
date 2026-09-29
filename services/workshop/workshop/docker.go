@@ -76,14 +76,15 @@ type SandboxConfig struct {
 type dockerCommand func(context.Context, io.Reader, io.Writer, io.Writer, ...string) error
 
 type DockerRunner struct {
-	cfg            SandboxConfig
-	root           string
-	gateway        *ModelGateway
-	maxOutput      int
-	command        dockerCommand
-	mu             sync.Mutex
-	cleanupFailure error
-	initialized    bool
+	cfg               SandboxConfig
+	root              string
+	gateway           *ModelGateway
+	maxOutput         int
+	command           dockerCommand
+	mu                sync.Mutex
+	cleanupFailure    error
+	initialized       bool
+	finalQuotaTimeout time.Duration // test seam; zero keeps the 30-second final scan budget
 }
 
 var ownerPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$`)
@@ -561,9 +562,16 @@ func (r *DockerRunner) Run(ctx context.Context, in Invocation, emit func(Event) 
 	}
 	// A short-lived process can finish between polls. Cancellation must not
 	// bypass the final quota check, but the scan still has a bounded lifetime.
-	quotaCtx, cancelQuota := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	budget := 30 * time.Second
+	if r.finalQuotaTimeout != 0 {
+		budget = r.finalQuotaTimeout
+	}
+	quotaCtx, cancelQuota := context.WithTimeout(context.WithoutCancel(ctx), budget)
 	defer cancelQuota()
 	if quotaErr := r.CheckDiskQuota(quotaCtx, in.Workspace); quotaErr != nil {
+		if errors.Is(quotaErr, context.DeadlineExceeded) && errors.Is(quotaCtx.Err(), context.DeadlineExceeded) {
+			return result, fmt.Errorf("%w: final scan: %w", ErrDiskQuotaScanFailed, quotaErr)
+		}
 		return result, quotaErr
 	}
 	return result, err

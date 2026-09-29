@@ -14,10 +14,12 @@ only communication partner; use `easygo-crew` to send durable messages.
   Choose `pass` only for tests you actually ran successfully, `fail` for observed
   failures, and `not_run` when you have not run the tests.
 
-Before ending the task, obtain a receipt for `submit` or `blocked`. An unanswered
-question is a reason to send `blocked` after `ask`; explain that you are awaiting
-the foreman's reply. A progress report alone is not a handoff. If the channel
-fails, state that failure in your final output rather than claiming delivery.
+Before ending the task, obtain a receipt for `submit`, `blocked`, or `ask`.
+An `ask` receipt is a complete handoff while awaiting the foreman's answer;
+stop after receiving it and do not send `blocked` for the same question.
+Use `blocked` for an obstacle that prevents progress. A progress report alone
+is not a handoff. If the channel fails, state that failure in your final output
+rather than claiming delivery.
 
 The platform runs its own acceptance checks. Preserve the evidence of failures
 and report the actual result. Self-reported test success is not platform approval.

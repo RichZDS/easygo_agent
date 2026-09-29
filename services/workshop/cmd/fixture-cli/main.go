@@ -38,12 +38,12 @@ func main() {
 	raw, _ := io.ReadAll(io.LimitReader(os.Stdin, 1<<20))
 	_, input, _ := strings.Cut(string(raw), "User input:\n")
 	var req request
-	if json.Unmarshal([]byte(input), &req) != nil {
+	if json.NewDecoder(strings.NewReader(input)).Decode(&req) != nil {
 		fmt.Fprintln(os.Stderr, "fixture input invalid")
 		os.Exit(2)
 	}
 	if req.Mode == "crew" {
-		os.Exit(crewScript(req.Script))
+		os.Exit(crewScript(req.Script, input))
 	}
 	if req.Mode == "fill" {
 		os.Exit(fill(req))

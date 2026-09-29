@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type crewAction struct {
@@ -36,7 +37,7 @@ func crewSuccess() int {
 	fmt.Println(`{"type":"turn.completed","usage":{"input_tokens":0,"output_tokens":0}}`)
 	return 0
 }
-func crewScript(actions []crewAction) int {
+func crewScript(actions []crewAction, input string) int {
 	fmt.Println(`{"type":"thread.started","thread_id":"11111111-1111-4111-8111-111111111111"}`)
 	for _, a := range actions {
 		switch a.Op {
@@ -57,6 +58,16 @@ func crewScript(actions []crewAction) int {
 			if err := os.WriteFile(a.Path, []byte(a.Text), 0600); err != nil {
 				return 3
 			}
+		case "echo_input":
+			text := input
+			if len(text) > 64<<10 {
+				end := 64 << 10
+				for end > 0 && !utf8.RuneStart(text[end]) {
+					end--
+				}
+				text = text[:end]
+			}
+			crewOutput([]byte(text))
 		case "inbox":
 			timeout := a.TimeoutMS
 			if timeout == 0 {

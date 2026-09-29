@@ -104,3 +104,52 @@ func TestCrewDockerIntegration(t *testing.T) {
 	}
 	t.Log("real container: report/ask/submit, duplicate receipt, live foreman inbox, submitted outcome, artifact, cleanup verified")
 }
+
+func TestCrewDockerResumeInputIntegration(t *testing.T) {
+	endpoint, image := os.Getenv("EASYGO_DOCKER_TEST_ENDPOINT"), os.Getenv("EASYGO_DOCKER_TEST_IMAGE")
+	if endpoint == "" || image == "" {
+		t.Skip("requires explicit dedicated Docker endpoint and fixture image")
+	}
+	root, err := os.MkdirTemp("/tmp", "crew-resume-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(root)
+	gateway := nativeRelayFixture(t, func(context.Context, json.RawMessage, *rpc.Stream) (any, *rpc.Error) { return nil, nil })
+	cfg := Config{Root: root, Concurrency: 1, ModelGateway: gateway, Engines: map[string]EngineConfig{"codex": {}}, RuntimeProfiles: map[string]RuntimeProfile{"fixture": {Engine: "codex", Protocol: "responses", GatewayModel: "fixture"}}, Workflows: []Workflow{{Name: "crew", Version: "1", Runtime: "fixture", Policy: "workspace-write", Instructions: "offline", TimeoutSeconds: 30}}, Sandbox: SandboxConfig{Mode: "docker", DockerBinary: os.Getenv("EASYGO_DOCKER_TEST_BINARY"), Endpoint: endpoint, Image: image, Owner: "resume-proof-" + uuid.NewString(), HostRoot: root}}
+	s, err := New(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	task, err := s.Submit(SubmitRequest{Namespace: "task-namespace", Workflow: "crew", Input: `{"mode":"crew","script":[{"op":"crew","args":["ask","need direction"]}]}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task = waitTask(t, s, task.Namespace, task.ID, func(task *Task) bool { return terminal(task.Status) })
+	if task.Status != Succeeded || task.Runs[0].Outcome != "asked" {
+		t.Fatal("first run did not ask", task.Status)
+	}
+	reply, err := s.Message(task.Namespace, task.ID, "resume with this reply", "resume-reply")
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := `{"mode":"crew","script":[{"op":"echo_input"}]}`
+	task, err = s.Resume(task.Namespace, task.ID, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task = waitTask(t, s, task.Namespace, task.ID, func(task *Task) bool { return terminal(task.Status) })
+	if task.Status != Succeeded || len(task.Runs) != 2 {
+		t.Fatal("resume failed", task.Status, task.Runs[len(task.Runs)-1].Error)
+	}
+	page, err := s.Result(task.Namespace, task.ID, task.Runs[1].ID, 0, 8192)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := input + "\n\nUnread messages from the foreman:\n- [" + reply.ID + "] resume with this reply"
+	if page.Text != want || !page.EOF {
+		t.Fatal("result does not prove resume input", page.Text)
+	}
+	t.Logf("two real containers; run_id=%s; reply_id=%s; result=%s", page.RunID, reply.ID, page.Text)
+}

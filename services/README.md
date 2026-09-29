@@ -93,6 +93,29 @@ Agent 数据库在 `/data/agent.sqlite`，工坊库、任务工作区和 CLI 原
 
 `node scripts/test-services.mjs` 会实际构建并运行三个本机进程，使用临时 mTLS 证书、本机模型响应夹具和真实 CLI 子进程夹具，验证调用链、越权拒绝、取消和崩溃恢复。先在 `services/agent-loop` 执行 `npm ci`；Go 不在 PATH 时设置 `EASYGO_GO_BIN`。
 
-本次没有实际构建或启动 Docker 容器，也没有调用付费模型；容器验证需有 Docker Engine 的环境。运行时镜像的 Node 22 标签会检查最低版本，CLI 安装版本在工坊 Dockerfile 中固定。
+上述三进程脚本不启动 Docker 容器，也不调用付费模型；下方 Harness 场景使用专用 Docker daemon 验证任务容器。运行时镜像的 Node 22 标签会检查最低版本，CLI 安装版本在工坊 Dockerfile 中固定。
 
 新 TS 数据库不会自动迁移原 Go 会话库。原 Go 本地应用仍保留作为过渡和回归入口，新的部署主链不依赖它。mTLS 与 namespace 是 RPC 访问控制，不等同于每任务独立的 OS 沙箱；CLI 工作流仍受工坊配置和 CLI 自身执行策略约束。
+
+## P1 Harness 通道场景
+
+`scripts/test-harness.mjs` 验证 S1（有序报告）、S2（静默退出）、S6（提问后回复并续跑）、S7（运行中收信）和 S8（重复 client_id 幂等）。每个场景经过本机模型夹具、真实网关和 loop、工坊任务容器及 crew 通道；断言读取持久化工具结果和工坊 RPC 数据。S3/S4/S5/S9 验收检查场景暂未实现，报告会明确列为 deferred。
+
+先安装 loop 依赖，使用专用 Docker daemon 构建当前代码的夹具镜像，再执行：
+
+```bash
+export EASYGO_GO_BIN=/path/to/go
+export EASYGO_DOCKER_TEST_BINARY=/path/to/docker
+export EASYGO_DOCKER_TEST_ENDPOINT=unix:///path/to/dedicated/docker.sock
+export EASYGO_DOCKER_TEST_IMAGE=easygo-sandbox-fixture:acl-loop
+
+"$EASYGO_DOCKER_TEST_BINARY" -H "$EASYGO_DOCKER_TEST_ENDPOINT" build \
+  --network host -f deploy/runtime/Dockerfile.fixture \
+  -t "$EASYGO_DOCKER_TEST_IMAGE" .
+node scripts/test-harness.mjs --evidence /tmp/harness-run-1
+node scripts/test-harness.mjs --evidence /tmp/harness-run-2
+```
+
+`--evidence` 必须指向尚无 `report.json` 的目录。可加 `--scenarios S1,S2,S7,S8` 选择通道场景子集；未选场景不会被记作通过。S6 需要支持续跑消息后缀与 `echo_input` 动作的 fixture-cli 镜像。
+
+脚本只用随机假凭证，自动生成临时 mTLS 证书，不读取真实模型凭证。任务串行运行，容器限额为 64 MiB 内存、0.1 CPU、128 PID 和 1 MiB `/tmp`；编译使用单个 Go 构建任务。PID 使用运行时默认值：配置下限 16 并不保证能运行 task-shim、CLI 和 easygo-crew 三个 Go 进程。场景证据、构建及服务日志、退出状态保存在指定目录，服务和临时 state 在退出时清理。失败退出码非 0，详情见 `report.json` 和对应场景 JSON。

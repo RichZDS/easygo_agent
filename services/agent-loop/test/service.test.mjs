@@ -486,6 +486,7 @@ test('failed error-result commit prevents the next tool and model call', async (
 });
 
 for (const [name, args] of [
+  ['workshop_reply', { task_id: 'task', text: 'accepted side effect' }],
   ['workshop_submit', { workflow: 'fixture', input: 'accepted side effect' }],
   ['workshop_resume', { task_id: 'task', input: 'accepted side effect' }],
   ['workshop_cancel', { task_id: 'task' }]

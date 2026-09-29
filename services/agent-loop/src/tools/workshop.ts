@@ -1,3 +1,4 @@
+import { validateHarnessReceipt, validateRunSummary } from './receipts.js';
 import type { ToolEntry } from './registry.js';
 import type { Block, Run, Tool } from '../types.js';
 import { RpcClient } from '../rpc.js';
@@ -60,10 +61,12 @@ export function recoverableToolError(error: unknown): boolean {
   // masquerade as a safe local validation rejection of a mutating operation.
   return error instanceof ToolRpcFailure ? error.recoverable : error instanceof RpcError && error.code === -32602;
 }
-async function callWorkshop(client: RpcClient, method: string, params: Record<string, unknown>, signal: AbortSignal, mutating: boolean): Promise<unknown> {
+export async function callWorkshop(client: RpcClient, method: string, params: Record<string, unknown>, signal: AbortSignal, mutating: boolean, validate?: (value: unknown) => void): Promise<unknown> {
   try {
     const result = await client.call(method, params, signal);
     validateReceipt(method, params, result);
+    validateHarnessReceipt(method, params, result);
+    validate?.(result);
     return result;
   }
   catch (error) {
@@ -89,6 +92,15 @@ function validateReceipt(method: string, params: Record<string, unknown>, value:
     if (receipt.namespace !== params.namespace || (requestedID !== undefined && id !== requestedID) ||
         !['queued', 'running', 'cancelling', 'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'].includes(string(receipt.status))) {
       throw new Error('Invalid workshop receipt');
+    }
+    if (receipt.run_ids !== undefined) {
+      if (!Array.isArray(receipt.run_ids) || receipt.run_ids.length > 256) throw new Error('Invalid workshop runs');
+      const ids = receipt.run_ids.map(id => string(id));
+      if (new Set(ids).size !== ids.length) throw new Error('Invalid workshop runs');
+    }
+    if (receipt.runs !== undefined) {
+      if (!Array.isArray(receipt.runs)) throw new Error('Invalid workshop runs');
+      for (const run of receipt.runs) validateRunSummary(run);
     }
   };
   if (['workshop.submit', 'workshop.get', 'workshop.cancel', 'workshop.resume'].includes(method)) {

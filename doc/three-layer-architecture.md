@@ -36,11 +36,11 @@ CLI 工坊的底层引擎已有自己的模型工具循环。因此外层 Loop �
 
 ## 参考实现与取舍
 
-阅读的源码固定在以下版本，参考仓库未作业务修改：
+阅读过的参考代码如下，参考仓库未作任何修改：
 
 - EasyGo 基线：`95131f1`。现有会话队列、历史、长期记忆、后台任务、沙箱和 TUI 都是本次集成需要保留的能力。
-- reference agent A：`<reference revision>`。`<reference agent loop>` 的 `ensureAssistantBarrier`、`beforeToolCall`、`shouldStopAfterTurn`、`getSteeringMessages` 展示了模型输出先记录、工具结果记录后推进、工具间隙接收输入的顺序。借鉴执行顺序与可观测性，不复制 Cloudflare Durable Object、业务确认、旧 transcript 重建和业务工具兼容逻辑。
-- reference runner C：`<reference revision>`，源码在 `master`；其 `main` 是占位 README。`<reference runner>`、`subprocess_runner.py`、`activity.py` 展示了引擎参数数组、JSONL 事件、原生 session/thread ID、续跑与工作区管理。借鉴这些职责，不复制生产机器部署与历史引擎配置兼容层。
+- 一个 TypeScript Agent 实现：它的助手输出屏障、工具调用前检查、回合结束判断和插话读取，展示了模型输出先记录、工具结果记录后推进、工具间隙接收输入的顺序。借鉴执行顺序与可观测性，不复制它的运行平台、业务确认、旧 transcript 重建和业务工具兼容逻辑。
+- 一个 CLI 任务运行器：它的引擎配置、子进程启动和活动记录，展示了引擎参数数组、JSONL 事件、原生 session/thread ID、续跑与工作区管理。借鉴这些职责，不复制生产机器部署与历史引擎配置兼容层。
 
 供应商协议参考 [OpenAI function calling](https://developers.openai.com/api/docs/guides/function-calling) 和 [OpenAI streaming](https://developers.openai.com/api/docs/guides/streaming-responses)。完整适配范围、配置和限制分别见各层文档。
 

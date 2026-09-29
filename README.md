@@ -79,7 +79,7 @@ docker compose -f compose.services.yaml up --build -d
 
 ## 设计来源
 
-Agent Loop 主要参考 reference agent A 的 TypeScript 组织方式：类型化消息、异步工具循环、明确的提交时点。reference agent B 当前 Python agent loop 的 transcript 顺序也被采用：完整模型输出先记录，工具结果记录后再推进；没有复制它的旧 LangGraph 路径或业务适配代码。
+Agent Loop 借鉴了早先几个 Agent 项目的做法：类型化消息、异步工具循环、明确的提交时点；transcript 先记录完整模型输出，工具结果记录后再推进。没有复制这些项目的业务适配代码。
 
 网关和工坊保留上一轮已验证的 Go 核心，实现移动到各自目录。每个服务有独立依赖清单、启动入口、配置和 Dockerfile，分别测试、构建和发布。
 

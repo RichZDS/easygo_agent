@@ -1,6 +1,6 @@
 # Agent framework 验证记录
 
-日期：2026-09-18。基线：`de4c85d`（本次 fetch 的 origin/main）。分支：`feat/agent-framework`。
+日期：2026-09-18。基线：`de4c85d`（本次 fetch 的 origin/main）。分支：Agent framework 功能分支（已合并）。
 
 ## 已执行
 

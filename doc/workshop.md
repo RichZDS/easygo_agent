@@ -240,7 +240,7 @@ containment, queue/concurrency and authenticated HTTP behavior. They make no liv
 LLM calls. The restart test seeds an interrupted durable run to verify startup
 recovery; it does not claim to simulate a machine power loss.
 
-Design references were read only: reference runner C's engine profiles, subprocess launch and
+Design references were read only: an earlier CLI task runner's engine profiles, subprocess launch and
 resume logic, normalized activity and workflow models. The implementation avoids
 its business workflow state machine, deployment hooks and compatibility layers.
 

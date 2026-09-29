@@ -12,7 +12,7 @@
 
 三个目录各有依赖清单、启动程序、示例配置、Dockerfile 和说明。共享 Go RPC 包只在构建时复用。服务端只公开 mTLS RPC 和需授权的健康检查：CA 链校验、实际叶证书指纹、方法权限、namespace 权限；调用方另校验主机名及固定服务端证书。
 
-Loop 的 TypeScript 组织方式参考 reference agent A `<reference revision>` 的 agent-core；模型输出先提交、工具结果提交后再推进的顺序，也对照了 reference agent B `<reference revision>` 当前 agent loop。未复制业务兼容层和旧 LangGraph 路径。
+Loop 的 TypeScript 组织方式参考了早先的 Agent 实现，模型输出先提交、工具结果提交后再推进的顺序也与之对照过。未复制业务兼容层。
 
 ## 实际验证
 

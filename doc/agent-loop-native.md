@@ -98,6 +98,6 @@ Parameter precedence is: remote model defaults, then application YAML `parameter
 
 ## Evidence and reference influence
 
-The reference agent A reference was read only: `<reference agent loop>` assistant barrier near line 2905, tool-result barrier near line 3150, steering near line 3311; `compaction.ts`; and `execution-budget.ts`. The implementation follows the ordering and context-projection ideas, with no copied business code, compatibility layer, database design or execution budgets.
+An earlier TypeScript agent implementation was read for reference only: its assistant barrier, tool-result barrier, steering, compaction and execution budget. The implementation follows the ordering and context-projection ideas, with no copied business code, compatibility layer, database design or execution budgets.
 
 Tests cover native model/tool/model execution, multiple calls, barriers before side effects, recovered errors, cancellation, deadlines, steering, bounded synthesis, opaque-state ownership, adapter options, slow stream consumers, stream-to-JSON-to-next-request state retention, real local HTTP protocol translation, truncated SSE, and the production runtime's tool-result/final-persistence path. These providers are deterministic local fixtures, not live LLM calls. Existing agent/runtime/app/task/config tests remain in place.

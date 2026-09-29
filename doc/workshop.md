@@ -309,7 +309,7 @@ CLI 成功并收集产物后，任务继续保持 running。平台计算工作�
 
 `errCleanupDeferred` 只改变"要不要置位失败即关闭"，不改变已经得到的检查结果：`runCheck` 遇到该哨兵错误会保留原有的退出码、`timedOut` 和 `err`（包括超时判成 failed 而不是 error），只有真正失败即关闭时才把 `err` 覆盖成 `check container cleanup failed`；`Run` 遇到该哨兵错误不追加 `admission disabled`；`Initialize` 的探针容器遇到该哨兵错误视为初始化成功。证据的 `duration_ms` 只计算"创建到 `start --attach` 返回"这段检查本身的时间，不再把回收（包括重试和确认）算进去。
 
-
+## Docker 与 host 的 shell 工具
 
 Docker 模式下，Claude、Pi、OpenClaw 分别开放 `Bash`、`bash`、`exec`，用于调用 easygo-crew 和执行测试。只读工作流同样开放 shell，工作区写保护由只读挂载执行；无网络、UID/资源限额和只读根文件系统继续由外层容器保证。未增加 MCP 或网络工具。
 

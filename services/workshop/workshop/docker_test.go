@@ -591,6 +591,10 @@ func TestDockerCleanupFailsClosedWhenConfirmationTransportFails(t *testing.T) {
 			fastCleanupBackoff(r)
 			name := "confirm-transport-" + mode
 			c := registerFakeContainer(r, f, name)
+			// A genuinely stopped container: fail-closed here can only come
+			// from the transport failure below, not from a zero-value state
+			// that would fail closed on its own regardless.
+			c.State.Status = "exited"
 			if mode == "ps" {
 				c.psFails = true
 			} else {
@@ -615,6 +619,10 @@ func TestDockerCleanupFailsClosedOnLabelMismatchWithoutSendingRm(t *testing.T) {
 	fastCleanupBackoff(r)
 	name := "mismatched-owner"
 	c := registerFakeContainer(r, f, name)
+	// A genuinely stopped container: fail-closed here can only come from the
+	// label mismatch below, not from a zero-value state that would fail
+	// closed on its own regardless.
+	c.State.Status = "exited"
 	c.Config.Labels[ownerLabel] = "someone-else"
 	before := len(f.calls)
 	err := r.cleanup(name)

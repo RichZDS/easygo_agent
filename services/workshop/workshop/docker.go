@@ -339,7 +339,10 @@ func stoppedStatus(status string) bool {
 // closed rather than guess.
 func (r *DockerRunner) confirmCleanup(ctx context.Context, name string) (gone bool, err error) {
 	raw, err := r.output(ctx, "ps", "-aq", "--filter", "name=^/"+name+"$")
-	if err == nil && raw == "" {
+	if err != nil {
+		return false, err
+	}
+	if raw == "" {
 		return true, nil
 	}
 	raw, err = r.output(ctx, "inspect", name)

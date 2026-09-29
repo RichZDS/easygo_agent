@@ -6,18 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
 )
 
 func (r *DockerRunner) checkContainerOptions(name, workspace, checks string, check AcceptanceCheck) []string {
-	args := r.containerOptions(name, workspace, "")
+	args := r.containerOptions(name, workspace, "", true)
 	for i, arg := range args {
-		if arg == "--mount" && strings.Contains(args[i+1], ",dst=/workspace,") {
-			args[i+1] += ",readonly"
-		}
 		if arg == "--entrypoint" {
 			args[i+1] = check.Command[0]
 		}

@@ -252,7 +252,11 @@ func (r *DockerRunner) hostPath(local string) (string, error) {
 	return filepath.Join(r.cfg.HostRoot, rel), nil
 }
 
-func (r *DockerRunner) containerOptions(name, workspace, relay string) []string {
+// workspaceReadOnly is decided by the caller and baked into the mount string
+// at construction time; nothing downstream searches the argument list for a
+// substring to append ",readonly" onto, so a change to field order or an
+// added field elsewhere in this string can never silently drop it.
+func (r *DockerRunner) containerOptions(name, workspace, relay string, workspaceReadOnly bool) []string {
 	args := []string{"create", "--name", name, "--pull", "never", "--interactive", "--user", "1000:1000", "--workdir", runtimeWorkspace, "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges=true", "--pids-limit", strconv.FormatInt(r.cfg.PIDsLimit, 10), "--memory", strconv.FormatInt(r.cfg.MemoryBytes, 10), "--memory-swap", strconv.FormatInt(r.cfg.MemoryBytes, 10), "--cpus", strconv.FormatFloat(float64(r.cfg.NanoCPUs)/1e9, 'f', 9, 64), "--ipc", "private", "--shm-size", "8388608", "--log-driver", "none", "--tmpfs", fmt.Sprintf("/tmp:rw,nosuid,nodev,noexec,size=%d,mode=1777", r.cfg.TmpfsBytes), "--entrypoint", "/usr/local/bin/task-shim"}
 	args = append(args, "--ulimit", fmt.Sprintf("fsize=%d:%d", r.cfg.DiskQuotaBytes, r.cfg.DiskQuotaBytes))
 	labels := r.labels()
@@ -260,7 +264,11 @@ func (r *DockerRunner) containerOptions(name, workspace, relay string) []string 
 	for _, k := range keys {
 		args = append(args, "--label", k+"="+labels[k])
 	}
-	args = append(args, "--mount", "type=bind,src="+workspace+",dst="+runtimeWorkspace+",bind-propagation=rprivate")
+	workspaceMount := "type=bind,src=" + workspace + ",dst=" + runtimeWorkspace + ",bind-propagation=rprivate"
+	if workspaceReadOnly {
+		workspaceMount += ",readonly"
+	}
+	args = append(args, "--mount", workspaceMount)
 	if relay != "" {
 		args = append(args, "--mount", "type=bind,src="+relay+",dst="+runtimeRelay+",readonly,bind-propagation=rprivate")
 	}
@@ -270,13 +278,8 @@ func (r *DockerRunner) containerOptions(name, workspace, relay string) []string 
 // A read-only workflow has an OS-enforced read-only workspace. Native state
 // remains writable only under its explicit task-private HOME submount.
 func (r *DockerRunner) taskContainerOptions(name, workspace, relay, home, policy string) []string {
-	args := r.containerOptions(name, workspace, relay)
+	args := r.containerOptions(name, workspace, relay, policy == "read-only")
 	if policy == "read-only" {
-		for i, arg := range args {
-			if arg == "--mount" && strings.Contains(args[i+1], ",dst="+runtimeWorkspace+",") {
-				args[i+1] += ",readonly"
-			}
-		}
 		args = append(args, "--mount", "type=bind,src="+home+",dst="+runtimeWorkspace+"/.workshop-home,bind-propagation=rprivate")
 	}
 	return args
@@ -543,7 +546,7 @@ func (r *DockerRunner) Initialize(ctx context.Context) (err error) {
 			r.mu.Unlock()
 		}
 	}()
-	args := r.containerOptions(name, host, "")
+	args := r.containerOptions(name, host, "", false)
 	args = append(args, r.cfg.Image, "--verify-root", marker)
 	if _, err = r.output(ctx, args...); err != nil {
 		return err

@@ -429,3 +429,77 @@ func TestCrewHostEnvironmentAndPackInvocation(t *testing.T) {
 	}
 	waitTask(t, s, "owner", task.ID, func(task *Task) bool { return terminal(task.Status) })
 }
+
+// TestFinishCrewOutcomeRecomputesFalseGreen exercises the truth-table
+// recompute finishCrewOutcome now does after finish() may have rewritten
+// Acceptance.State: a stale false_green from before the state change can
+// never survive alongside a state that no longer satisfies the truth table.
+// It also checks the ordinary failed and cancelled paths, which already
+// computed the right value through acceptanceState, are unaffected.
+func TestFinishCrewOutcomeRecomputesFalseGreen(t *testing.T) {
+	s, err := New(Config{Root: t.TempDir(), Concurrency: 1, Workflows: []Workflow{{Name: "test", Version: "1", Engine: "codex", Model: "fixture", Instructions: "offline", Policy: "workspace-write", TimeoutSeconds: 5}}}, artifactRunnerFunc(func(context.Context, Invocation, func(Event) error) (Result, error) {
+		return Result{}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	cases := []struct {
+		name           string
+		seededState    string
+		seededGreen    bool
+		submitTests    string
+		finishStatus   Status
+		wantState      string
+		wantFalseGreen bool
+	}{
+		{
+			name: "stale-false-green-cleared-when-interrupted", seededState: "failed", seededGreen: true, submitTests: "pass",
+			finishStatus: Interrupted, wantState: "interrupted", wantFalseGreen: false,
+		},
+		{
+			name: "normal-failed-path-unaffected", seededState: "failed", seededGreen: false, submitTests: "pass",
+			finishStatus: Succeeded, wantState: "failed", wantFalseGreen: true,
+		},
+		{
+			name: "normal-cancelled-path-unaffected", seededState: "running", seededGreen: false, submitTests: "pass",
+			finishStatus: Cancelled, wantState: "cancelled", wantFalseGreen: false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			runID := uuid.NewString()
+			task := &Task{ID: uuid.NewString(), Namespace: "owner", Status: Running,
+				Workflow: Workflow{Acceptance: &AcceptanceConfig{Checks: []AcceptanceCheck{{Name: "unit", Command: []string{"/unit"}, TimeoutSeconds: 1}}}},
+				Runs:     []Run{{ID: runID, Status: Running, Acceptance: &Acceptance{State: c.seededState, FalseGreen: c.seededGreen, Evidence: []Evidence{}}}},
+			}
+			s.mu.Lock()
+			err := s.db.Update(func(tx *bolt.Tx) error {
+				if c.submitTests != "" {
+					if err := appendEvent(tx, task, Event{Kind: "crew.message", Message: &CrewMessage{ID: uuid.NewString(), Direction: "from_worker", Kind: "submit", Text: "ready", Claims: &CrewClaims{Tests: c.submitTests}}}); err != nil {
+						return err
+					}
+				}
+				return putTask(tx, task)
+			})
+			s.mu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.mu.Lock()
+			err = s.db.Update(func(tx *bolt.Tx) error {
+				finish(task, c.finishStatus, "test")
+				return finishCrewOutcome(tx, task)
+			})
+			s.mu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := task.Runs[0].Acceptance
+			if got.State != c.wantState || got.FalseGreen != c.wantFalseGreen {
+				t.Fatalf("state=%s false_green=%v, want state=%s false_green=%v", got.State, got.FalseGreen, c.wantState, c.wantFalseGreen)
+			}
+		})
+	}
+}

@@ -302,6 +302,14 @@ func resumeCrewInput(tx *bolt.Tx, task *Task) error {
 	}
 	return appendEvent(tx, task, Event{Kind: "crew.read", Read: &CrewRead{MessageIDs: ids}})
 }
+
+// finishCrewOutcome recomputes both run.Outcome and, when the run carries an
+// Acceptance record, run.Acceptance.FalseGreen from the same crew messages,
+// using the same truth table as acceptanceFalseGreen. finish (called just
+// before this, at every call site) may rewrite Acceptance.State (e.g. to
+// "interrupted") without updating FalseGreen; recomputing it here keeps the
+// two consistent instead of leaving a stale "submitted tests=pass" false
+// green attached to a state that no longer satisfies the truth table.
 func finishCrewOutcome(tx *bolt.Tx, task *Task) error {
 	events, err := taskEvents(tx, task.ID)
 	if err != nil {
@@ -322,6 +330,13 @@ func finishCrewOutcome(tx *bolt.Tx, task *Task) error {
 		case "ask":
 			run.Outcome = "asked"
 		}
+	}
+	if run.Acceptance != nil {
+		green, err := acceptanceFalseGreen(tx, task, run.Acceptance.State)
+		if err != nil {
+			return err
+		}
+		run.Acceptance.FalseGreen = green
 	}
 	return nil
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -183,6 +184,23 @@ func TestAcceptanceDockerCleanupResilienceRealContainer(t *testing.T) {
 	gateway := nativeRelayFixture(t, func(context.Context, json.RawMessage, *rpc.Stream) (any, *rpc.Error) { return nil, nil })
 	check := AcceptanceCheck{Name: "artifact", Command: []string{"/usr/local/bin/fixture-check", "file", "/workspace/artifact.txt", "good"}, TimeoutSeconds: 5}
 	owner := "cleanup-resilience-" + uuid.NewString()
+	// Backstop: this test deliberately makes cleanup fail its first attempts,
+	// so a bug (or a t.Fatal partway through) can leave a stopped container
+	// behind. t.Cleanup runs after the test body's own defers (including
+	// s.Close()), so it catches whatever those left, by owner label alone -
+	// independent of whether the DockerRunner itself is still usable.
+	t.Cleanup(func() {
+		binary := os.Getenv("EASYGO_DOCKER_TEST_BINARY")
+		if binary == "" {
+			binary = "docker"
+		}
+		ids, _ := exec.Command(binary, "--host", endpoint, "ps", "-aq", "--filter", "label="+ownerLabel+"="+owner).Output()
+		for _, id := range strings.Fields(string(ids)) {
+			if err := exec.Command(binary, "--host", endpoint, "rm", "--force", id).Run(); err != nil {
+				t.Logf("cleanup backstop: failed to remove leftover container %s: %v", id, err)
+			}
+		}
+	})
 	workflow := Workflow{Name: "quick", Version: "1", Runtime: "fixture", Instructions: "offline", Policy: "workspace-write", TimeoutSeconds: 60, Artifacts: []string{"artifact.txt"}, Acceptance: &AcceptanceConfig{Checks: []AcceptanceCheck{check}}}
 	cfg := Config{Root: root, PackDir: pack, Concurrency: 1, QueueCapacity: 1, ModelGateway: gateway, Engines: map[string]EngineConfig{"codex": {}}, RuntimeProfiles: map[string]RuntimeProfile{"fixture": {Engine: "codex", Protocol: "responses", GatewayModel: "fixture"}}, Workflows: []Workflow{workflow}, Sandbox: SandboxConfig{Mode: "docker", DockerBinary: os.Getenv("EASYGO_DOCKER_TEST_BINARY"), Endpoint: endpoint, Image: image, Owner: owner, HostRoot: root}}
 	s, err := New(cfg, nil)

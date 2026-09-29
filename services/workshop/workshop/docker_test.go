@@ -178,6 +178,31 @@ func option(args []string, k string) string {
 	return args[i+1]
 }
 
+// mountFields splits a Docker --mount value into its comma-separated fields,
+// e.g. "type=bind,src=/a,dst=/b,readonly" -> ["type=bind","src=/a","dst=/b","readonly"].
+func mountFields(spec string) []string {
+	return strings.Split(spec, ",")
+}
+
+// findMount returns the field set of the --mount value whose fields include
+// dst=<dst>, and whether one was found. Matching on the exact dst= field
+// (not a substring of the whole value) and returning a field set instead of
+// a string means callers never depend on where in the mount string that
+// field, or "readonly", happens to sit.
+func findMount(args []string, dst string) ([]string, bool) {
+	target := "dst=" + dst
+	for i, arg := range args {
+		if arg != "--mount" || i+1 >= len(args) {
+			continue
+		}
+		fields := mountFields(args[i+1])
+		if slices.Contains(fields, target) {
+			return fields, true
+		}
+	}
+	return nil, false
+}
+
 func TestDockerOptionsAndPathMapping(t *testing.T) {
 	r, _, in := dockerFixture(t)
 	r.cfg.HostRoot = "/daemon/workshop"
@@ -185,7 +210,7 @@ func TestDockerOptionsAndPathMapping(t *testing.T) {
 	if e != nil || mapped != "/daemon/workshop/workspaces/"+filepath.Base(in.Workspace) {
 		t.Fatalf("mapping %s %v", mapped, e)
 	}
-	args := r.containerOptions("run", mapped, "/daemon/workshop/relays/run")
+	args := r.containerOptions("run", mapped, "/daemon/workshop/relays/run", false)
 	for k, v := range map[string]string{"--user": "1000:1000", "--network": "none", "--cap-drop": "ALL", "--security-opt": "no-new-privileges=true", "--pids-limit": "128", "--memory": "1073741824", "--memory-swap": "1073741824", "--cpus": "1.000000000", "--pull": "never", "--log-driver": "none"} {
 		if option(args, k) != v {
 			t.Errorf("%s=%s", k, option(args, k))
@@ -429,6 +454,56 @@ func TestDockerReadOnlyWorkspaceAllowsOnlyNativeHomeWrites(t *testing.T) {
 	}
 	if len(mounts) != 3 || !strings.HasSuffix(mounts[0], ",readonly") || !strings.Contains(mounts[2], "dst=/workspace/.workshop-home,") || strings.Contains(mounts[2], ",readonly") {
 		t.Fatalf("read-only mounts: %v", mounts)
+	}
+}
+
+// TestContainerOptionsWorkspaceReadOnlyByFieldSet asserts, by parsing the
+// --mount field set rather than locking a substring of the whole value, that
+// workspace read-only-ness is decided once at construction and holds for the
+// check container, both task policies, and a resumed run.
+func TestContainerOptionsWorkspaceReadOnlyByFieldSet(t *testing.T) {
+	r, f, in := dockerFixture(t)
+
+	checkArgs := r.checkContainerOptions("check", "/host/work", "/host/checks", AcceptanceCheck{Command: []string{"/pack/checks/unit"}})
+	if mount, ok := findMount(checkArgs, runtimeWorkspace); !ok || !slices.Contains(mount, "readonly") {
+		t.Fatalf("check container workspace not readonly: %v", mount)
+	}
+
+	roArgs := r.taskContainerOptions("task-ro", "/host/workspace", "/host/relay", "/host/workspace/.workshop-home", "read-only")
+	if mount, ok := findMount(roArgs, runtimeWorkspace); !ok || !slices.Contains(mount, "readonly") {
+		t.Fatalf("read-only task workspace not readonly: %v", mount)
+	}
+	if mount, ok := findMount(roArgs, runtimeWorkspace+"/.workshop-home"); !ok || slices.Contains(mount, "readonly") {
+		t.Fatalf(".workshop-home submount should stay writable: %v", mount)
+	}
+
+	wArgs := r.taskContainerOptions("task-write", "/host/workspace", "/host/relay", "/host/workspace/.workshop-home", "workspace-write")
+	if mount, ok := findMount(wArgs, runtimeWorkspace); !ok || slices.Contains(mount, "readonly") {
+		t.Fatalf("workspace-write task workspace should stay writable: %v", mount)
+	}
+
+	// Covers resume: the same read-only decision must hold on a second Run
+	// that carries a session forward, not just on a freshly submitted task.
+	in.Workflow.Policy = "read-only"
+	r.gateway = nativeRelayFixture(t, func(context.Context, json.RawMessage, *rpc.Stream) (any, *rpc.Error) { return nil, nil })
+	seen := 0
+	f.start = func(ctx context.Context, c *fakeContainer, stdin io.Reader, out, diag io.Writer) error {
+		if mount, ok := findMount(c.args, runtimeWorkspace); !ok || !slices.Contains(mount, "readonly") {
+			t.Fatalf("run %d: workspace not readonly: %v", seen, mount)
+		}
+		seen++
+		fakeSuccess(out)
+		return nil
+	}
+	for i := 0; i < 2; i++ {
+		res, e := r.Run(context.Background(), in, func(Event) error { return nil })
+		if e != nil {
+			t.Fatal(e)
+		}
+		in.SessionID = res.SessionID
+	}
+	if seen != 2 {
+		t.Fatalf("expected 2 runs checked (initial + resume), got %d", seen)
 	}
 }
 

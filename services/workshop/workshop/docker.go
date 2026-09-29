@@ -557,12 +557,12 @@ func (r *DockerRunner) Run(ctx context.Context, in Invocation, emit func(Event) 
 	if quotaErr := <-quotaDone; quotaErr != nil {
 		return result, quotaErr
 	}
-	// A short-lived process can finish between polls; it still cannot publish an
-	// over-quota workspace as success. External cancellation keeps its own status.
-	if ctx.Err() == nil {
-		if quotaErr := r.CheckDiskQuota(ctx, in.Workspace); quotaErr != nil {
-			return result, quotaErr
-		}
+	// A short-lived process can finish between polls. Cancellation must not
+	// bypass the final quota check, but the scan still has a bounded lifetime.
+	quotaCtx, cancelQuota := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancelQuota()
+	if quotaErr := r.CheckDiskQuota(quotaCtx, in.Workspace); quotaErr != nil {
+		return result, quotaErr
 	}
 	return result, err
 }

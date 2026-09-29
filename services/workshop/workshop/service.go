@@ -659,7 +659,10 @@ func (s *Service) execute(id string) {
 		}
 		finish(current, status, reason)
 		r := &current.Runs[len(current.Runs)-1]
-		r.Text, r.Usage, r.Artifacts = result.Text, result.Usage, artifacts
+		r.Text, r.Usage = result.Text, result.Usage
+		if status == Succeeded {
+			r.Artifacts = artifacts
+		}
 		if result.SessionID != "" {
 			current.SessionID, r.SessionID = result.SessionID, result.SessionID
 		}

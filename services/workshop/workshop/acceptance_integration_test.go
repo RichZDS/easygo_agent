@@ -1,11 +1,15 @@
 package workshop
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -154,5 +158,121 @@ func TestAcceptanceDockerIntegration(t *testing.T) {
 			}
 			t.Logf("task=%s acceptance=%s false_green=%t evidence=%d; owned containers=0", task.Status, run.Acceptance.State, run.Acceptance.FalseGreen, len(run.Acceptance.Evidence))
 		})
+	}
+}
+
+// TestAcceptanceDockerCleanupResilienceRealContainer wraps a real Docker
+// command so the check container's rm fails exactly 3 times, proving against
+// a real daemon (not just the fake) that: the check still reports passed with
+// a duration excluding recycling; the failure never latches cleanupFailure;
+// and the next task's admission sweep actually removes the stopped container.
+func TestAcceptanceDockerCleanupResilienceRealContainer(t *testing.T) {
+	endpoint, image := os.Getenv("EASYGO_DOCKER_TEST_ENDPOINT"), os.Getenv("EASYGO_DOCKER_TEST_IMAGE")
+	if endpoint == "" || image == "" {
+		t.Skip("requires explicit dedicated Docker endpoint and fixture image")
+	}
+	root, err := os.MkdirTemp("/tmp", "cleanup-resilience-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { writableTree(root); os.RemoveAll(root) }()
+	pack := filepath.Join(root, "source-pack")
+	if err := os.MkdirAll(filepath.Join(pack, "checks"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	gateway := nativeRelayFixture(t, func(context.Context, json.RawMessage, *rpc.Stream) (any, *rpc.Error) { return nil, nil })
+	check := AcceptanceCheck{Name: "artifact", Command: []string{"/usr/local/bin/fixture-check", "file", "/workspace/artifact.txt", "good"}, TimeoutSeconds: 5}
+	owner := "cleanup-resilience-" + uuid.NewString()
+	workflow := Workflow{Name: "quick", Version: "1", Runtime: "fixture", Instructions: "offline", Policy: "workspace-write", TimeoutSeconds: 60, Artifacts: []string{"artifact.txt"}, Acceptance: &AcceptanceConfig{Checks: []AcceptanceCheck{check}}}
+	cfg := Config{Root: root, PackDir: pack, Concurrency: 1, QueueCapacity: 1, ModelGateway: gateway, Engines: map[string]EngineConfig{"codex": {}}, RuntimeProfiles: map[string]RuntimeProfile{"fixture": {Engine: "codex", Protocol: "responses", GatewayModel: "fixture"}}, Workflows: []Workflow{workflow}, Sandbox: SandboxConfig{Mode: "docker", DockerBinary: os.Getenv("EASYGO_DOCKER_TEST_BINARY"), Endpoint: endpoint, Image: image, Owner: owner, HostRoot: root}}
+	s, err := New(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	docker := s.runner.(*DockerRunner)
+	docker.cleanupRetryBackoff = [2]time.Duration{50 * time.Millisecond, 50 * time.Millisecond}
+
+	// Intercept only the first check container's rm: fail exactly the first 3
+	// real attempts (matching cleanup's bounded retry), globally, so a later
+	// task's own check container is never touched once that budget is spent.
+	var mu sync.Mutex
+	names := map[string]string{}
+	injected := 0
+	real := docker.command
+	docker.command = func(ctx context.Context, in io.Reader, out, diag io.Writer, args ...string) error {
+		if len(args) > 0 && args[0] == "create" {
+			name := option(args, "--name")
+			rec := &bytes.Buffer{}
+			err := real(ctx, in, io.MultiWriter(out, rec), diag, args...)
+			if err == nil && name != "" {
+				mu.Lock()
+				names[strings.TrimSpace(rec.String())] = name
+				mu.Unlock()
+			}
+			return err
+		}
+		if len(args) > 0 && args[0] == "rm" {
+			id := args[len(args)-1]
+			mu.Lock()
+			name := names[id]
+			inject := strings.HasPrefix(name, "easygo-check-") && injected < 3
+			if inject {
+				injected++
+			}
+			mu.Unlock()
+			if inject {
+				return errors.New("injected rm failure for cleanup-resilience test")
+			}
+		}
+		return real(ctx, in, out, diag, args...)
+	}
+
+	submit := func() *Task {
+		raw, _ := json.Marshal(map[string]any{"mode": "crew", "script": []map[string]any{
+			{"op": "write", "path": "artifact.txt", "text": "good"},
+			{"op": "crew", "args": []string{"submit", "--tests", "pass", "ready"}},
+		}})
+		task, err := s.Submit(SubmitRequest{Namespace: "task-namespace", Workflow: "quick", Input: string(raw)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return waitTask(t, s, task.Namespace, task.ID, func(task *Task) bool { return terminal(task.Status) })
+	}
+
+	first := submit()
+	run := first.Runs[0]
+	if first.Status != Succeeded || run.Acceptance == nil || run.Acceptance.State != "passed" {
+		t.Fatalf("status=%s acceptance=%+v error=%s", first.Status, run.Acceptance, run.Error)
+	}
+	if len(run.Acceptance.Evidence) != 1 || run.Acceptance.Evidence[0].DurationMS >= 10000 {
+		t.Fatalf("evidence duration not bounded: %+v", run.Acceptance.Evidence)
+	}
+	docker.mu.Lock()
+	broken, pending := docker.cleanupFailure, len(docker.pendingCleanup)
+	docker.mu.Unlock()
+	if broken != nil {
+		t.Fatalf("cleanupFailure latched despite a confirmed-stopped check container: %v", broken)
+	}
+	if pending != 1 {
+		t.Fatalf("expected exactly the check container pending cleanup, got %d", pending)
+	}
+
+	// The next task must still be admitted, and its admission sweep must
+	// remove the container this test left stopped-but-not-yet-removed.
+	second := submit()
+	run = second.Runs[0]
+	if second.Status != Succeeded || run.Acceptance == nil || run.Acceptance.State != "passed" {
+		t.Fatalf("next task not admitted/passed: status=%s acceptance=%+v error=%s", second.Status, run.Acceptance, run.Error)
+	}
+	docker.mu.Lock()
+	pending = len(docker.pendingCleanup)
+	docker.mu.Unlock()
+	if pending != 0 {
+		t.Fatalf("admission sweep did not clear the pending check container: %d left", pending)
+	}
+	ids, err := docker.output(context.Background(), "ps", "-aq", "--filter", "label="+ownerLabel+"="+owner)
+	if err != nil || ids != "" {
+		t.Fatal("stopped check container was not actually removed by the sweep", err, ids)
 	}
 }

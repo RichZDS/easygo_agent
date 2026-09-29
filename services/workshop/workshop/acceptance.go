@@ -167,9 +167,8 @@ func (s *Service) runAcceptance(ctx context.Context, task Task) error {
 			return err
 		}
 		output := &evidenceWriter{file: file}
-		startedAt := time.Now()
-		exit, timedOut, checkErr := docker.runCheck(ctx, task.Workspace, s.packChecks, check, output)
-		evidence.DurationMS = time.Since(startedAt).Milliseconds()
+		exit, timedOut, duration, checkErr := docker.runCheck(ctx, task.Workspace, s.packChecks, check, output)
+		evidence.DurationMS = duration.Milliseconds()
 		evidence.ExitCode = exit
 		evidence.TimedOut = timedOut
 		if checkErr != nil {

@@ -299,8 +299,17 @@ CLI 成功并收集产物后，任务继续保持 running。平台计算工作�
 
 `workshop.evidence` 不带 evidence_id 时返回有 namespace/task_id/run_id 的列表对象；指定 evidence_id 时返回有完整身份字段的输出页。摘要提供 acceptance_state、false_green、evidence_count。读取只限所属 namespace，检查输出不经施工者转述。
 
+### 容器回收在高负载下的韧性
 
-## Docker 与 host 的 shell 工具
+高负载下 `docker rm` 可能在单次 20 秒预算内做不完，但这不代表容器仍然危险：一旦确认它已经不在运行，剩下的只是占一点磁盘（rootfs 只读、日志驱动为 none）。回收因此分三层：
+
+- **有界重试**：`cleanup` 内部最多尝试 3 次 `remove`，每次独立 20 秒预算，两次之间退避 1 秒、2 秒。任意一次成功即算成功；前一次 `rm` 若已在 daemon 侧生效，下一次 `ps` 为空同样算成功。
+- **确认后延迟回收**：3 次都失败时，用一个独立的 20 秒上下文做一次状态确认：`ps` 为空判成功；否则 `inspect` 该容器，只有恰好一个对象、owner 三个标签全部匹配，并且 `State.Running=false`、`Paused=false`、`Restarting=false`，且 `Status` 属于 `created`/`exited`/`dead`/`removing`，才判为"已停止、待回收"——不置位 `cleanupFailure`，把名字记入待回收集合（上限 32，超限按失败即关闭处理），`cleanup` 返回哨兵错误 `errCleanupDeferred`。**其余任何情况**（仍在运行、确认阶段 `ps`/`inspect` 失败或解析失败、标签不符）保持原有的失败即关闭：置位 `cleanupFailure`，`Run` 和 `runCheck` 的准入随之拒绝新工作，直到运维介入。
+- **准入时的尽力清扫**：`Run`、`runCheck` 通过 `initialized` 和 `cleanupFailure` 检查之后，顺手对待回收集合做一次总预算 20 秒的清扫，逐个重新校验标签后 `remove`；同一时刻只允许一个清扫在跑，其余调用直接跳过；清扫失败不阻止准入。重启后仍由 `Initialize` 的孤儿回收兜底。
+
+`errCleanupDeferred` 只改变"要不要置位失败即关闭"，不改变已经得到的检查结果：`runCheck` 遇到该哨兵错误会保留原有的退出码、`timedOut` 和 `err`（包括超时判成 failed 而不是 error），只有真正失败即关闭时才把 `err` 覆盖成 `check container cleanup failed`；`Run` 遇到该哨兵错误不追加 `admission disabled`；`Initialize` 的探针容器遇到该哨兵错误视为初始化成功。证据的 `duration_ms` 只计算"创建到 `start --attach` 返回"这段检查本身的时间，不再把回收（包括重试和确认）算进去。
+
+
 
 Docker 模式下，Claude、Pi、OpenClaw 分别开放 `Bash`、`bash`、`exec`，用于调用 easygo-crew 和执行测试。只读工作流同样开放 shell，工作区写保护由只读挂载执行；无网络、UID/资源限额和只读根文件系统继续由外层容器保证。未增加 MCP 或网络工具。
 

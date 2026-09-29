@@ -422,6 +422,10 @@ func (r *DockerRunner) Run(ctx context.Context, in Invocation, emit func(Event) 
 	if err != nil {
 		return result, err
 	}
+	args, err = dockerRuntimeArgs(in.Workflow.Engine, args)
+	if err != nil {
+		return result, err
+	}
 	// The task cannot choose a mount path: only service-created UUID workspaces.
 	rel, e := filepath.Rel(filepath.Join(r.root, "workspaces"), in.Workspace)
 	if e != nil || strings.Contains(rel, string(filepath.Separator)) {
@@ -481,7 +485,11 @@ func (r *DockerRunner) Run(ctx context.Context, in Invocation, emit func(Event) 
 		if e != nil || !filepath.IsLocal(rel) {
 			return errors.New("runtime config escaped workspace")
 		}
-		return writeRuntimeJSON(filepath.Join(in.Workspace, rel), v)
+		configured, configErr := dockerRuntimeConfig(in.Workflow.Engine, v)
+		if configErr != nil {
+			return configErr
+		}
+		return writeRuntimeJSON(filepath.Join(in.Workspace, rel), configured)
 	})
 	if err != nil {
 		return result, err

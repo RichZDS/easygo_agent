@@ -298,3 +298,12 @@ CLI 成功并收集产物后，任务继续保持 running。平台计算工作�
 每项实际执行的检查记录命令、退出码、超时、耗时、输出字节数和工作区摘要，输出写入 `<root>/evidence/<task_id>/<evidence_id>.log`，最多保留 1 MiB。`output_bytes` 是收到的完整字节数，`output_truncated` 表示截断；分页的 total_bytes 是实际保存的字节数。UTF-8 分页不拆开有效字符；无效字节在返回 text 时替换，offset 仍按原始已存字节计数。
 
 `workshop.evidence` 不带 evidence_id 时返回有 namespace/task_id/run_id 的列表对象；指定 evidence_id 时返回有完整身份字段的输出页。摘要提供 acceptance_state、false_green、evidence_count。读取只限所属 namespace，检查输出不经施工者转述。
+
+
+## Docker 与 host 的 shell 工具
+
+Docker 模式下，Claude、Pi、OpenClaw 分别开放 `Bash`、`bash`、`exec`，用于调用 easygo-crew 和执行测试。只读工作流同样开放 shell，工作区写保护由只读挂载执行；无网络、UID/资源限额和只读根文件系统继续由外层容器保证。未增加 MCP 或网络工具。
+
+Claude 显式配置 `--tools …,Bash --allowedTools Bash`；固定版本允许在 `--restricted` 中显式加入 Bash，因此保留 restricted/bare。OpenClaw 的 exec 目标固定为容器内本地执行，mode=full 避免无交互环境等待许可。Pi 只在已有工具白名单中加入 bash。以上改写只由初始化通过的 DockerRunner 执行。
+
+host 模式保持原有工具范围：Claude/Pi/OpenClaw 只有文件工具，不能调用 easygo-crew；Codex 可执行 shell，但仍需配置模型 relay 才有 crew 通道。参数与固定版本的离线取证见 [运行时兼容性说明](runtime-provider-compatibility.md#p1-docker-shell-tools-2026-09-29)。

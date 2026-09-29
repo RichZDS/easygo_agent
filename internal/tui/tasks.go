@@ -5,19 +5,18 @@ import (
 	"fmt"
 	"time"
 
-	"easygo-agent/internal/conversation"
-	"easygo-agent/internal/task"
+	"easygo-agent/internal/clientapi"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
 type backgroundTick struct{}
 type backgroundSnapshot struct {
-	tasks         []task.Task
-	notifications []conversation.RunRecord
+	tasks         []clientapi.TaskSummary
+	notifications []clientapi.RunRecord
 	err           error
 }
 
-func (m *Model) WithTasks(store task.Store, reader ...conversation.NotificationReader) *Model {
+func (m *Model) WithTasks(store clientapi.TaskLister, reader ...clientapi.NotificationReader) *Model {
 	m.tasks = store
 	if len(reader) > 0 {
 		m.notifications = reader[0]
@@ -33,8 +32,8 @@ func (m *Model) backgroundPoll() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		items, err := store.List(ctx, task.Owner{User: user, Session: session})
-		var runs []conversation.RunRecord
+		items, err := store.ListTasks(ctx, user, session)
+		var runs []clientapi.RunRecord
 		if err == nil && reader != nil {
 			runs, err = reader.NotificationRuns(ctx, user, session, after)
 		}
@@ -47,16 +46,13 @@ func (m *Model) backgroundUpdate(snapshot backgroundSnapshot) tea.Cmd {
 		return backgroundWait()
 	}
 	for _, t := range snapshot.tasks {
-		seq := int64(0)
-		if len(t.Events) > 0 {
-			seq = t.Events[len(t.Events)-1].Seq
-		}
+		seq := t.LastSeq
 		if m.taskSequences == nil {
 			m.taskSequences = map[string]int64{}
 		}
 		if seq > m.taskSequences[t.ID] {
 			m.taskSequences[t.ID] = seq
-			m.lines = append(m.lines, fmt.Sprintf("task %.8s v%d [%s]: %s %s", t.ID, t.Version, t.Status, t.Brief.Goal, t.Progress))
+			m.lines = append(m.lines, fmt.Sprintf("task %.8s v%d [%s]: %s %s", t.ID, t.Version, t.Status, t.Goal, t.Progress))
 		}
 	}
 	for _, r := range snapshot.notifications {

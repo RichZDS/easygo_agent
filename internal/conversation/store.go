@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"easygo-agent/internal/clientapi"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -25,41 +26,21 @@ var (
 )
 
 // RunStatus is the durable lifecycle state of a submitted user request.
-type RunStatus string
+type RunStatus = clientapi.RunStatus
 
 const (
-	RunQueued    RunStatus = "queued"
-	RunRunning   RunStatus = "running"
-	RunCompleted RunStatus = "completed"
-	RunFailed    RunStatus = "failed"
-	RunCanceled  RunStatus = "canceled"
+	RunQueued    = clientapi.RunQueued
+	RunRunning   = clientapi.RunRunning
+	RunCompleted = clientapi.RunCompleted
+	RunFailed    = clientapi.RunFailed
+	RunCanceled  = clientapi.RunCanceled
 )
 
 const DefaultMaxPendingRuns = 100
 
 // RunRecord is the queue-facing representation of one submitted request.
 // Position is computed for queued records and is zero for other states.
-type RunRecord struct {
-	Source          string     `json:"source,omitempty"`
-	NotificationID  string     `json:"notification_id,omitempty"`
-	ID              string     `json:"run_id"`
-	SessionID       string     `json:"session_id"`
-	Username        string     `json:"-"`
-	Input           string     `json:"input"`
-	Status          RunStatus  `json:"status"`
-	Position        int        `json:"position"`
-	IdempotencyKey  string     `json:"-"`
-	CancelRequested bool       `json:"cancel_requested,omitempty"`
-	ResultText      string     `json:"result_text,omitempty"`
-	Error           string     `json:"error,omitempty"`
-	TurnID          int64      `json:"turn_id,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	StartedAt       *time.Time `json:"started_at,omitempty"`
-	FinishedAt      *time.Time `json:"finished_at,omitempty"`
-	WorkerID        string     `json:"-"`
-	LeaseExpiresAt  time.Time  `json:"-"`
-	ClaimToken      string     `json:"-"`
-}
+type RunRecord = clientapi.RunRecord
 
 // CloneRunRecord returns a value that does not alias the timestamp pointers
 // held by a Memory store or a lease. Queue callers are free to retain and
@@ -338,6 +319,4 @@ func auditRun(record RunRecord, outputs []*schema.AgenticMessage) ([]*schema.Age
 	return Clone(append([]*schema.AgenticMessage{RunInput(record)}, outputs...))
 }
 
-type NotificationReader interface {
-	NotificationRuns(context.Context, string, string, int64) ([]RunRecord, error)
-}
+type NotificationReader = clientapi.NotificationReader

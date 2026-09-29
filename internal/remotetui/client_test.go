@@ -10,8 +10,7 @@ import (
 	"testing"
 	"time"
 
-	agentruntime "easygo-agent/internal/agent/runtime"
-	"easygo-agent/internal/conversation"
+	"easygo-agent/internal/clientapi"
 )
 
 type fixture struct {
@@ -185,7 +184,7 @@ func TestQueueReconnectRuntimeCancelAndClose(t *testing.T) {
 		t.Fatal("wrong session cancel allowed")
 	}
 	canceled, err := q.Cancel(ctx, "", "session-1", r.ID)
-	if err != nil || canceled.Status != conversation.RunCanceled {
+	if err != nil || canceled.Status != clientapi.RunCanceled {
 		t.Fatal(canceled, err)
 	}
 	h.Close()
@@ -211,10 +210,10 @@ func TestPollReconnectCursorAndTerminalText(t *testing.T) {
 	defer s.Close()
 	var delta, final string
 	for e := range s.Events() {
-		if e.Kind == agentruntime.EventTextDelta {
+		if e.Kind == clientapi.EventTextDelta {
 			delta += e.Text
 		}
-		if e.Kind == agentruntime.EventCompleted {
+		if e.Kind == clientapi.EventCompleted {
 			final = e.Text
 		}
 	}

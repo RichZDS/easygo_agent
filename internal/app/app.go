@@ -180,7 +180,7 @@ func Run(ctx context.Context, configPath string, options ...Options) (resultErr 
 	}
 	ui := tui.NewQueue(app.queue, opts.Username, opts.SessionID)
 	if app.tasks != nil {
-		ui.WithTasks(app.tasks.Store, app.store.(conversation.NotificationReader))
+		ui.WithTasks(taskLister{app.tasks.Store}, app.store.(conversation.NotificationReader))
 	}
 	defer func() { resultErr = errors.Join(resultErr, ui.Close()) }()
 	// Subscribe to active runs before loading history. A recovered run can
@@ -200,7 +200,8 @@ func Run(ctx context.Context, configPath string, options ...Options) (resultErr 
 		}
 		after = turns[len(turns)-1].ID
 	}
-	ui.Restore(opts.Username, opts.SessionID, history)
+	lastTurnID, lines := historyLines(history)
+	ui.Restore(opts.Username, opts.SessionID, lastTurnID, lines)
 	// 启动 Bubble Tea TUI，占用备用屏幕；退出后由 ctx 取消。
 	program := tea.NewProgram(
 		ui,

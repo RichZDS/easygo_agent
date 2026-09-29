@@ -6,14 +6,10 @@ import (
 	"easygo-agent/internal/conversation"
 )
 
-// IsTerminal reports whether an event ends a run.
+// IsTerminal reports whether an event ends a run. Event.IsTerminal is
+// declared with Event in internal/clientapi.
 func IsTerminal(kind EventKind) bool {
-	return kind == EventCompleted || kind == EventCanceled || kind == EventFailed
-}
-
-// IsTerminal reports whether this event ends a run.
-func (event Event) IsTerminal() bool {
-	return IsTerminal(event.Kind)
+	return Event{Kind: kind}.IsTerminal()
 }
 
 // Consume reads a run until its terminal event and invokes sink for every

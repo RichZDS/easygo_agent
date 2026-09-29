@@ -6,9 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	agentruntime "easygo-agent/internal/agent/runtime"
-	"easygo-agent/internal/conversation"
-	"easygo-agent/internal/task"
+	"easygo-agent/internal/clientapi"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -25,27 +23,27 @@ const (
 
 type queueEventMessage struct {
 	runID string
-	event agentruntime.Event
+	event clientapi.Event
 	ok    bool
 }
 
 // Model 是只处理终端输入、展示状态和运行语义事件的 Bubble Tea 状态机。
 type Model struct {
-	tasks             task.Store
-	notifications     conversation.NotificationReader
+	tasks             clientapi.TaskLister
+	notifications     clientapi.NotificationReader
 	taskSequences     map[string]int64
 	seenNotifications map[string]bool
 	notificationAfter int64
-	queue             agentruntime.QueueManager
+	queue             clientapi.QueueManager
 	username          string
 	sessionID         string
 	queueMode         bool
-	queueItems        []conversation.RunRecord
+	queueItems        []clientapi.RunRecord
 	queueFocus        bool
 	selected          int
 	queueOffset       int
 	activeRunID       string
-	queueSubs         map[string]agentruntime.Subscription
+	queueSubs         map[string]clientapi.Subscription
 	queueWaiting      map[string]bool
 	partials          map[string]string
 	reasonings        map[string]string
@@ -61,7 +59,7 @@ type Model struct {
 }
 
 // New 构造 queue-backed TUI。
-func New(source agentruntime.QueueManager, identity ...string) *Model {
+func New(source clientapi.QueueManager, identity ...string) *Model {
 	input := textarea.New()
 	input.Placeholder = "Ask the agent..."
 	input.Prompt = "> "
@@ -78,7 +76,7 @@ func New(source agentruntime.QueueManager, identity ...string) *Model {
 		status:       "idle · Enter send · Ctrl+C quit",
 		width:        80,
 		height:       24,
-		queueSubs:    make(map[string]agentruntime.Subscription),
+		queueSubs:    make(map[string]clientapi.Subscription),
 		queueWaiting: make(map[string]bool),
 		partials:     make(map[string]string),
 		reasonings:   make(map[string]string),
@@ -101,7 +99,7 @@ func New(source agentruntime.QueueManager, identity ...string) *Model {
 }
 
 // NewQueue constructs the queue-backed TUI and restores active durable runs.
-func NewQueue(manager agentruntime.QueueManager, username, sessionID string) *Model {
+func NewQueue(manager clientapi.QueueManager, username, sessionID string) *Model {
 	model := New(manager)
 	model.username = username
 	model.sessionID = sessionID
@@ -195,7 +193,7 @@ func (model *Model) handleControlC() (tea.Model, tea.Cmd) {
 		if id != "" {
 			foundRunning := false
 			for _, item := range model.queueItems {
-				if item.ID == id && item.Status == conversation.RunRunning {
+				if item.ID == id && item.Status == clientapi.RunRunning {
 					foundRunning = true
 					break
 				}
@@ -206,7 +204,7 @@ func (model *Model) handleControlC() (tea.Model, tea.Cmd) {
 		}
 		if id == "" {
 			for _, item := range model.queueItems {
-				if item.Status == conversation.RunRunning {
+				if item.Status == clientapi.RunRunning {
 					id = item.ID
 					break
 				}
@@ -251,7 +249,7 @@ func (model *Model) submitQueue(content string) tea.Cmd {
 		model.refreshViewport()
 		return nil
 	}
-	if record.Status == conversation.RunRunning {
+	if record.Status == clientapi.RunRunning {
 		model.activeRunID = record.ID
 	}
 	model.state = stateRunning
@@ -312,19 +310,19 @@ func (model *Model) applyQueueEvent(message queueEventMessage) tea.Cmd {
 		return model.waitForQueueEvents()
 	}
 	event := message.event
-	if event.Kind == agentruntime.EventRunning && model.activeRunID == "" {
+	if event.Kind == clientapi.EventRunning && model.activeRunID == "" {
 		model.activeRunID = message.runID
 	}
 	switch event.Kind {
-	case agentruntime.EventReasoningDelta:
+	case clientapi.EventReasoningDelta:
 		model.reasonings[message.runID] += event.Text
-	case agentruntime.EventTextDelta:
+	case clientapi.EventTextDelta:
 		model.partials[message.runID] += event.Text
-	case agentruntime.EventToolStarted:
+	case clientapi.EventToolStarted:
 		model.lines = append(model.lines, formatToolStarted(event))
-	case agentruntime.EventToolFinished:
+	case clientapi.EventToolFinished:
 		model.lines = append(model.lines, formatToolFinished(event))
-	case agentruntime.EventCompleted:
+	case clientapi.EventCompleted:
 		text := event.Text
 		if text == "" {
 			text = model.partials[message.runID]
@@ -333,7 +331,7 @@ func (model *Model) applyQueueEvent(message queueEventMessage) tea.Cmd {
 		if text != "" {
 			model.lines = append(model.lines, "assistant: "+text)
 		}
-	case agentruntime.EventCanceled:
+	case clientapi.EventCanceled:
 		model.commitQueueReasoning(message.runID)
 		text := model.partials[message.runID]
 		if text == "" {
@@ -344,7 +342,7 @@ func (model *Model) applyQueueEvent(message queueEventMessage) tea.Cmd {
 		} else {
 			model.lines = append(model.lines, "assistant (canceled)")
 		}
-	case agentruntime.EventFailed:
+	case clientapi.EventFailed:
 		model.commitQueueReasoning(message.runID)
 		text := model.partials[message.runID]
 		if text == "" {
@@ -372,7 +370,7 @@ func (model *Model) applyQueueEvent(message queueEventMessage) tea.Cmd {
 		if model.activeRunID == message.runID {
 			model.activeRunID = ""
 			for _, item := range model.queueItems {
-				if item.Status == conversation.RunRunning {
+				if item.Status == clientapi.RunRunning {
 					model.activeRunID = item.ID
 					break
 				}
@@ -382,7 +380,7 @@ func (model *Model) applyQueueEvent(message queueEventMessage) tea.Cmd {
 	model.refreshQueue()
 	if model.queueMode && model.activeRunID == "" {
 		for _, item := range model.queueItems {
-			if item.Status == conversation.RunRunning {
+			if item.Status == clientapi.RunRunning {
 				model.activeRunID = item.ID
 				break
 			}
@@ -420,7 +418,7 @@ func (model *Model) refreshQueue() {
 	model.queueItems = items
 	activeStillRunning := false
 	for _, item := range items {
-		if item.ID == model.activeRunID && item.Status == conversation.RunRunning {
+		if item.ID == model.activeRunID && item.Status == clientapi.RunRunning {
 			activeStillRunning = true
 			break
 		}
@@ -430,7 +428,7 @@ func (model *Model) refreshQueue() {
 	}
 	if model.activeRunID == "" {
 		for _, item := range items {
-			if item.Status == conversation.RunRunning {
+			if item.Status == clientapi.RunRunning {
 				model.activeRunID = item.ID
 				break
 			}
@@ -503,7 +501,7 @@ func (model *Model) ensureQueueSelectionVisible() {
 }
 
 func (model *Model) cancelSelected() tea.Cmd {
-	if len(model.queueItems) == 0 || model.selected < 0 || model.selected >= len(model.queueItems) || model.queueItems[model.selected].Status != conversation.RunQueued {
+	if len(model.queueItems) == 0 || model.selected < 0 || model.selected >= len(model.queueItems) || model.queueItems[model.selected].Status != clientapi.RunQueued {
 		return nil
 	}
 	id := model.queueItems[model.selected].ID
@@ -522,10 +520,10 @@ func (model *Model) focusStatus() string {
 	}
 	running, queued := 0, 0
 	for _, item := range model.queueItems {
-		if item.Status == conversation.RunRunning {
+		if item.Status == clientapi.RunRunning {
 			running++
 		}
-		if item.Status == conversation.RunQueued {
+		if item.Status == clientapi.RunQueued {
 			queued++
 		}
 	}
@@ -537,7 +535,7 @@ func (model *Model) focusStatus() string {
 }
 
 // formatToolStarted 渲染工具调用开始时的全部细节。
-func formatToolStarted(event agentruntime.Event) string {
+func formatToolStarted(event clientapi.Event) string {
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "tool started: %s", event.Tool)
 	if event.CallID != "" {
@@ -550,7 +548,7 @@ func formatToolStarted(event agentruntime.Event) string {
 }
 
 // formatToolFinished 渲染工具调用结束时的全部细节。
-func formatToolFinished(event agentruntime.Event) string {
+func formatToolFinished(event clientapi.Event) string {
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "tool completed: %s", event.Tool)
 	if event.CallID != "" {

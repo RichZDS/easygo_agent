@@ -2,17 +2,96 @@ package tui
 
 import (
 	"context"
-	"easygo-agent/internal/agent/deepagent"
-	agentruntime "easygo-agent/internal/agent/runtime"
-	"easygo-agent/internal/config"
-	"easygo-agent/internal/conversation"
-	"easygo-agent/internal/testutil"
+	"easygo-agent/internal/clientapi"
+	"errors"
+	"fmt"
 	"github.com/charmbracelet/bubbletea"
-	"github.com/cloudwego/eino/schema"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+// fakeQueue is an in-memory clientapi.QueueManager. Tests publish run events;
+// a terminal event records the final status and closes the run's stream.
+type fakeQueue struct {
+	mu     sync.Mutex
+	runs   []clientapi.RunRecord
+	events map[string]chan clientapi.Event
+}
+
+func newFakeQueue() *fakeQueue { return &fakeQueue{events: map[string]chan clientapi.Event{}} }
+
+func (q *fakeQueue) Submit(_ context.Context, _, session, input, _ string) (clientapi.RunRecord, clientapi.RunHandle, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	run := clientapi.RunRecord{ID: fmt.Sprintf("run-%d", len(q.runs)+1), SessionID: session, Input: input, Status: clientapi.RunRunning}
+	q.runs = append(q.runs, run)
+	q.events[run.ID] = make(chan clientapi.Event, 16)
+	q.events[run.ID] <- clientapi.Event{Kind: clientapi.EventRunning, RunID: run.ID, Status: clientapi.RunRunning}
+	return run, nil, nil
+}
+
+func (q *fakeQueue) Get(_ context.Context, _, _, id string) (clientapi.RunRecord, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, run := range q.runs {
+		if run.ID == id {
+			return run, nil
+		}
+	}
+	return clientapi.RunRecord{}, errors.New("run not found")
+}
+
+func (q *fakeQueue) List(context.Context, string, string, int) ([]clientapi.RunRecord, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	active := []clientapi.RunRecord{}
+	for _, run := range q.runs {
+		if run.Status == clientapi.RunQueued || run.Status == clientapi.RunRunning {
+			active = append(active, run)
+		}
+	}
+	return active, nil
+}
+
+func (q *fakeQueue) Cancel(_ context.Context, _, _, id string) (clientapi.RunRecord, error) {
+	return q.publish(id, clientapi.Event{Kind: clientapi.EventCanceled, Status: clientapi.RunCanceled})
+}
+
+func (q *fakeQueue) publish(id string, event clientapi.Event) (clientapi.RunRecord, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	i := slices.IndexFunc(q.runs, func(run clientapi.RunRecord) bool { return run.ID == id })
+	if i < 0 || !(q.runs[i].Status == clientapi.RunQueued || q.runs[i].Status == clientapi.RunRunning) {
+		return clientapi.RunRecord{}, errors.New("run is not active")
+	}
+	event.RunID = id
+	q.events[id] <- event
+	if event.IsTerminal() {
+		q.runs[i].Status, q.runs[i].ResultText = event.Status, event.Text
+		close(q.events[id])
+	}
+	return q.runs[i], nil
+}
+
+func (q *fakeQueue) Subscribe(_ context.Context, _, _, id string) (clientapi.Subscription, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	events, ok := q.events[id]
+	if !ok {
+		return nil, errors.New("run not found")
+	}
+	return fakeSubscription(events), nil
+}
+
+func (q *fakeQueue) Close() error { return nil }
+
+type fakeSubscription chan clientapi.Event
+
+func (s fakeSubscription) Events() <-chan clientapi.Event { return s }
+func (s fakeSubscription) Close()                         {}
 
 func pumpTUI(t *testing.T, m *Model, cmd tea.Cmd, timeout time.Duration, pred func(*Model) bool) {
 	t.Helper()
@@ -37,27 +116,17 @@ func pumpTUI(t *testing.T, m *Model, cmd tea.Cmd, timeout time.Duration, pred fu
 }
 
 func TestQueueTUISubmitsAndObservesCompleted(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	store := conversation.NewMemory()
-	session, err := store.Create(ctx, "alice")
-	if err != nil {
-		t.Fatal(err)
-	}
-	model := &testutil.Model{GenerateFunc: func(context.Context, []*schema.AgenticMessage) (*schema.AgenticMessage, error) {
-		return testutil.Text("queued-hello"), nil
-	}}
-	agent, err := deepagent.New(ctx, deepagent.Config{ChatModel: model, Agent: config.AgentConfig{MaxSteps: 3, ContextTokens: 24000}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	manager := agentruntime.NewQueueManager(ctx, store, agent, agentruntime.QueueConfig{MaxWorkers: 1, PollInterval: time.Millisecond, LeaseTTL: time.Second})
-	defer manager.Close()
-	m := NewQueue(manager, "alice", session.ID)
+	queue := newFakeQueue()
+	m := NewQueue(queue, "alice", "session-1")
 	m.input.SetValue("hi")
 	cmd := m.submit()
 	if cmd == nil {
 		t.Fatal("queue submit did not start")
+	}
+	for _, event := range []clientapi.Event{{Kind: clientapi.EventTextDelta, Text: "queued-"}, {Kind: clientapi.EventCompleted, Status: clientapi.RunCompleted, Text: "queued-hello"}} {
+		if _, err := queue.publish("run-1", event); err != nil {
+			t.Fatal(err)
+		}
 	}
 	pumpTUI(t, m, cmd, 5*time.Second, func(m *Model) bool {
 		return strings.Contains(m.transcript(), "queued-hello")
@@ -69,47 +138,22 @@ func TestQueueTUISubmitsAndObservesCompleted(t *testing.T) {
 
 func TestQueueCancellationWithoutOutputIsVisible(t *testing.T) {
 	m := New(nil)
-	m.applyQueueEvent(queueEventMessage{runID: "canceled-before-output", ok: true, event: agentruntime.Event{Kind: agentruntime.EventCanceled}})
+	m.applyQueueEvent(queueEventMessage{runID: "canceled-before-output", ok: true, event: clientapi.Event{Kind: clientapi.EventCanceled}})
 	if !strings.Contains(m.transcript(), "canceled") || m.state != stateIdle {
 		t.Fatalf("cancellation was invisible: %q", m.transcript())
 	}
 }
 
 func TestQueueTUICancelStopsRunning(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	store := conversation.NewMemory()
-	session, err := store.Create(ctx, "alice")
-	if err != nil {
-		t.Fatal(err)
-	}
-	started := make(chan struct{})
-	model := &testutil.Model{StreamFunc: func(ctx context.Context, _ []*schema.AgenticMessage) (*schema.StreamReader[*schema.AgenticMessage], error) {
-		reader, writer := schema.Pipe[*schema.AgenticMessage](1)
-		go func() {
-			defer writer.Close()
-			writer.Send(testutil.Text("partial"), nil)
-			close(started)
-			<-ctx.Done()
-		}()
-		return reader, nil
-	}}
-	agent, err := deepagent.New(ctx, deepagent.Config{ChatModel: model, Agent: config.AgentConfig{MaxSteps: 3, ContextTokens: 24000}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	manager := agentruntime.NewQueueManager(ctx, store, agent, agentruntime.QueueConfig{MaxWorkers: 1, PollInterval: time.Millisecond, LeaseTTL: time.Second})
-	defer manager.Close()
-	m := NewQueue(manager, "alice", session.ID)
+	queue := newFakeQueue()
+	m := NewQueue(queue, "alice", "session-1")
 	m.input.SetValue("hi")
 	cmd := m.submit()
 	if cmd == nil {
 		t.Fatal("queue submit did not start")
 	}
-	select {
-	case <-started:
-	case <-ctx.Done():
-		t.Fatal("queued tui run did not start")
+	if _, err := queue.publish("run-1", clientapi.Event{Kind: clientapi.EventTextDelta, Text: "partial"}); err != nil {
+		t.Fatal(err)
 	}
 	runID := m.activeRunID
 	if runID == "" && len(m.queueItems) > 0 {
@@ -118,7 +162,7 @@ func TestQueueTUICancelStopsRunning(t *testing.T) {
 	if runID == "" {
 		t.Fatal("tui did not record the running id")
 	}
-	if _, err := manager.Cancel(ctx, "alice", session.ID, runID); err != nil {
+	if _, err := queue.Cancel(context.Background(), "alice", "session-1", runID); err != nil {
 		t.Fatal(err)
 	}
 	pumpTUI(t, m, cmd, 5*time.Second, func(m *Model) bool {
@@ -131,7 +175,7 @@ func TestQueueTUICancelStopsRunning(t *testing.T) {
 
 // TestFormatToolStartedIncludesDetails 验证 TUI 展示 tool 调用的 name、call_id 与 arguments。
 func TestFormatToolStartedIncludesDetails(t *testing.T) {
-	got := formatToolStarted(agentruntime.Event{
+	got := formatToolStarted(clientapi.Event{
 		Tool:      "calculator",
 		CallID:    "c1",
 		Arguments: `{"operation":"multiply"}`,
@@ -145,7 +189,7 @@ func TestFormatToolStartedIncludesDetails(t *testing.T) {
 
 // TestFormatToolFinishedIncludesDetails 验证 TUI 展示 tool 结果的 name、call_id 与 result。
 func TestFormatToolFinishedIncludesDetails(t *testing.T) {
-	got := formatToolFinished(agentruntime.Event{
+	got := formatToolFinished(clientapi.Event{
 		Tool:   "calculator",
 		CallID: "c1",
 		Result: `{"result":42}`,
@@ -170,9 +214,9 @@ func TestTranscriptIncludesStreamingReasoning(t *testing.T) {
 func TestQueueViewShowsBannerAndStatuses(t *testing.T) {
 	model := New(nil)
 	model.queueMode = true
-	model.queueItems = []conversation.RunRecord{
-		{ID: "running-id", Input: "计算 12 * 34", Status: conversation.RunRunning},
-		{ID: "queued-id", Input: "查询上海天气", Status: conversation.RunQueued, Position: 1},
+	model.queueItems = []clientapi.RunRecord{
+		{ID: "running-id", Input: "计算 12 * 34", Status: clientapi.RunRunning},
+		{ID: "queued-id", Input: "查询上海天气", Status: clientapi.RunQueued, Position: 1},
 	}
 	model.refreshViewport()
 	view := model.View()
@@ -196,5 +240,19 @@ func TestQueueTabSwitchesInputFocus(t *testing.T) {
 	model.Update(tea.KeyMsg{Type: tea.KeyTab})
 	if !model.input.Focused() || model.queueFocus {
 		t.Fatal("second tab did not move focus to input")
+	}
+}
+
+func TestRestoreAppendsRenderedHistory(t *testing.T) {
+	model := New(nil)
+	model.lines = []string{"pre-existing line"}
+	model.Restore("alice", "sess-1", 9, []string{"you: hello", "assistant: 42", "run: failed"})
+	want := []string{"pre-existing line", "user: alice · session: sess-1", "you: hello", "assistant: 42", "run: failed"}
+	if !slices.Equal(model.lines, want) || model.notificationAfter != 9 || model.username != "alice" || model.sessionID != "sess-1" {
+		t.Fatalf("restore: %q after=%d user=%q session=%q", model.lines, model.notificationAfter, model.username, model.sessionID)
+	}
+	model.Restore("alice", "sess-1", 3, nil)
+	if model.notificationAfter != 9 {
+		t.Fatalf("restore moved the notification cursor back to %d", model.notificationAfter)
 	}
 }

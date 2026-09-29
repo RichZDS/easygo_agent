@@ -3,7 +3,7 @@ package agentruntime
 import (
 	"errors"
 
-	"easygo-agent/internal/conversation"
+	"easygo-agent/internal/clientapi"
 )
 
 var (
@@ -14,58 +14,30 @@ var (
 	// ErrAgentUnavailable 表示会话没有可调用的 Agent。
 	ErrAgentUnavailable = errors.New("agent is unavailable")
 	ErrStoreUnavailable = errors.New("conversation store is unavailable")
-	ErrQueueClosed      = errors.New("queue manager is closed")
+	ErrQueueClosed      = clientapi.ErrQueueClosed
 	// ErrRunFinished 表示调用方在终态事件之后再次读取运行。
 	ErrRunFinished = errors.New("agent run already finished")
 )
 
 // EventKind 标识 TUI 等调用方需要处理的一种运行事件。
-type EventKind string
+type EventKind = clientapi.EventKind
 
 const (
-	// EventTextDelta 表示助手文本增量。
-	EventTextDelta EventKind = "text_delta"
-	// EventReasoningDelta 表示 reasoning 文本增量。
-	EventReasoningDelta EventKind = "reasoning_delta"
-	// EventToolStarted 表示工具调用开始，携带完整 name、call_id 与 arguments。
-	EventToolStarted EventKind = "tool_started"
-	// EventToolFinished 表示工具调用结束，携带完整 name、call_id 与 result。
-	EventToolFinished EventKind = "tool_finished"
-	// EventCompleted 表示运行成功结束。
-	EventCompleted EventKind = "completed"
-	// EventCanceled 表示运行被取消。
-	EventCanceled EventKind = "canceled"
-	// EventFailed 表示运行因错误失败。
-	EventFailed EventKind = "failed"
-	// EventQueued 表示请求已持久化并等待 worker。
-	EventQueued EventKind = "queued"
-	// EventRunning 表示请求已被 worker claim。
-	EventRunning     EventKind = "running"
-	EventCompressing EventKind = "compressing"
-	EventCompressed  EventKind = "compressed"
+	EventTextDelta      = clientapi.EventTextDelta
+	EventReasoningDelta = clientapi.EventReasoningDelta
+	EventToolStarted    = clientapi.EventToolStarted
+	EventToolFinished   = clientapi.EventToolFinished
+	EventCompleted      = clientapi.EventCompleted
+	EventCanceled       = clientapi.EventCanceled
+	EventFailed         = clientapi.EventFailed
+	EventQueued         = clientapi.EventQueued
+	EventRunning        = clientapi.EventRunning
+	EventCompressing    = clientapi.EventCompressing
+	EventCompressed     = clientapi.EventCompressed
 )
 
 // Event 是 Agent 运行投影出的语义事件。终态事件的 Text 是本次运行的完整助手文本。
-type Event struct {
-	// Queue metadata is populated for runs executed by QueueManager.
-	RunID    string                 `json:"run_id,omitempty"`
-	Status   conversation.RunStatus `json:"status,omitempty"`
-	Position int                    `json:"position,omitempty"`
-	// Kind 标识事件类型。
-	Kind EventKind
-	// Text 是文本或 reasoning 增量；终态事件则为本次运行的完整助手文本。
-	Text string
-	// Tool 是工具名称，仅工具生命周期事件填充。
-	Tool string
-	// CallID 是工具调用 ID。
-	CallID string
-	// Arguments 是工具调用的完整参数。
-	Arguments string
-	// Result 是工具返回的完整结果。
-	Result string
-	// Err 仅 Failed 终态携带错误。
-	Err error
-}
+type Event = clientapi.Event
 
 // Run 是一条正在进行的 Agent 运行。
 // Next 串行交付事件，最后交付一次终态；Cancel 和 Close 可与 Next 并发调用。

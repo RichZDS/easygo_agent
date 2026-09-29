@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"easygo-agent/internal/conversation"
+	"easygo-agent/internal/clientapi"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -42,10 +42,10 @@ func (model *Model) queueView() string {
 	model.ensureQueueSelectionVisible()
 	running, queued := 0, 0
 	for _, item := range model.queueItems {
-		if item.Status == conversation.RunRunning {
+		if item.Status == clientapi.RunRunning {
 			running++
 		}
-		if item.Status == conversation.RunQueued {
+		if item.Status == clientapi.RunQueued {
 			queued++
 		}
 	}

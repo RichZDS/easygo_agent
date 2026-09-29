@@ -2,8 +2,7 @@ package remotetui
 
 import (
 	"context"
-	agentruntime "easygo-agent/internal/agent/runtime"
-	"easygo-agent/internal/conversation"
+	"easygo-agent/internal/clientapi"
 	"errors"
 	"github.com/google/uuid"
 	"sort"
@@ -26,10 +25,10 @@ type WireRun struct {
 	} `json:"error"`
 }
 
-func (w WireRun) record() conversation.RunRecord {
-	r := conversation.RunRecord{ID: w.ID, SessionID: w.SessionID, Status: conversation.RunStatus(w.Status), CreatedAt: w.CreatedAt, Input: w.Input}
+func (w WireRun) record() clientapi.RunRecord {
+	r := clientapi.RunRecord{ID: w.ID, SessionID: w.SessionID, Status: clientapi.RunStatus(w.Status), CreatedAt: w.CreatedAt, Input: w.Input}
 	if w.Status == "interrupted" {
-		r.Status = conversation.RunFailed
+		r.Status = clientapi.RunFailed
 		r.Error = "remote run interrupted"
 	}
 	if w.Result != nil {
@@ -52,28 +51,28 @@ type Queue struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	mu      sync.Mutex
-	known   map[string]conversation.RunRecord
+	known   map[string]clientapi.RunRecord
 	closed  bool
 	wg      sync.WaitGroup
 }
 
 func NewQueue(c *Client, runtime string) *Queue {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Queue{client: c, runtime: runtime, poll: 500 * time.Millisecond, ctx: ctx, cancel: cancel, known: map[string]conversation.RunRecord{}}
+	return &Queue{client: c, runtime: runtime, poll: 500 * time.Millisecond, ctx: ctx, cancel: cancel, known: map[string]clientapi.RunRecord{}}
 }
-func (q *Queue) remember(w WireRun) conversation.RunRecord {
+func (q *Queue) remember(w WireRun) clientapi.RunRecord {
 	r := w.record()
 	q.mu.Lock()
 	q.known[r.ID] = r
 	q.mu.Unlock()
 	return r
 }
-func (q *Queue) Submit(ctx context.Context, user, session, input, key string) (conversation.RunRecord, agentruntime.RunHandle, error) {
+func (q *Queue) Submit(ctx context.Context, user, session, input, key string) (clientapi.RunRecord, clientapi.RunHandle, error) {
 	q.mu.Lock()
 	closed := q.closed
 	q.mu.Unlock()
 	if closed {
-		return conversation.RunRecord{}, nil, agentruntime.ErrQueueClosed
+		return clientapi.RunRecord{}, nil, clientapi.ErrQueueClosed
 	}
 	if key == "" {
 		key = uuid.NewString()
@@ -85,27 +84,27 @@ func (q *Queue) Submit(ctx context.Context, user, session, input, key string) (c
 	var w WireRun
 	err := q.client.RPC(ctx, "agent.run.start", p, &w)
 	if err != nil {
-		return conversation.RunRecord{}, nil, err
+		return clientapi.RunRecord{}, nil, err
 	}
 	if w.ID == "" || w.SessionID != session {
-		return conversation.RunRecord{}, nil, errors.New("invalid remote run receipt")
+		return clientapi.RunRecord{}, nil, errors.New("invalid remote run receipt")
 	}
 	r := q.remember(w)
 	r.Input = input
 	return r, &handle{q: q, user: user, session: session, record: r}, nil
 }
-func (q *Queue) Get(ctx context.Context, _ string, session, id string) (conversation.RunRecord, error) {
+func (q *Queue) Get(ctx context.Context, _ string, session, id string) (clientapi.RunRecord, error) {
 	var w WireRun
 	err := q.client.RPC(ctx, "agent.run.get", map[string]any{"run_id": id}, &w)
 	if err != nil {
-		return conversation.RunRecord{}, err
+		return clientapi.RunRecord{}, err
 	}
 	if w.ID != id || w.SessionID != session {
-		return conversation.RunRecord{}, errors.New("remote run identity mismatch")
+		return clientapi.RunRecord{}, errors.New("remote run identity mismatch")
 	}
 	return q.remember(w), nil
 }
-func (q *Queue) List(ctx context.Context, _ string, session string, limit int) ([]conversation.RunRecord, error) {
+func (q *Queue) List(ctx context.Context, _ string, session string, limit int) ([]clientapi.RunRecord, error) {
 	h, err := q.client.History(ctx, session, 0)
 	if err != nil {
 		return nil, err
@@ -119,7 +118,7 @@ func (q *Queue) List(ctx context.Context, _ string, session string, limit int) (
 	q.mu.Lock()
 	ids := []string{}
 	for id, r := range q.known {
-		if r.SessionID == session && (r.Status == conversation.RunQueued || r.Status == conversation.RunRunning) {
+		if r.SessionID == session && (r.Status == clientapi.RunQueued || r.Status == clientapi.RunRunning) {
 			ids = append(ids, id)
 		}
 	}
@@ -128,13 +127,13 @@ func (q *Queue) List(ctx context.Context, _ string, session string, limit int) (
 	if limit < 1 || limit > 100 {
 		limit = 100
 	}
-	runs := []conversation.RunRecord{}
+	runs := []clientapi.RunRecord{}
 	for _, id := range ids {
 		r, e := q.Get(ctx, "", session, id)
 		if e != nil {
 			return nil, e
 		}
-		if r.Status == conversation.RunQueued || r.Status == conversation.RunRunning {
+		if r.Status == clientapi.RunQueued || r.Status == clientapi.RunRunning {
 			runs = append(runs, r)
 		}
 		if len(runs) >= limit {
@@ -144,18 +143,18 @@ func (q *Queue) List(ctx context.Context, _ string, session string, limit int) (
 	sort.SliceStable(runs, func(i, j int) bool { return runs[i].CreatedAt.Before(runs[j].CreatedAt) })
 	return runs, nil
 }
-func (q *Queue) Cancel(ctx context.Context, _ string, session, id string) (conversation.RunRecord, error) {
+func (q *Queue) Cancel(ctx context.Context, _ string, session, id string) (clientapi.RunRecord, error) {
 	// Validate the session before mutation, though server authentication is the ownership authority.
 	if _, err := q.Get(ctx, "", session, id); err != nil {
-		return conversation.RunRecord{}, err
+		return clientapi.RunRecord{}, err
 	}
 	var w WireRun
 	err := q.client.RPC(ctx, "agent.run.cancel", map[string]any{"run_id": id}, &w)
 	if err != nil {
-		return conversation.RunRecord{}, err
+		return clientapi.RunRecord{}, err
 	}
 	if w.ID != id || w.SessionID != session {
-		return conversation.RunRecord{}, errors.New("invalid cancellation receipt")
+		return clientapi.RunRecord{}, errors.New("invalid cancellation receipt")
 	}
 	return q.remember(w), nil
 }
@@ -171,40 +170,40 @@ func (q *Queue) Close() error {
 type handle struct {
 	q             *Queue
 	user, session string
-	record        conversation.RunRecord
+	record        clientapi.RunRecord
 }
 
-func (h *handle) Run() conversation.RunRecord { return h.record }
-func (h *handle) Cancel()                     { _, _ = h.q.Cancel(context.Background(), h.user, h.session, h.record.ID) }
-func (h *handle) Close()                      {}
+func (h *handle) Run() clientapi.RunRecord { return h.record }
+func (h *handle) Cancel()                  { _, _ = h.q.Cancel(context.Background(), h.user, h.session, h.record.ID) }
+func (h *handle) Close()                   {}
 
 type subscription struct {
-	events chan agentruntime.Event
+	events chan clientapi.Event
 	cancel context.CancelFunc
 }
 
-func (s *subscription) Events() <-chan agentruntime.Event { return s.events }
-func (s *subscription) Close()                            { s.cancel() }
-func (q *Queue) Subscribe(ctx context.Context, _ string, session, id string) (agentruntime.Subscription, error) {
+func (s *subscription) Events() <-chan clientapi.Event { return s.events }
+func (s *subscription) Close()                         { s.cancel() }
+func (q *Queue) Subscribe(ctx context.Context, _ string, session, id string) (clientapi.Subscription, error) {
 	if _, err := q.Get(ctx, "", session, id); err != nil {
 		return nil, err
 	}
 	q.mu.Lock()
 	if q.closed {
 		q.mu.Unlock()
-		return nil, agentruntime.ErrQueueClosed
+		return nil, clientapi.ErrQueueClosed
 	}
 	q.wg.Add(1)
 	q.mu.Unlock()
 	child, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(q.ctx, cancel)
-	s := &subscription{events: make(chan agentruntime.Event, 32), cancel: cancel}
+	s := &subscription{events: make(chan clientapi.Event, 32), cancel: cancel}
 	go func() {
 		defer q.wg.Done()
 		defer stop()
 		defer cancel()
 		defer close(s.events)
-		send := func(e agentruntime.Event) bool {
+		send := func(e clientapi.Event) bool {
 			select {
 			case s.events <- e:
 				return true
@@ -213,7 +212,7 @@ func (q *Queue) Subscribe(ctx context.Context, _ string, session, id string) (ag
 			}
 		}
 		var after int64
-		lastStatus := conversation.RunStatus("")
+		lastStatus := clientapi.RunStatus("")
 		failures := 0
 		for {
 			if child.Err() != nil {
@@ -240,19 +239,19 @@ func (q *Queue) Subscribe(ctx context.Context, _ string, session, id string) (ag
 					}
 					after = e.Seq
 					if e.Kind == "delta" {
-						kind := agentruntime.EventTextDelta
+						kind := clientapi.EventTextDelta
 						if e.Data.Event.Type == "reasoning_delta" {
-							kind = agentruntime.EventReasoningDelta
+							kind = clientapi.EventReasoningDelta
 						} else if e.Data.Event.Type != "text_delta" {
 							continue
 						}
-						if !send(agentruntime.Event{Kind: kind, RunID: id, Text: e.Data.Event.Delta}) {
+						if !send(clientapi.Event{Kind: kind, RunID: id, Text: e.Data.Event.Delta}) {
 							return
 						}
 					}
 				}
 			}
-			var r conversation.RunRecord
+			var r clientapi.RunRecord
 			if err == nil {
 				r, err = q.Get(child, "", session, id)
 			}
@@ -260,18 +259,18 @@ func (q *Queue) Subscribe(ctx context.Context, _ string, session, id string) (ag
 				failures++
 				var status *HTTPError
 				if errors.As(err, &status) && (status.Status == 401 || status.Status == 403) || failures >= 20 {
-					send(agentruntime.Event{Kind: agentruntime.EventFailed, RunID: id, Err: errors.New("remote connection lost; reconnect with the same session (run was not canceled)")})
+					send(clientapi.Event{Kind: clientapi.EventFailed, RunID: id, Err: errors.New("remote connection lost; reconnect with the same session (run was not canceled)")})
 					return
 				}
 			} else {
 				failures = 0
-				kind := agentruntime.EventKind(r.Status)
-				if r.Status != lastStatus || kind == agentruntime.EventCompleted || kind == agentruntime.EventCanceled || kind == agentruntime.EventFailed {
+				kind := clientapi.EventKind(r.Status)
+				if r.Status != lastStatus || kind == clientapi.EventCompleted || kind == clientapi.EventCanceled || kind == clientapi.EventFailed {
 					// Drain all already-recorded delta pages before emitting terminal state.
 					if page.NextAfter != nil {
 						continue
 					}
-					e := agentruntime.Event{Kind: kind, RunID: id, Status: r.Status, Text: r.ResultText}
+					e := clientapi.Event{Kind: kind, RunID: id, Status: r.Status, Text: r.ResultText}
 					if r.Error != "" {
 						e.Err = errors.New(r.Error)
 					}
@@ -300,4 +299,4 @@ func (q *Queue) Subscribe(ctx context.Context, _ string, session, id string) (ag
 	return s, nil
 }
 
-var _ agentruntime.QueueManager = (*Queue)(nil)
+var _ clientapi.QueueManager = (*Queue)(nil)

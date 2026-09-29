@@ -34,7 +34,7 @@ Loop 不加载网关或工坊的运行实现，不共享它们的数据库，也
 - **Web 与账户**：注册/登录、会话与历史、工坊任务与产物下载、记忆与技能、钱包与用量；管理员发积分、改费率、处理待核对用量。见 [platform-web.md](doc/platform-web.md)。
 - **按 token 计费**：网关在调用供应商前按保守估计预留积分，结算走持久 outbox，恰好扣一次；用量未知时冻结等待管理员对账，不会静默免单。默认输入 + 输出每 1000 token = 1 积分。
 - **任务容器**：工坊每次执行都起一个独立容器，无网络、只读根文件系统、非 root、资源受限，只挂本任务工作区和本次执行的模型转发 socket。
-- **记忆与旧终端**：独立 Knowledge 库（八类记忆、技能按需加载），旧 Bubble Tea 界面通过 `cmd/easygo-remote` 登录平台使用。见 [platform-knowledge.md](doc/platform-knowledge.md)。
+- **记忆与旧终端**：独立 Knowledge 库（八类记忆、技能按需加载），旧 Bubble Tea 界面通过 `cmd/easygo-remote` 登录平台使用。见 [platform-knowledge.md](doc/platform-knowledge.md)。Web 是唯一的主控制台，这个 CLI 只给个人用，定位见 [CLI 说明](doc/cli.md)。
 
 部署、HTTPS、对账、故障恢复、备份与隔离限制见 [托管平台运维](doc/platform-operations.md)，验收记录见 [platform-verification.md](doc/platform-verification.md)。
 

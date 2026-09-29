@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"easygo-agent/internal/agent/telemetry"
+	"easygo-agent/internal/clientapi"
 	"easygo-agent/internal/conversation"
 
 	"github.com/cloudwego/eino/adk"
@@ -56,29 +57,15 @@ func DefaultQueueConfig() QueueConfig {
 }
 
 // QueueManager is the shared seam used by CLI, TUI and HTTP modes.
-type QueueManager interface {
-	Submit(context.Context, string, string, string, string) (conversation.RunRecord, RunHandle, error)
-	Get(context.Context, string, string, string) (conversation.RunRecord, error)
-	List(context.Context, string, string, int) ([]conversation.RunRecord, error)
-	Cancel(context.Context, string, string, string) (conversation.RunRecord, error)
-	Subscribe(context.Context, string, string, string) (Subscription, error)
-	Close() error
-}
+type QueueManager = clientapi.QueueManager
 
 // RunHandle identifies an accepted request. Closing a handle only releases
 // the caller's handle; it never cancels the durable run.
-type RunHandle interface {
-	Run() conversation.RunRecord
-	Cancel()
-	Close()
-}
+type RunHandle = clientapi.RunHandle
 
 // Subscription observes one run. Publication is decoupled from the worker so
 // a slow observer never blocks execution or causes an event to be dropped.
-type Subscription interface {
-	Events() <-chan Event
-	Close()
-}
+type Subscription = clientapi.Subscription
 
 type queueManager struct {
 	store        conversation.QueueStore

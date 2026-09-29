@@ -12,8 +12,24 @@ import (
 	"github.com/charmbracelet/x/term"
 	"io"
 	"os"
+	"slices"
 	"strings"
 )
+
+// personalRPC lists the memory/skills methods that --rpc may call, as
+// documented in doc/platform-knowledge.md. The server binds every call to the
+// logged-in user's namespace.
+var personalRPC = []string{
+	"agent.memory.list", "agent.memory.upsert", "agent.memory.delete", "agent.memory.consolidate", "agent.memory.import",
+	"agent.skills.list", "agent.skills.get", "agent.skills.upsert", "agent.skills.delete", "agent.skills.import",
+}
+
+func checkRPC(method string) error {
+	if !slices.Contains(personalRPC, method) {
+		return fmt.Errorf("--rpc is limited to memory/skills methods: %s", strings.Join(personalRPC, " "))
+	}
+	return nil
+}
 
 func run() error {
 	address := flag.String("url", "http://127.0.0.1:8090", "platform public origin")
@@ -71,8 +87,8 @@ func run() error {
 		return print(out)
 	}
 	if *rpc != "" {
-		if !strings.HasPrefix(*rpc, "agent.memory.") && !strings.HasPrefix(*rpc, "agent.skills.") {
-			return fmt.Errorf("--rpc is limited to memory/skills")
+		if err := checkRPC(*rpc); err != nil {
+			return err
 		}
 		params := map[string]any{}
 		if term.IsTerminal(os.Stdin.Fd()) {

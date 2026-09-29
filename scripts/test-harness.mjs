@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Deterministic P1 channel proof: fixture model -> loop -> workshop -> Docker CLI
+// Deterministic P1 harness proof: fixture model -> loop -> workshop -> Docker CLI
 // -> crew RPC -> durable events -> loop tools. No provider credentials are read.
 import assert from 'node:assert/strict';
 import { spawn, execFile } from 'node:child_process';
@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 import { once } from 'node:events';
 import http from 'node:http';
 import net from 'node:net';
-import { mkdtemp, mkdir, readFile, writeFile, copyFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, copyFile, rm, readdir, lstat, readlink, chmod } from 'node:fs/promises';
 import { openSync, closeSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,11 +17,11 @@ import { createRPCClient } from './rpc-call.mjs';
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const exec = promisify(execFile);
 const args = process.argv.slice(2);
-if (![2,4].includes(args.length) || args[0] !== '--evidence' || (args.length === 4 && args[2] !== '--scenarios')) throw Error('Usage: node scripts/test-harness.mjs --evidence NEW_DIRECTORY [--scenarios S1,S2,S6,S7,S8]');
+if (![2,4].includes(args.length) || args[0] !== '--evidence' || (args.length === 4 && args[2] !== '--scenarios')) throw Error('Usage: node scripts/test-harness.mjs --evidence NEW_DIRECTORY [--scenarios S1,S2,...,S9]');
 const evidenceDir = resolve(args[1]);
-const channels = ['S1','S2','S6','S7','S8'];
-const selected = args[3]?.split(',') ?? channels;
-assert.ok(selected.length > 0 && new Set(selected).size === selected.length && selected.every(id => channels.includes(id)), 'Unknown or duplicate scenario');
+const scenarioIDs = ['S1','S2','S3','S4','S5','S6','S7','S8','S9'];
+const selected = args[3]?.split(',') ?? scenarioIDs;
+assert.ok(selected.length > 0 && new Set(selected).size === selected.length && selected.every(id => scenarioIDs.includes(id)), 'Unknown or duplicate scenario');
 const go = process.env.EASYGO_GO_BIN ?? 'go';
 const docker = process.env.EASYGO_DOCKER_TEST_BINARY;
 const endpoint = process.env.EASYGO_DOCKER_TEST_ENDPOINT;
@@ -35,7 +35,7 @@ const state = await mkdtemp('/tmp/egh-');
 const owner = `harness-${randomUUID()}`;
 const namespace = 'harness';
 const sandbox = { mode:'docker', docker_binary:docker, endpoint, image, owner, host_root:join(state,'workshop-data'), memory_bytes:64*1024*1024, nano_cpus:100_000_000, pids_limit:128, tmpfs_bytes:1024*1024, disk_quota_bytes:16*1024*1024, disk_quota_files:1000, disk_poll_ms:200 };
-const report = { scope:'P1 channels', scenario_ids:selected, deferred:[...channels.filter(id=>!selected.includes(id)),'S3','S4','S5','S9'], paid_models:false, state, owner, sandbox, scenarios:[], commands:[], model_requests:0, pass:false };
+const report = { scope:'P1 harness', scenario_ids:selected, deferred:scenarioIDs.filter(id=>!selected.includes(id)), paid_models:false, state, owner, sandbox, scenarios:[], commands:[], model_requests:0, pass:false };
 const children = [], clients = [];
 const stopSignal = new AbortController();
 let provider, agent, broker, current;
@@ -46,9 +46,9 @@ const taskTerminal = task => !['queued','running','cancelling'].includes(task.st
 const crew = (...args) => ({ op:'crew', args });
 const input = script => JSON.stringify({ mode:'crew', script });
 
-async function command(name, bin, argv, cwd=root) {
+async function command(name, bin, argv, cwd=root, extraEnv={}) {
   try {
-    const result = await exec(bin, argv, { cwd, maxBuffer:4*1024*1024 });
+    const result = await exec(bin, argv, { cwd, env:{...process.env,GOMAXPROCS:'2',...extraEnv}, maxBuffer:4*1024*1024 });
     await writeFile(join(evidenceDir, `${name}.log`), result.stdout + result.stderr);
     report.commands.push({ name, exit_code:0 });
     return result.stdout;
@@ -110,8 +110,8 @@ async function tools(calls) {
   return results.map(result=>JSON.parse(result.text));
 }
 const tool = (name,args) => ({name,arguments:args});
-async function submit(script) {
-  const [task] = await tools([tool('workshop_submit',{workflow:'channel',input:input(script)})]);
+async function submit(script, workflow='channel') {
+  const [task] = await tools([tool('workshop_submit',{workflow,input:input(script)})]);
   return task;
 }
 async function terminal(id) {
@@ -146,6 +146,70 @@ async function matchEvents(id,page) {
   return events;
 }
 
+async function acceptanceEvidence(task) {
+  const runID=task.runs.at(-1).id;
+  const [list]=await tools([tool('workshop_evidence',{task_id:task.id,run_id:runID})]);
+  assert.deepEqual(list,await rpc(broker,'workshop.evidence',{task_id:task.id,run_id:runID}));
+  assert.equal(list.run_id,runID);assert.equal(list.acceptance_state,task.runs.at(-1).acceptance_state);
+  const outputs={};
+  for(const item of list.evidence) {
+    let offset=0,text='';
+    for(let i=0;i<1000;i++) {
+      const [page]=await tools([tool('workshop_evidence',{task_id:task.id,run_id:runID,evidence_id:item.id,offset,limit:64})]);
+      assert.equal(page.offset,offset);assert.ok(Buffer.byteLength(page.text)<=64);
+      text+=page.text;assert.equal(page.next_offset,Buffer.byteLength(text));
+      if(page.eof){assert.equal(page.total_bytes,Buffer.byteLength(text));break;}
+      assert.ok(page.next_offset>offset);offset=page.next_offset;
+      assert.ok(i<999,'evidence pagination exceeded bound');
+    }
+    const direct=await rpc(broker,'workshop.evidence',{task_id:task.id,run_id:runID,evidence_id:item.id,limit:32768});
+    assert.equal(direct.eof,true);assert.equal(text,direct.text);
+    outputs[item.check]=text;
+  }
+  return {list,outputs};
+}
+
+// Independent Node implementation of the documented tree digest wire format.
+// No workshop implementation is invoked. Persist entries alongside the digest
+// so a reviewer can reproduce or challenge individual filesystem measurements.
+async function independentWorkspaceHash(directory) {
+  const entries=[];
+  async function walk(relative='') {
+    for(const name of await readdir(join(directory,relative))) {
+      if(!relative&&name==='.workshop-home')continue;
+      const path=relative?`${relative}/${name}`:name;
+      const absolute=join(directory,path),info=await lstat(absolute);
+      const entry={Path:path,Type:'',Size:info.size,SHA256:''};
+      if(info.isDirectory()){entry.Type='directory';await walk(path);}
+      else if(info.isFile()){entry.Type='file';const bytes=await readFile(absolute);assert.equal(bytes.length,info.size);entry.SHA256=createHash('sha256').update(bytes).digest('hex');}
+      else if(info.isSymbolicLink()){entry.Type='symlink';entry.SHA256=createHash('sha256').update(await readlink(absolute)).digest('hex');}
+      else throw Error(`Unsupported workspace entry: ${path}`);
+      entries.push(entry);
+    }
+  }
+  await walk();
+  entries.sort((a,b)=>Buffer.compare(Buffer.from(a.Path),Buffer.from(b.Path)));
+  const encoded=entries.map(entry=>JSON.stringify(entry).replace(/[<>&\u2028\u2029]/g,c=>`\\u${c.charCodeAt(0).toString(16).padStart(4,'0')}`)+'\n').join('');
+  return {entries,sha256:createHash('sha256').update(encoded).digest('hex')};
+}
+
+async function ownChecks() {
+  const result=await exec(docker,['-H',endpoint,'ps','-aq','--filter',`label=ai.easygo.workshop.owner=${owner}`,'--filter','name=easygo-check-']);
+  const ids=result.stdout.trim().split('\n').filter(Boolean);
+  if(!ids.length)return [];
+  const objects=JSON.parse((await exec(docker,['-H',endpoint,'inspect',...ids])).stdout);
+  return objects.map(item=>({id:item.Id,name:item.Name,state:item.State,command:[item.Path,...item.Args],labels:item.Config.Labels}));
+}
+
+async function unsealState(directory) {
+  // Only our temporary state is removed. Pack snapshots deliberately seal their
+  // directories; make these writable after every service/container has stopped.
+  await chmod(directory,0o700);
+  for(const entry of await readdir(directory,{withFileTypes:true})) {
+    if(entry.isDirectory())await unsealState(join(directory,entry.name));
+  }
+}
+
 async function S1() {
   const task=await submit([crew('report','S1 started'),crew('ask','S1 question'),crew('report','S1 continued'),crew('submit','--tests','pass','S1 ready')]);
   const end=await terminal(task.id);assert.equal(end.status,'succeeded');assert.equal(end.runs.at(-1).outcome,'submitted');
@@ -164,6 +228,54 @@ async function S2() {
   const [summary]=await tools([tool('workshop_get',{task_id:task.id})]);assert.equal(summary.runs.at(-1).outcome,'none');
   const page=await allMessages(task.id);await matchEvents(task.id,page);
   assert.equal(page.events.filter(e=>e.kind==='crew.message').length,0);
+}
+async function S3() {
+  const task=await submit([{op:'write',path:'artifact.txt',text:'bad'},crew('submit','--tests','pass','S3 claims green')],'artifact');
+  const end=await terminal(task.id);assert.equal(end.status,'succeeded');
+  assert.equal(end.runs.at(-1).outcome,'submitted');
+  assert.equal(end.runs.at(-1).acceptance_state,'failed');assert.equal(end.runs.at(-1).false_green,true);
+  const page=await allMessages(task.id);await matchEvents(task.id,page);
+  const claimed=page.events.find(e=>e.message?.kind==='submit');assert.equal(claimed.message.claims.tests,'pass');
+  assert.ok(page.events.some(e=>e.kind==='acceptance'&&e.acceptance.state==='failed'&&e.acceptance.false_green===true));
+  const {list,outputs}=await acceptanceEvidence(end);
+  assert.equal(list.false_green,true);assert.equal(list.evidence.length,1);assert.notEqual(list.evidence[0].exit_code,0);
+  assert.match(outputs.artifact,/file content mismatch/);
+}
+async function S4() {
+  const task=await submit([{op:'write',path:'artifact.txt',text:'good'},{op:'write',path:'nested/proof.txt',text:'独立工作区证据\n'},{op:'write',path:'.workshop-home/ignored-proof',text:'excluded'},crew('submit','--tests','pass','S4 ready')],'artifact');
+  const end=await terminal(task.id);assert.equal(end.status,'succeeded');assert.equal(end.runs.at(-1).acceptance_state,'passed');
+  const page=await allMessages(task.id);await matchEvents(task.id,page);
+  assert.ok(page.events.some(e=>e.acceptance?.state==='passed'));
+  const {list,outputs}=await acceptanceEvidence(end);assert.equal(list.false_green,false);assert.equal(list.evidence.length,1);
+  const workspace=join(sandbox.host_root,'workspaces',task.id);
+  assert.equal(await readFile(join(workspace,'.workshop-home/ignored-proof'),'utf8'),'excluded');
+  const tree=await independentWorkspaceHash(workspace);current.independent_workspace=tree;
+  assert.ok(tree.entries.some(entry=>entry.Type==='directory'));assert.ok(tree.entries.some(entry=>entry.Path==='nested/proof.txt'));
+  assert.ok(tree.entries.every(entry=>!entry.Path.startsWith('.workshop-home')));
+  assert.equal(list.evidence[0].workspace_sha256,tree.sha256);assert.equal(list.evidence[0].exit_code,0);
+  assert.match(outputs.artifact,/file content matches/);
+}
+async function S5() {
+  const versions=await readdir(join(sandbox.host_root,'packs'));assert.equal(versions.length,1);
+  const sealed=join(sandbox.host_root,'packs',versions[0],'checks','verify');
+  const before=createHash('sha256').update(await readFile(sealed)).digest('hex');
+  const task=await submit([
+    {op:'write-denied',path:'/pack/checks/verify'},{op:'write-denied',path:sealed},
+    {op:'write-denied',path:'/usr/local/bin/fixture-check'},
+    {op:'write',path:'pack/checks/verify',text:'worker forged checker'},
+    {op:'write',path:'pack/checks/source.txt',text:'worker forged marker'},
+    crew('submit','--tests','pass','S5 isolation proof')
+  ],'isolation');
+  const end=await terminal(task.id);assert.equal(end.status,'succeeded');assert.equal(end.runs.at(-1).acceptance_state,'passed');
+  const [result]=await tools([tool('workshop_result',{task_id:task.id,run_id:end.runs.at(-1).id})]);
+  for(const path of ['/pack/checks/verify',sealed,'/usr/local/bin/fixture-check'])assert.ok(result.text.includes(`worker write denied: ${path}`));
+  const page=await allMessages(task.id);await matchEvents(task.id,page);
+  const {list,outputs}=await acceptanceEvidence(end);assert.equal(list.evidence.length,2);assert.ok(list.evidence.every(e=>e.exit_code===0));
+  assert.deepEqual(list.evidence.map(e=>e.command[0]),['/pack/checks/verify','/pack/checks/verify']);
+  assert.match(outputs.marker,/file content matches/);
+  for(const text of ['write denied /workspace/check-write: true','write denied /pack/checks/check-write: true','network denied: true','no credentials or relay: true'])assert.ok(outputs.isolation.includes(text),text);
+  const after=createHash('sha256').update(await readFile(sealed)).digest('hex');assert.equal(after,before);
+  current.trusted_checker={path:sealed,before_sha256:before,after_sha256:after};
 }
 async function S6() {
   const task=await submit([crew('ask','S6 choose an answer')]);const asked=await terminal(task.id);
@@ -205,6 +317,19 @@ async function S8() {
   const receipt=raw.filter(e=>e.kind==='text').map(e=>{try{return JSON.parse(e.text);}catch{return null;}}).find(value=>value?.id===duplicates[0].message.id);
   assert.equal(receipt?.sequence,duplicates[0].sequence);
 }
+async function S9() {
+  const task=await submit([crew('submit','--tests','pass','S9 ready for checks')],'cancel-check');
+  await until(async()=>{const current=await rpc(broker,'workshop.get',{task_id:task.id});return current.status==='running'&&current.runs.at(-1).acceptance_state==='running';},'acceptance running');
+  const checks=await until(async()=>{const checks=await ownChecks();return checks.length===1&&checks[0].state.Running&&checks;},'check container actually running');
+  current.running_check=checks[0];assert.deepEqual(checks[0].command,['/usr/local/bin/fixture-check','sleep','60']);
+  await tools([tool('workshop_cancel',{task_id:task.id})]);
+  const end=await terminal(task.id);assert.equal(end.status,'cancelled');assert.equal(end.runs.at(-1).acceptance_state,'cancelled');
+  const page=await allMessages(task.id);await matchEvents(task.id,page);
+  assert.ok(page.events.some(e=>e.kind==='acceptance'&&e.acceptance.state==='cancelled'));
+  const {list}=await acceptanceEvidence(end);assert.equal(list.acceptance_state,'cancelled');assert.equal(list.false_green,false);
+  await until(async()=>(await ownChecks()).length===0,'cancelled check container cleanup');
+  current.remaining_checks=await ownChecks();assert.deepEqual(current.remaining_checks,[]);
+}
 
 try {
   report.commit=(await exec('git',['rev-parse','HEAD'],{cwd:root})).stdout.trim();
@@ -214,6 +339,11 @@ try {
   await command('gateway-build',go,['build','-p','1','-o',join(state,'gateway'),'./cmd/server'],join(root,'services/ai-gateway'));
   await command('workshop-build',go,['build','-p','1','-o',join(state,'workshop'),'./cmd/server'],join(root,'services/workshop'));
   await command('loop-build','npm',['run','build'],join(root,'services/agent-loop'));
+  const packDir=join(state,'pack');
+  await mkdir(join(packDir,'checks'),{recursive:true});await mkdir(join(packDir,'roles'));
+  await copyFile(join(root,'packs/base/roles/worker.md'),join(packDir,'roles/worker.md'));
+  await writeFile(join(packDir,'checks/source.txt'),'trusted-original');
+  await command('check-build',go,['build','-p','1','-o',join(packDir,'checks/verify'),'./cmd/fixture-check'],join(root,'services/workshop'),{CGO_ENABLED:'0'});
   const fixtureKey=randomBytes(24).toString('hex');
   provider=http.createServer(async(req,res)=>{
     try {
@@ -244,9 +374,17 @@ try {
   const cert=name=>join(state,'pki/public',`${name}.crt`);
   const ep=(name,port)=>({url:`https://127.0.0.1:${port}/rpc`,peer_certificate_file:cert(name)});
   const grant=(id,methods)=>({id,cert_file:cert(id),methods,namespaces:[namespace]});
-  const workshopMethods=['workshop.workflows','workshop.submit','workshop.get','workshop.list','workshop.cancel','workshop.resume','workshop.result','workshop.events','workshop.message'];
+  const workshopMethods=['workshop.workflows','workshop.submit','workshop.get','workshop.list','workshop.cancel','workshop.resume','workshop.result','workshop.events','workshop.message','workshop.evidence'];
   const gateway={listen:`127.0.0.1:${gp}`,tls:identity('ai-gateway'),authorization:[grant('client',['health']),grant('agent-loop',['gateway.generate']),grant('workshop',['gateway.native'])],models:{chat:{protocol:'chat_completions',endpoint:`http://127.0.0.1:${provider.address().port}/chat`,model:'fixture-model',api_key_env:'HARNESS_FIXTURE_KEY'},responses:{protocol:'responses',endpoint:`http://127.0.0.1:${provider.address().port}/responses`,model:'fixture-model',api_key_env:'HARNESS_FIXTURE_KEY'}}};
-  const workshop={listen:`127.0.0.1:${wp}`,tls:identity('workshop'),authorization:[grant('client',['health','workshop.get','workshop.events']),grant('agent-loop',workshopMethods)],workshop:{root:sandbox.host_root,pack_dir:join(root,'packs/base'),concurrency:1,queue_capacity:2,max_output_bytes:1024*1024,model_gateway:{...ep('ai-gateway',gp),tls:identity('workshop')},sandbox,engines:{codex:{binary:'codex'}},runtime_profiles:{fixture:{engine:'codex',protocol:'responses',gateway_model:'responses'}},workflows:[{name:'channel',version:'1',instructions:'Run the supplied deterministic crew script.',runtime:'fixture',policy:'workspace-write',timeout_seconds:120,artifacts:[]}]}};
+  const baseWorkflow={version:'1',instructions:'Run the supplied deterministic crew script.',runtime:'fixture',policy:'workspace-write',timeout_seconds:120,artifacts:[]};
+  const check=(name,command,timeout_seconds=30)=>({name,command,timeout_seconds});
+  const workflows=[
+    {...baseWorkflow,name:'channel'},
+    {...baseWorkflow,name:'artifact',artifacts:['artifact.txt'],acceptance:{checks:[check('artifact',['/usr/local/bin/fixture-check','file','/workspace/artifact.txt','good'])]}},
+    {...baseWorkflow,name:'isolation',acceptance:{checks:[check('marker',['/pack/checks/verify','file','/pack/checks/source.txt','trusted-original']),check('isolation',['/pack/checks/verify','isolation'])]}},
+    {...baseWorkflow,name:'cancel-check',acceptance:{checks:[check('pause',['/usr/local/bin/fixture-check','sleep','60'],90)]}}
+  ];
+  const workshop={listen:`127.0.0.1:${wp}`,tls:identity('workshop'),authorization:[grant('client',['health','workshop.get','workshop.events','workshop.evidence']),grant('agent-loop',workshopMethods)],workshop:{root:sandbox.host_root,pack_dir:packDir,concurrency:1,queue_capacity:2,max_output_bytes:1024*1024,model_gateway:{...ep('ai-gateway',gp),tls:identity('workshop')},sandbox,engines:{codex:{binary:'codex'}},runtime_profiles:{fixture:{engine:'codex',protocol:'responses',gateway_model:'responses'}},workflows}};
   const loop={listen:`127.0.0.1:${ap}`,tls:identity('agent-loop'),authorization:[grant('client',['health','agent.session.create','agent.session.history','agent.run.start','agent.run.get'])],database:join(state,'agent.sqlite'),gateway:ep('ai-gateway',gp),workshop:ep('workshop',wp),model:'chat',streaming:false,max_steps:4,context_bytes:128000,concurrency:1,pack_dir:join(root,'packs/base')};
   for(const [name,value] of Object.entries({gateway,workshop,loop}))await writeFile(join(state,`${name}.json`),JSON.stringify(value),{mode:0o600});
   start('gateway',join(state,'gateway'),['--config',join(state,'gateway.json')],{HARNESS_FIXTURE_KEY:fixtureKey});
@@ -258,7 +396,7 @@ try {
     await until(async()=>{try{return await client.health();}catch{return false;}},`${name} health`);
     if(name==='workshop')broker=client;if(name==='agent-loop')agent=client;
   }
-  for(const scenario of selected.map(id=>({S1,S2,S6,S7,S8})[id])) {
+  for(const scenario of selected.map(id=>({S1,S2,S3,S4,S5,S6,S7,S8,S9})[id])) {
     current={id:scenario.name,started_at:new Date().toISOString(),rpc:[],pass:false};
     try {await scenario();current.pass=true;console.log(`PASS ${scenario.name}`);}
     catch(error){current.error=error.stack;throw error;}
@@ -279,7 +417,7 @@ try {
     assert.equal(report.remaining_containers.length,0,'owned containers must be removed on shutdown');
   } catch(error){report.pass=false;report.cleanup_error=error.message;process.exitCode=1;}
   for(const entry of children)await copyFile(join(state,`${entry.name}.log`),join(evidenceDir,`${entry.name}.log`)).catch(()=>{});
-  try {await rm(state,{recursive:true,force:true});report.state_removed=true;}
+  try {await unsealState(state);await rm(state,{recursive:true,force:true});report.state_removed=true;}
   catch(error){report.pass=false;report.state_removed=false;report.cleanup_error=error.message;process.exitCode=1;}
   await writeFile(join(evidenceDir,'report.json'),JSON.stringify(report,null,2)+'\n');
   console.log(`REPORT ${join(evidenceDir,'report.json')}`);

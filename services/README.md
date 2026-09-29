@@ -97,9 +97,23 @@ Agent 数据库在 `/data/agent.sqlite`，工坊库、任务工作区和 CLI 原
 
 新 TS 数据库不会自动迁移原 Go 会话库。原 Go 本地应用仍保留作为过渡和回归入口，新的部署主链不依赖它。mTLS 与 namespace 是 RPC 访问控制，不等同于每任务独立的 OS 沙箱；CLI 工作流仍受工坊配置和 CLI 自身执行策略约束。
 
-## P1 Harness 通道场景
+## P1 Harness 场景
 
-`scripts/test-harness.mjs` 验证 S1（有序报告）、S2（静默退出）、S6（提问后回复并续跑）、S7（运行中收信）和 S8（重复 client_id 幂等）。每个场景经过本机模型夹具、真实网关和 loop、工坊任务容器及 crew 通道；断言读取持久化工具结果和工坊 RPC 数据。S3/S4/S5/S9 验收检查场景暂未实现，报告会明确列为 deferred。
+`scripts/test-harness.mjs` 默认运行九个场景：
+
+| 场景 | 验证内容 |
+|---|---|
+| S1 | report / ask / report / submit 顺序、唯一 ID、重读与游标 |
+| S2 | 静默退出的 outcome=none |
+| S3 | 坏产物被检查拒绝、自报通过被标为 false_green、失败输出可读 |
+| S4 | 好产物通过检查，独立遍历工作区重算 workspace_sha256 |
+| S5 | 施工者改不到受信检查程序；检查容器的工作区和 pack 只读、不能连网、没有凭证或 relay |
+| S6 | 提问后回复并续跑，输入含回复 ID，消息被记为已读 |
+| S7 | 运行中的施工者从 inbox 收到回复后再 submit |
+| S8 | 重复 client_id 只产生一条消息 |
+| S9 | 检查容器实际运行期间取消，acceptance=cancelled，无残留检查容器 |
+
+每个场景经过本机模型夹具、真实网关和 loop、工坊任务容器及 crew 通道；断言读取持久化工具结果和工坊 RPC 数据。验收输出通过 loop 工具分页读取，并和工坊 RPC 全文比较。S4 的 JavaScript 实现独立扫描文件，保存目录条目与哈希，不调用工坊的哈希函数，排除 `.workshop-home`。
 
 先安装 loop 依赖，使用专用 Docker daemon 构建当前代码的夹具镜像，再执行：
 
@@ -116,6 +130,6 @@ node scripts/test-harness.mjs --evidence /tmp/harness-run-1
 node scripts/test-harness.mjs --evidence /tmp/harness-run-2
 ```
 
-`--evidence` 必须指向尚无 `report.json` 的目录。可加 `--scenarios S1,S2,S7,S8` 选择通道场景子集；未选场景不会被记作通过。S6 需要支持续跑消息后缀与 `echo_input` 动作的 fixture-cli 镜像。
+`--evidence` 必须指向尚无 `report.json` 的目录。可加 `--scenarios S3,S4,S5,S9` 选择场景子集；未选场景在报告的 deferred 中列出，不会被记作通过。镜像需要包含当前 fixture-cli（支持 `echo_input` 和 `write-denied`）与 fixture-check。脚本另行静态编译 fixture-check 放进临时受信 pack，用于验证实际执行的是只读 pack 中的检查程序。
 
-脚本只用随机假凭证，自动生成临时 mTLS 证书，不读取真实模型凭证。任务串行运行，容器限额为 64 MiB 内存、0.1 CPU、128 PID 和 1 MiB `/tmp`；编译使用单个 Go 构建任务。PID 使用运行时默认值：配置下限 16 并不保证能运行 task-shim、CLI 和 easygo-crew 三个 Go 进程。场景证据、构建及服务日志、退出状态保存在指定目录，服务和临时 state 在退出时清理。失败退出码非 0，详情见 `report.json` 和对应场景 JSON。
+脚本只用随机假凭证，自动生成临时 mTLS 证书，不读取真实模型凭证。任务与验收串行运行，容器限额为 64 MiB 内存、0.1 CPU、128 PID 和 1 MiB `/tmp`；编译使用单个 Go 构建任务。PID 使用运行时默认值：配置下限 16 并不保证能运行 task-shim、CLI 和 easygo-crew 三个 Go 进程。场景证据、构建及服务日志、代码与脚本哈希、退出状态保存在指定目录。服务停止后只解除本次 state 目录的封存权限并清理，不触碰其它任务。失败退出码非 0，详情见 `report.json` 和对应场景 JSON。

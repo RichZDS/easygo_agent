@@ -80,10 +80,10 @@ Gateway 与 TUI 都使用同一 QueueManager / Run，在每轮运行初始化时
 需要 Go 1.25+、网关已适配且支持工具调用的模型；原 OpenAI-compatible 配置仍可使用。默认使用 PostgreSQL；所有命令在仓库根目录（包含 `go.mod`）运行。
 
 ```powershell
-Copy-Item .env.example .env
+Copy-Item .env.legacy.example .env
 # 编辑 .env，填写 MODEL_API_KEY、SUBMODEL_API_KEY。
 # DATABASE_URL 和 MEMORY_DATABASE_URL 分别指向会话库与独立记忆库。
-docker compose up -d postgres
+docker compose -f compose.legacy.yaml up -d postgres
 go run ./cmd/easygo-agent -user alice
 ```
 
@@ -148,11 +148,11 @@ sandbox:
 
 可选的本地 Docker 沙箱把逻辑申请和运行容器分开。每个 Agent 会话最多持有一个 `application_id` 和一个独立命名卷；容器停止、丢失或重建时 `/workspace` 代码仍然存在。默认最多同时运行三个容器、最多保留 30 个总申请，因此休眠工作区也绝不会超过 30 个，但 active/starting 申请同样占这 30 个名额。空闲容器会按指数增长的保温时间自动停止，容量紧张时也可提前休眠。Agent 主动销毁或申请达到五小时硬期限后，容器和命名卷都会删除。
 
-沙箱 Controller 位于独立的 `sandbox` Compose profile，普通的 `docker compose up -d postgres` 不会启动它，Compose 也不会预先启动任何 Runtime 容器。先运行 `openssl rand -hex 32`，把结果填入 `.env` 的 `SANDBOX_CONTROLLER_TOKEN`。Linux 默认使用 `/var/run/docker.sock`；Docker Desktop 使用其他 socket 时同步修改 `DOCKER_SOCKET_PATH`。然后构建固定的编译镜像并启动 Controller：
+沙箱 Controller 位于独立的 `sandbox` Compose profile，普通的 `docker compose -f compose.legacy.yaml up -d postgres` 不会启动它，Compose 也不会预先启动任何 Runtime 容器。先运行 `openssl rand -hex 32`，把结果填入 `.env` 的 `SANDBOX_CONTROLLER_TOKEN`。Linux 默认使用 `/var/run/docker.sock`；Docker Desktop 使用其他 socket 时同步修改 `DOCKER_SOCKET_PATH`。然后构建固定的编译镜像并启动 Controller：
 
 ```bash
-docker compose --profile sandbox-image build sandbox-runtime
-docker compose --profile sandbox up -d --build sandbox-controller
+docker compose -f compose.legacy.yaml --profile sandbox-image build sandbox-runtime
+docker compose -f compose.legacy.yaml --profile sandbox up -d --build sandbox-controller
 curl http://127.0.0.1:8787/healthz
 ```
 
@@ -191,9 +191,9 @@ SANDBOX_BENCH_OUTPUT=sandbox-benchmark.json \
 停止正式 Controller 时，先停止服务，再运行一次受信任的 cleanup 模式，可立即删除该 namespace 下的所有申请、容器和命名卷。该操作会永久删除沙箱工作区，不会删除 PostgreSQL 数据卷：
 
 ```bash
-docker compose --profile sandbox stop sandbox-controller
-docker compose --profile sandbox run --rm --no-deps sandbox-controller -config /etc/easygo/sandbox-controller.yaml -cleanup
-docker compose --profile sandbox rm -f sandbox-controller
+docker compose -f compose.legacy.yaml --profile sandbox stop sandbox-controller
+docker compose -f compose.legacy.yaml --profile sandbox run --rm --no-deps sandbox-controller -config /etc/easygo/sandbox-controller.yaml -cleanup
+docker compose -f compose.legacy.yaml --profile sandbox rm -f sandbox-controller
 ```
 
 ## CLI

@@ -35,7 +35,7 @@ bootstrap 密码通过指定环境变量读取，仅在第一次创建管理员�
 
 只把受控代理填写到白名单，使用 **应用实际看到的代理对端地址**（容器网络下不一定是 `127.0.0.1`）。代理必须覆盖客户端自带 XFF，或者在它右侧追加实际连接来源；不能原样转交而不追加，也不能预先用未经验证的头改写来源地址。入口代理应直接面向客户端；多级代理需要各级按同一规则处理，并把确实受控的中间代理 IP 列入名单。
 
-配置生成器支持重复参数，在 loop.json 的 platform 段写入规范化后的 IP：
+Compose 部署在 `.env` 的 `EASYGO_TRUSTED_PROXIES` 里写（逗号分隔），同机代理要写 Compose 网络网关，见[运维文档第 3 节](platform-operations.md#3-https)。不用 Compose 时，配置生成器支持重复参数，在 loop.json 的 platform 段写入规范化后的 IP：
 
 ```bash
 node scripts/configure-platform.mjs --state /absolute/new-platform-state \

@@ -11,67 +11,81 @@
 
 ## 1. 前置条件
 
-- **专用 Docker daemon**。工坊控制器拿到 socket 就等于拿到宿主 root 级能力，不要复用跑着其他业务的 daemon。控制器只会清理带自己 owner 标签的容器。
+- **Linux 上的 Docker Engine（rootful）和 Docker Compose v2**（建议 2.20 以上）。工坊控制器按宿主路径把任务工作区 bind 给任务容器，rootless Docker 和 Docker Desktop 没有验证过。
+- **最好给平台一个专用 Docker daemon**（`.env` 里的 `EASYGO_DOCKER_SOCKET`）。工坊控制器拿到 socket 就等于拿到宿主 root 级能力，不要复用跑着其他业务的 daemon。控制器只会清理带自己 owner 和数据目录标签的容器。
   验收时用的是 `--bridge=none --iptables=false --ip6tables=false --ip-masq=false` 的测试 daemon。它证明了 Compose 内部网络和 `127.0.0.1` 端口可用，但**没有证明核心容器能出网访问模型供应商**，不能直接当生产模板；生产 daemon 需要正常的出网能力（任务容器本身始终是 `--network none`）。
-- 构建镜像（仓库根目录为 build context）：
+- `docker compose up -d --build` 会从仓库根目录构建五个镜像：
 
-```bash
-export DOCKER_HOST=unix:///path/to/dedicated/docker.sock
-docker build -f services/ai-gateway/Dockerfile -t easygo-ai-gateway:platform .
-docker build -f services/agent-loop/Dockerfile -t easygo-agent-loop:platform .
-docker build -f services/workshop/Dockerfile   -t easygo-workshop:platform .
-docker build -f deploy/runtime/Dockerfile      -t easygo-task-runtime:platform .
-```
+| 镜像 | Dockerfile | 说明 |
+|---|---|---|
+| `easygo-init:platform` | `deploy/init/Dockerfile` | 一次性初始化，每次 `up` 先运行 |
+| `easygo-ai-gateway:platform` | `services/ai-gateway/Dockerfile` | |
+| `easygo-agent-loop:platform` | `services/agent-loop/Dockerfile` | 同时提供 Web |
+| `easygo-workshop:platform` | `services/workshop/Dockerfile` | |
+| `easygo-task-runtime:platform` | `deploy/runtime/Dockerfile` | 任务镜像，约 2 GB，内含四个 CLI |
 
-构建要下载 Go 模块和 npm 包。daemon 若以 `--bridge=none` 运行（如验收用的测试 daemon），构建命令需加 `--network host`；这只用于受信的镜像构建，任务容器始终是 `--network none`。
+构建要下载 Go 模块、npm 包和 CLI。daemon 若以 `--bridge=none` 运行（如验收用的测试 daemon），先用 `docker build --network host -f <Dockerfile> -t <镜像> .` 按上表手动构建，再执行不带 `--build` 的 `docker compose up -d`：镜像已存在时 Compose 不会再构建。`--network host` 只用于受信的镜像构建，任务容器始终是 `--network none`。
 
-任务镜像的标签在控制器启动时解析成不可变镜像 ID，之后任务一律用该 ID，不自动拉取。换运行时镜像要重启工坊。
+任务镜像的标签在工坊启动时解析成不可变镜像 ID，之后任务一律用该 ID，不自动拉取。任务镜像重新构建后，`docker compose up -d` 会连带重启工坊。
 
 ## 2. 首次部署
 
-1. 生成配置与开发 PKI（目录必须是新的，文件以 `wx` 创建，不会覆盖已有 state）：
+1. **填 `.env`**：`cp .env.example .env`，至少填 `DEEPSEEK_API_KEY` 和 `EASYGO_ADMIN_PASSWORD`（至少 12 个字符）。其他变量都有默认值，说明见 `.env.example`：
+
+| 变量 | 默认值 | 作用 |
+|---|---|---|
+| `EASYGO_ADMIN_EMAIL` | `admin@example.com` | 首次启动创建的管理员 |
+| `EASYGO_PORT` / `EASYGO_BIND` | `8090` / `127.0.0.1` | Web 端口和绑定地址 |
+| `EASYGO_PUBLIC_ORIGIN` | `http://localhost:<EASYGO_PORT>` | 浏览器实际访问的 origin，写请求严格校验 |
+| `EASYGO_REGISTRATION` | `false` | 是否开放自助注册 |
+| `EASYGO_DATA_DIR` | `./state/platform` | 数据目录，见第 7 节 |
+| `EASYGO_DOCKER_SOCKET` | `/var/run/docker.sock` | 工坊使用的 daemon |
+| `EASYGO_TRUSTED_PROXIES` | 空 | 反向代理地址，见第 3 节 |
+| `EASYGO_TASK_MEMORY_MIB` / `_CPUS` / `_PIDS` | `2048` / `1` / `256` | 每个任务容器的上限 |
+| `EASYGO_MAX_OUTPUT_TOKENS` | `32768` | 每次模型调用的输出上限，见第 4 节 |
+
+2. **启动**：`docker compose up -d --build`。每次 `up` 都先运行一次性的 `init` 容器（root，无网络），它会：
+   - 检查首次启动的管理员密码；
+   - 在数据目录的 `pki/` 生成内部 CA 和四个服务身份（有效期 10 年；证书缺失或 30 天内到期时，下一次 `up` 会整套换新，旧的改名保留）。这是只在 Compose 网络内部使用的私有 CA，要换成自己的 CA 就按同样的文件名替换；
+   - 通过 Docker API 查出数据目录在 daemon 上的真实路径，写进工坊的 `host_root`。工坊启动时会实际探测一次映射，对不上就拒绝启动。socket 不在本机时用 `EASYGO_HOST_DATA_DIR` 直接指定；
+   - 按 `.env` **重写** `gateway.json`、`loop.json`、`workshop.json`，所以不要手改这三个文件。`.env` 改动会让 init 重建，Compose 随后重启三个服务，新配置生效；
+   - 把数据目录交给容器用户 UID 1000。数据目录根、`pki/` 和 CA 私钥只有 root 能读。
+
+   init 不读取也不写入模型 key，管理员密码只检查长度。工坊容器以 root 启动，只为读出 Docker socket 的属组，随即用 `setpriv` 降到 UID 1000 并丢掉全部 capability；三个服务都带 `no-new-privileges`。
+
+3. **模型路由**：`gateway.json` 的模型表来自 `services/ai-gateway/config.deepseek.example.json`，供应商 key 只从 `DEEPSEEK_API_KEY` 读，只注入 ai-gateway 容器。改用其他供应商时编辑这个模板的 `models`，再 `docker compose up -d --build`（init 镜像带的是构建时的模板）。
+
+4. **管理员初始化**：agent-loop 首次启动时用 `EASYGO_ADMIN_EMAIL` + `EASYGO_ADMIN_PASSWORD` 创建管理员。管理员已存在后，密码变量不再被读取，可以从 `.env` 删掉；改它也不会改掉已有密码。它不能把已有普通用户静默提升为管理员。公开注册的账户一律是普通用户、余额 0。
+
+5. **冒烟**：浏览器打开 origin，用管理员登录，在「管理」页给自己发少量额度，发一条消息，确认「额度与用量」页出现一条已结算的用量。仓库里的 `scripts/test-compose.mjs`、`scripts/test-platform-compose.mjs` 和 `services/agent-loop/test/platform-live-browser.mjs` 只适用于**夹具模型**部署，不要对真实供应商部署运行。
+
+**不用 Compose 部署时**（比如三个服务分在不同机器上），用 `scripts/configure-platform.mjs` 生成同样的三份配置和开发 PKI，挂载方式参照 `compose.yaml`：
 
 ```bash
 node scripts/configure-platform.mjs --state /srv/easygo/state \
-  --origin https://agent.example.com --admin-email ops@example.com
+  --origin https://agent.example.com --admin-email ops@example.com --registration false
 ```
 
-它写出 `gateway.json`、`loop.json`、`workshop.json` 和 `pki/`，不读也不写任何密码或 key。`--origin` 以 `https:` 开头时自动打开 Secure cookie。state 路径不能含符号链接，而且**必须就是 Docker daemon 看到的宿主路径**：工坊按 `host_root` 把任务工作区 bind 给任务容器，启动时会实际探测一次映射，对不上就拒绝启动。`scripts/dev-pki.sh` 生成的是开发 CA，生产请换成自己的 CA 签发，文件名保持一致。
-
-2. 模型路由：生成器把 `services/ai-gateway/config.deepseek.example.json` 的模型表写进 `gateway.json`，供应商 key 只从环境变量 `DEEPSEEK_API_KEY` 读。改用其他供应商时编辑 `gateway.json` 的 `models`。
-
-3. 启动：
-
-```bash
-export EASYGO_PLATFORM_STATE=/srv/easygo/state
-export EASYGO_PLATFORM_PORT=8090                 # 只绑 127.0.0.1
-export EASYGO_DOCKER_SOCKET=/path/to/dedicated/docker.sock
-export EASYGO_DOCKER_GID=$(stat -c %g "$EASYGO_DOCKER_SOCKET")
-export EASYGO_ADMIN_PASSWORD=...                 # 首次启动必需（>=12 字符），之后可不设
-export DEEPSEEK_API_KEY=...
-docker compose -f compose.platform.yaml up -d
-```
-
-4. **管理员初始化**：agent-loop 首次启动时用 `bootstrap_admin.email` + `EASYGO_ADMIN_PASSWORD` 创建管理员；此时变量缺失或不足 12 字符会直接启动失败。管理员已存在后，该变量不再被读取，Compose 里也是可选的，可以从环境里删掉。它不能把已有普通用户静默提升为管理员。公开注册的账户一律是普通用户、余额 0。
-
-5. 冒烟：浏览器打开 origin，用管理员登录，注册一个测试用户，给它发少量积分，发一条消息，确认钱包页出现一条已结算的用量。仓库里的 `scripts/test-platform-compose.mjs` 和 `services/agent-loop/test/platform-live-browser.mjs` 只适用于**夹具模型**部署（`configure-platform.mjs --fixture-url`），不要对真实供应商部署运行。
+它默认不覆盖已有文件（加 `--force` 才重写配置，PKI 永不覆盖），不读也不写任何密码或 key。`--origin` 以 `https:` 开头时自动打开 Secure cookie。state 路径不能含符号链接；工坊的 `host_root` 默认是 `<state>/workshop`，控制器看到的路径和 daemon 看到的不同时用 `--host-root` 指定。`scripts/dev-pki.sh` 生成的开发证书默认 7 天过期，用 `EASYGO_PKI_DAYS` 指定有效期。
 
 ## 3. HTTPS
 
 Web 进程只说 HTTP，TLS 在反向代理终止：
 
 - `public_origin` 必须是浏览器实际访问的 `https://` origin，所有写请求都校验 `Origin` 严格相等；
-- `secure_cookies` 必须为 true（生成器按 origin 自动设置）；
-- Compose 只把 Web 绑到 `127.0.0.1`，代理在同机转发；不要把 8441/8442/8443 暴露给代理或公网。
+- `secure_cookies` 必须为 true（init 按 origin 自动设置）；
+- Compose 默认只把 Web 绑到 `127.0.0.1`，代理在同机转发；不要把 8441/8442/8443 暴露给代理或公网。
 
-限速默认按真实 socket 地址计算，不信任 `X-Forwarded-For`。放在代理后面时，要把代理地址写进 platform 配置的 `trusted_proxies`（`configure-platform.mjs --trusted-proxy IP`），否则所有用户共享同一个地址的额度（登录每分钟 20 次、全部请求每分钟 300 次）。语义与 Caddy/nginx 示例见 [platform-web.md](platform-web.md)。
+限速默认按真实 socket 地址计算，不信任 `X-Forwarded-For`。放在代理后面时，要把代理地址写进 platform 配置的 `trusted_proxies`（`.env` 的 `EASYGO_TRUSTED_PROXIES`，逗号分隔；不用 Compose 时是 `configure-platform.mjs --trusted-proxy IP`），否则所有用户共享同一个地址的额度（登录每分钟 20 次、全部请求每分钟 300 次）。语义与 Caddy/nginx 示例见 [platform-web.md](platform-web.md)。
 
-**Compose 部署要写网络网关地址，不是 127.0.0.1**：发布端口经 docker-proxy 转发，Web 容器看到的对端永远是 Compose `core` 网络的网关。`compose.platform.yaml` 把该网络固定为 `EASYGO_PLATFORM_SUBNET`（默认 `172.31.250.0/24`）、网关 `EASYGO_PLATFORM_GATEWAY`（默认 `172.31.250.1`），与宿主已有网段冲突时两者一起改。于是同机反向代理的配置是：
+**Compose 部署要写网络网关地址，不是 127.0.0.1**：发布端口经 docker-proxy 转发，Web 容器看到的对端永远是 Compose `core` 网络的网关。`compose.yaml` 把该网络固定为 `EASYGO_PLATFORM_SUBNET`（默认 `172.31.250.0/24`）、网关 `EASYGO_PLATFORM_GATEWAY`（默认 `172.31.250.1`），与宿主已有网段冲突时两者一起改。于是同机反向代理时 `.env` 写：
 
-```bash
-node scripts/configure-platform.mjs --state /srv/easygo/state \
-  --origin https://agent.example.com --trusted-proxy 172.31.250.1
+```dotenv
+EASYGO_PUBLIC_ORIGIN=https://agent.example.com
+EASYGO_TRUSTED_PROXIES=172.31.250.1
 ```
+
+再执行 `docker compose up -d`。
 
 这样做的前提是 Web 端口只绑 `127.0.0.1`（Compose 默认如此），只有宿主本机进程能从该网关地址连进来；不要把端口改绑到公网地址后还保留这个白名单。
 
@@ -81,7 +95,7 @@ node scripts/configure-platform.mjs --state /srv/easygo/state \
 - 管理员 `GET/PUT /api/admin/tariff` 查看/修改费率。费率有版本；预留时快照当时的版本，之后按该版本结算，改价不影响已在途的请求。
 - 发积分 `POST /api/admin/credits {user_id, amount_micros, reason, idempotency_key}`，同一幂等键重放不重复入账。没有接支付，也没有自动充值。
 - 网关在调用供应商**之前**预留：请求序列化字节数 + 1024 作为输入估计，加上最大输出。余额不足直接拒绝，不产生供应商调用。预留是保守估计，不是 tokenizer 报价。
-- 最大输出由 `gateway.json` 的 `meter.max_output_tokens` 决定，网关会把每个请求的输出上限压到这个值。代码生成类 CLI 常在一次响应里写出整个文件：真实测试中上限 4096 时每个写文件的响应都被截断、任务失败，改为 32768 后一次响应输出约 2.1 万 token 并顺利完成。`configure-platform.mjs` 因此默认写 32768。代价是每次调用要先冻结约 33 积分，余额低于此值的用户发不出请求；只做短对话的部署可以调低。
+- 最大输出由 `gateway.json` 的 `meter.max_output_tokens` 决定，网关会把每个请求的输出上限压到这个值。代码生成类 CLI 常在一次响应里写出整个文件：真实测试中上限 4096 时每个写文件的响应都被截断、任务失败，改为 32768 后一次响应输出约 2.1 万 token 并顺利完成。因此默认写 32768（`.env` 的 `EASYGO_MAX_OUTPUT_TOKENS`）。代价是每次调用要先冻结约 33 积分，余额低于此值的用户发不出请求；只做短对话的部署可以调低。
 
 ## 5. 对账
 
@@ -117,7 +131,7 @@ node scripts/configure-platform.mjs --state /srv/easygo/state \
 
 ## 7. 备份与恢复
 
-state 目录里的数据库**互相引用，必须作为一个整体备份和恢复**：
+数据目录（`EASYGO_DATA_DIR`，默认 `./state/platform`）里的数据库**互相引用，必须作为一个整体备份和恢复**：
 
 - 网关 `meter.db` 的待结算回执 ↔ `platform.sqlite` 的预留记录；
 - `agent.sqlite` 的记忆 outbox ↔ `knowledge.sqlite` 的已处理回合；
@@ -126,12 +140,12 @@ state 目录里的数据库**互相引用，必须作为一个整体备份和恢
 只回滚其中一个会造成错配，例如网关对已不存在的预留反复重试结算，或者丢掉已完成回合的记忆提取。推荐冷备份：
 
 ```bash
-docker compose -f compose.platform.yaml stop      # 网关退出前会尽量冲刷 outbox
-tar -C /srv/easygo -czf easygo-state-$(date +%F).tgz state
-docker compose -f compose.platform.yaml start
+docker compose stop                                  # 网关退出前会尽量冲刷 outbox
+sudo tar -C state -czf easygo-state-$(date +%F).tgz platform
+docker compose start
 ```
 
-停止后先确认待核对列表的状态，恢复到旧快照时要预期：快照之后发生的扣费、发放和对账会丢失，需要按供应商用量和审计记录人工补录。`pki/` 里的私钥要单独、加密保管；不要把 state 打包进仓库或工单附件。
+数据目录的根只有 root 能读，所以要 `sudo`；以 root 解包时 tar 会保留原属主。停止后先确认待核对列表的状态，恢复到旧快照时要预期：快照之后发生的扣费、发放和对账会丢失，需要按供应商用量和审计记录人工补录。`pki/` 里的私钥要单独、加密保管；不要把数据目录打包进仓库或工单附件。`docker compose down` 只删容器和网络，不动数据目录。
 
 ## 8. 隔离边界与已知限制
 
@@ -173,9 +187,10 @@ node scripts/test-platform.mjs                              # 完整链路
 EASYGO_PLATFORM_SOAK_SECONDS=3600 node scripts/test-platform.mjs   # 1 小时 soak
 node scripts/test-platform-faults.mjs                       # 崩溃/重启故障注入
 
-# 已启动的夹具 Compose 部署
-EASYGO_PLATFORM_ORIGIN=http://127.0.0.1:8090 EASYGO_REQUIRE_ARTIFACT=1 \
-  EASYGO_ADMIN_PASSWORD=... node scripts/test-platform-compose.mjs
+# 一键 Compose：compose.yaml + compose.fixture.yaml，临时项目名、临时数据目录，跑完全部删除
+EASYGO_DOCKER_SOCKET=/path/to/dedicated/docker.sock node scripts/test-compose.mjs
 ```
+
+`test-compose.mjs` 检查 init 生成的配置（daemon 路径、属主和权限、配置里没有密码和 key），在这套部署上跑 `test-platform-compose.mjs`（注册、发额度、对话扣费、隔离任务和产物下载），再改一个 `.env` 值重新 `up`，确认新配置生效、PKI 和账户保留。镜像缺失时才构建，`EASYGO_COMPOSE_BUILD=1` 强制重建。
 
 各次实测结果与证据位置见 [平台验收记录](platform-verification.md)。

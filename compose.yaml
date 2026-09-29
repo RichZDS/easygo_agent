@@ -1,70 +1,148 @@
-services:
-  postgres:
-    image: postgres:16
-    environment:
-      POSTGRES_DB: easygo
-      POSTGRES_USER: easygo
-      POSTGRES_PASSWORD: easygo
-    ports:
-      - "127.0.0.1:5432:5432"
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-      - ./compose/init-memory-db.sql:/docker-entrypoint-initdb.d/10-memory-db.sql:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U easygo -d easygo"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
+# EasyGo managed platform, one command:
+#   cp .env.example .env        # set DEEPSEEK_API_KEY and EASYGO_ADMIN_PASSWORD
+#   docker compose up -d --build
+# Then open EASYGO_PUBLIC_ORIGIN (default http://localhost:8090) and sign in as
+# the admin. Needs a rootful Linux Docker Engine: the workshop receives the
+# Docker socket and starts one isolated container per task. HTTPS, backups and
+# isolation limits: doc/platform-operations.md.
+#
+# init runs first on every `up`. It writes the three service configs from .env
+# into EASYGO_DATA_DIR, so edit .env rather than the generated JSON files.
+name: easygo
 
-  # Build target only. It is intentionally in a separate profile so bringing
-  # up the controller never starts an unused sandbox runtime.
-  sandbox-runtime:
-    profiles: ["sandbox-image"]
-    image: easygo-agent-sandbox-runtime:local
+services:
+  init:
+    image: easygo-init:platform
     build:
       context: .
-      dockerfile: deploy/sandbox/runtime.Dockerfile
+      dockerfile: deploy/init/Dockerfile
+    restart: "no"
+    network_mode: none
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      # Checked for length before the first start only; never written anywhere.
+      EASYGO_ADMIN_PASSWORD: ${EASYGO_ADMIN_PASSWORD:-}
+      EASYGO_ADMIN_EMAIL: ${EASYGO_ADMIN_EMAIL:-admin@example.com}
+      EASYGO_PUBLIC_ORIGIN: ${EASYGO_PUBLIC_ORIGIN:-http://localhost:${EASYGO_PORT:-8090}}
+      EASYGO_REGISTRATION: ${EASYGO_REGISTRATION:-false}
+      EASYGO_TRUSTED_PROXIES: ${EASYGO_TRUSTED_PROXIES:-}
+      EASYGO_RUNTIME_IMAGE: ${EASYGO_RUNTIME_IMAGE:-easygo-task-runtime:platform}
+      EASYGO_TASK_MEMORY_MIB: ${EASYGO_TASK_MEMORY_MIB:-2048}
+      EASYGO_TASK_CPUS: ${EASYGO_TASK_CPUS:-1}
+      EASYGO_TASK_PIDS: ${EASYGO_TASK_PIDS:-256}
+      EASYGO_MAX_OUTPUT_TOKENS: ${EASYGO_MAX_OUTPUT_TOKENS:-32768}
+      EASYGO_HOST_DATA_DIR: ${EASYGO_HOST_DATA_DIR:-}
+      EASYGO_FIXTURE_URL: ${EASYGO_FIXTURE_URL:-}
+    volumes:
+      - "${EASYGO_DATA_DIR:-./state/platform}:/state"
+      # Used once to look up the daemon-visible path of the data directory.
+      - &docker-socket
+        type: bind
+        source: ${EASYGO_DOCKER_SOCKET:-/var/run/docker.sock}
+        target: /run/docker/docker.sock
+        # A wrong path must fail the start, not leave an empty directory on the host.
+        bind: {create_host_path: false}
+
+  # Build-only. The workshop starts every task container from this image; this
+  # one-off run only makes sure the image exists before the workshop starts.
+  runtime:
+    image: ${EASYGO_RUNTIME_IMAGE:-easygo-task-runtime:platform}
+    build:
+      context: .
+      dockerfile: deploy/runtime/Dockerfile
     entrypoint: ["/bin/true"]
     network_mode: none
     restart: "no"
 
-  # Trusted control plane. Only this process gets the Docker Engine socket;
-  # dynamically-created runtime containers never receive it.
-  sandbox-controller:
-    profiles: ["sandbox"]
-    image: easygo-agent-sandbox-controller:local
+  ai-gateway:
+    image: easygo-ai-gateway:platform
     build:
       context: .
-      dockerfile: deploy/sandbox/controller.Dockerfile
-    command: ["-config", "/etc/easygo/sandbox-controller.yaml"]
+      dockerfile: services/ai-gateway/Dockerfile
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 20s
+    mem_limit: 1g
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    depends_on:
+      init: {condition: service_completed_successfully, restart: true}
     environment:
-      SANDBOX_CONTROLLER_TOKEN: "${SANDBOX_CONTROLLER_TOKEN:?set SANDBOX_CONTROLLER_TOKEN to at least 32 printable characters}"
-    ports:
-      - "127.0.0.1:8787:8787"
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?set DEEPSEEK_API_KEY in .env}
     volumes:
-      - "${DOCKER_SOCKET_PATH:-/var/run/docker.sock}:/var/run/docker.sock"
-      - ./configs/sandbox-controller.yaml:/etc/easygo/sandbox-controller.yaml:ro
-      - sandbox-controller-data:/var/lib/easygo-sandbox
+      - "${EASYGO_DATA_DIR:-./state/platform}/pki/ai-gateway:/run/easygo/identity:ro"
+      - "${EASYGO_DATA_DIR:-./state/platform}/pki/public:/run/easygo/trust:ro"
+      - "${EASYGO_DATA_DIR:-./state/platform}/gateway.json:/run/easygo/config.json:ro"
+      - "${EASYGO_DATA_DIR:-./state/platform}/gateway:/data"
+    networks: [core]
+
+  agent-loop:
+    image: easygo-agent-loop:platform
+    build:
+      context: .
+      dockerfile: services/agent-loop/Dockerfile
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 20s
+    mem_limit: 2g
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    depends_on:
+      init: {condition: service_completed_successfully, restart: true}
+    ports:
+      # Plain HTTP. Keep 127.0.0.1 behind an HTTPS reverse proxy or SSH tunnel.
+      - "${EASYGO_BIND:-127.0.0.1}:${EASYGO_PORT:-8090}:8080"
+    environment:
+      # Read only until the bootstrap admin exists.
+      EASYGO_ADMIN_PASSWORD: ${EASYGO_ADMIN_PASSWORD:-}
+    volumes:
+      - "${EASYGO_DATA_DIR:-./state/platform}/pki/agent-loop:/run/easygo/identity:ro"
+      - "${EASYGO_DATA_DIR:-./state/platform}/pki/public:/run/easygo/trust:ro"
+      - "${EASYGO_DATA_DIR:-./state/platform}/loop.json:/run/easygo/config.json:ro"
+      - "${EASYGO_DATA_DIR:-./state/platform}/agent:/data"
+    networks: [core]
+
+  workshop:
+    image: easygo-workshop:platform
+    build:
+      context: .
+      dockerfile: services/workshop/Dockerfile
+    init: true
     restart: unless-stopped
     stop_grace_period: 30s
-    read_only: true
-    tmpfs:
-      - /tmp:size=16m,nosuid,nodev,noexec
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    healthcheck:
-      test: ["CMD", "/usr/local/bin/sandbox-controller", "-healthcheck", "http://127.0.0.1:8787/healthz"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-      start_period: 2s
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-volumes:
-  postgres-data:
-  sandbox-controller-data:
+    mem_limit: 512m
+    # Starts as root only to join the Docker socket's group, whatever its id on
+    # this host, then runs the server as UID 1000 with no capabilities.
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [SETUID, SETGID]
+    security_opt: ["no-new-privileges:true"]
+    entrypoint:
+      - /bin/sh
+      - -c
+      - 'exec setpriv --reuid=1000 --regid=1000 --groups="$$(stat -c %g /run/docker/docker.sock)" /usr/local/bin/server "$$@"'
+      - workshop
+    command: ["--config", "/run/easygo/config.json"]
+    depends_on:
+      init: {condition: service_completed_successfully, restart: true}
+      runtime: {condition: service_completed_successfully, restart: true}
+    volumes:
+      - "${EASYGO_DATA_DIR:-./state/platform}/pki/workshop:/run/easygo/identity:ro"
+      - "${EASYGO_DATA_DIR:-./state/platform}/pki/public:/run/easygo/trust:ro"
+      - "${EASYGO_DATA_DIR:-./state/platform}/workshop.json:/run/easygo/config.json:ro"
+      - "${EASYGO_DATA_DIR:-./state/platform}/workshop:/data/workshop"
+      - *docker-socket
+    networks: [core]
+
+networks:
+  core:
+    # Pinned so the Web container sees a stable peer: published ports reach it
+    # through docker-proxy from this gateway address. Put the gateway in
+    # EASYGO_TRUSTED_PROXIES when an HTTPS reverse proxy on this host fronts
+    # the port. Change both values if the subnet clashes with the host.
+    ipam:
+      config:
+        - subnet: ${EASYGO_PLATFORM_SUBNET:-172.31.250.0/24}
+          gateway: ${EASYGO_PLATFORM_GATEWAY:-172.31.250.1}

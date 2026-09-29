@@ -1,0 +1,25 @@
+# Test-only overlay for compose.yaml: a fake model provider and the offline
+# fixture task image. No real keys, no paid calls. scripts/test-compose.mjs
+# starts it in a throwaway project and data directory; never point it at the
+# data directory of a real deployment.
+services:
+  init:
+    environment:
+      EASYGO_FIXTURE_URL: http://model-fixture:9000
+
+  runtime:
+    build:
+      dockerfile: deploy/runtime/Dockerfile.fixture
+    # The fixture image is built FROM scratch and has no /bin/true.
+    entrypoint: ["/usr/local/bin/fixture-check", "sleep", "1"]
+
+  model-fixture:
+    image: node:22-bookworm-slim
+    user: "1000:1000"
+    command: ["node", "/fixture/platform-model-fixture.mjs"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - "./scripts/platform-model-fixture.mjs:/fixture/platform-model-fixture.mjs:ro"
+    networks: [core]

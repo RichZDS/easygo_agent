@@ -28,6 +28,7 @@ var keysBucket = []byte("idempotency")
 // Namespace must come from a trusted caller, never model-generated arguments.
 type Service struct {
 	workerInstructions string
+	packChecks         string
 	mu                 sync.Mutex
 	db                 *bolt.DB
 	root               string
@@ -136,6 +137,10 @@ func New(cfg Config, runner Runner) (*Service, error) {
 		s.runtimes[id] = p
 	}
 	for _, w := range cfg.Workflows {
+		if w.Acceptance != nil && cfg.Sandbox.Mode != "docker" {
+			return nil, fmt.Errorf("%w: acceptance requires Docker mode", ErrInvalid)
+		}
+		w.Acceptance = cloneAcceptance(w.Acceptance)
 		if w.RuntimeSpec != nil {
 			return nil, fmt.Errorf("%w: runtime_spec is reserved for task snapshots", ErrInvalid)
 		}
@@ -163,6 +168,14 @@ func New(cfg Config, runner Runner) (*Service, error) {
 			return nil, errors.New("Docker mode requires workflow runtime profiles")
 		}
 		s.workflows[w.Name] = w
+	}
+	needsChecks := false
+	for _, w := range s.workflows {
+		needsChecks = needsChecks || w.Acceptance != nil
+	}
+	s.packChecks, err = snapshotChecks(root, cfg.PackDir, needsChecks)
+	if err != nil {
+		return nil, err
 	}
 	if runner == nil {
 		if cfg.Sandbox.Mode == "docker" {
@@ -228,6 +241,11 @@ func New(cfg Config, runner Runner) (*Service, error) {
 			if err := putTask(tx, task); err != nil {
 				return err
 			}
+			if a := task.Runs[len(task.Runs)-1].Acceptance; a != nil && a.State == "interrupted" {
+				if err := appendEvent(tx, task, Event{Kind: "acceptance", Acceptance: &AcceptanceEvent{State: "interrupted"}}); err != nil {
+					return err
+				}
+			}
 			if err := appendEvent(tx, task, Event{Kind: "state", Text: string(Interrupted)}); err != nil {
 				return err
 			}
@@ -246,6 +264,9 @@ func New(cfg Config, runner Runner) (*Service, error) {
 }
 
 func validateWorkflow(w Workflow) error {
+	if err := validateAcceptance(w.Acceptance); err != nil {
+		return err
+	}
 	if w.Name == "" || w.Version == "" || w.Instructions == "" || w.Model == "" || !knownEngine(w.Engine) || (w.Policy != "read-only" && w.Policy != "workspace-write") || w.TimeoutSeconds < 1 || w.TimeoutSeconds > 86400 {
 		return fmt.Errorf("%w: workflow needs name/version/instructions/model, known engine, explicit policy and timeout 1..86400", ErrInvalid)
 	}
@@ -318,6 +339,7 @@ func (s *Service) Submit(req SubmitRequest) (*Task, error) {
 	default:
 		return nil, ErrFull
 	}
+	w.Acceptance = cloneAcceptance(w.Acceptance)
 	w.Artifacts = append([]string(nil), w.Artifacts...)
 	w.AllowedRuntimes = append([]string(nil), w.AllowedRuntimes...)
 	id := uuid.NewString()
@@ -327,7 +349,7 @@ func (s *Service) Submit(req SubmitRequest) (*Task, error) {
 		return nil, err
 	}
 	now := time.Now().UTC()
-	task := &Task{ID: id, Namespace: req.Namespace, IdempotencyKey: req.IdempotencyKey, Workflow: w, Input: req.Input, Workspace: workspace, Status: Queued, CreatedAt: now, UpdatedAt: now, Runs: []Run{{ID: uuid.NewString(), Input: req.Input, Status: Queued}}}
+	task := &Task{ID: id, Namespace: req.Namespace, IdempotencyKey: req.IdempotencyKey, Workflow: w, Input: req.Input, Workspace: workspace, Status: Queued, CreatedAt: now, UpdatedAt: now, Runs: []Run{{ID: uuid.NewString(), Input: req.Input, Status: Queued, Acceptance: skippedAcceptance()}}}
 	err = s.db.Update(func(tx *bolt.Tx) error {
 		if err := putTask(tx, task); err != nil {
 			return err
@@ -536,7 +558,7 @@ func (s *Service) Resume(namespace, id, input string) (*Task, error) {
 		return nil, ErrFull
 	}
 	task.Status, task.UpdatedAt = Queued, time.Now().UTC()
-	task.Runs = append(task.Runs, Run{ID: uuid.NewString(), Input: input, ResumeSessionID: task.SessionID, Status: Queued})
+	task.Runs = append(task.Runs, Run{ID: uuid.NewString(), Input: input, ResumeSessionID: task.SessionID, Status: Queued, Acceptance: skippedAcceptance()})
 	err = s.db.Update(func(tx *bolt.Tx) error {
 		if err := resumeCrewInput(tx, task); err != nil {
 			return err
@@ -656,6 +678,9 @@ func (s *Service) execute(id string) {
 	if runErr == nil {
 		artifacts, runErr = collectArtifacts(task.Workspace, task.Workflow.Artifacts)
 	}
+	if runErr == nil {
+		runErr = s.runAcceptance(ctx, task)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.active, id)
@@ -703,8 +728,23 @@ func finish(task *Task, status Status, reason string) {
 	now := time.Now().UTC()
 	task.Status, task.UpdatedAt = status, now
 	run := &task.Runs[len(task.Runs)-1]
+	previousStatus := run.Status
 	run.Status, run.FinishedAt, run.Error = status, &now, reason
 	run.Outcome = "none"
+	if run.Acceptance == nil {
+		run.Acceptance = skippedAcceptance()
+	}
+	if status == Interrupted && task.Workflow.Acceptance != nil && (previousStatus == Running || previousStatus == Cancelling) {
+		run.Acceptance.State = "interrupted"
+	}
+	if run.Acceptance.State == "running" {
+		switch status {
+		case Cancelled, TimedOut:
+			run.Acceptance.State = "cancelled"
+		case Interrupted:
+			run.Acceptance.State = "interrupted"
+		}
+	}
 }
 
 func collectArtifacts(workspace string, paths []string) ([]Artifact, error) {
@@ -774,6 +814,11 @@ func (s *Service) Close() error {
 			for _, task := range tasks {
 				if err := putTask(tx, task); err != nil {
 					return err
+				}
+				if a := task.Runs[len(task.Runs)-1].Acceptance; a != nil && a.State == "interrupted" {
+					if err := appendEvent(tx, task, Event{Kind: "acceptance", Acceptance: &AcceptanceEvent{State: "interrupted"}}); err != nil {
+						return err
+					}
 				}
 				if err := appendEvent(tx, task, Event{Kind: "state", Text: string(Interrupted)}); err != nil {
 					return err

@@ -115,6 +115,7 @@ func summarize(task *Task) TaskSummary {
 	}
 	run := task.Runs[len(task.Runs)-1]
 	r := RunSummary{Outcome: run.Outcome, AcceptanceState: "skipped", ID: run.ID, Status: run.Status, Error: prefix(run.Error, summaryErrorBytes), Text: prefix(run.Text, summaryTextBytes), TextBytes: len(run.Text), ArtifactCount: len(run.Artifacts), Artifacts: []Artifact{}}
+	r.AcceptanceState, r.FalseGreen, r.EvidenceCount = acceptanceSummary(run)
 	r.ErrorTruncated = len(r.Error) < len(run.Error)
 	r.TextTruncated = len(r.Text) < len(run.Text)
 	for _, artifact := range run.Artifacts {
@@ -169,7 +170,8 @@ func (s *Service) ListPage(namespace string, offset, limit int) (*TaskPage, erro
 		item := TaskMetadata{Runtime: task.Workflow.Runtime, Engine: task.Workflow.Engine, Model: task.Workflow.Model, ID: task.ID, Namespace: task.Namespace, Status: task.Status, RunCount: len(task.Runs), Runs: []RunMetadata{}}
 		if len(task.Runs) > 0 {
 			run := task.Runs[len(task.Runs)-1]
-			item.Runs = append(item.Runs, RunMetadata{Outcome: run.Outcome, AcceptanceState: "skipped", ID: run.ID, Status: run.Status, TextBytes: len(run.Text), ArtifactCount: len(run.Artifacts)})
+			state, green, count := acceptanceSummary(run)
+			item.Runs = append(item.Runs, RunMetadata{Outcome: run.Outcome, AcceptanceState: state, FalseGreen: green, EvidenceCount: count, ID: run.ID, Status: run.Status, TextBytes: len(run.Text), ArtifactCount: len(run.Artifacts)})
 		}
 		page.Tasks = append(page.Tasks, item)
 	}

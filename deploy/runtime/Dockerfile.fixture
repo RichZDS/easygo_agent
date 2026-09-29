@@ -3,13 +3,15 @@ FROM golang:1.25-bookworm AS build
 COPY packages/rpc-go /src/packages/rpc-go
 COPY services/workshop /src/services/workshop
 WORKDIR /src/services/workshop
-RUN CGO_ENABLED=0 go build -trimpath -o /out/easygo-crew ./cmd/easygo-crew \
+RUN CGO_ENABLED=0 go build -trimpath -o /out/fixture-check ./cmd/fixture-check \
+ && CGO_ENABLED=0 go build -trimpath -o /out/easygo-crew ./cmd/easygo-crew \
  && CGO_ENABLED=0 go build -trimpath -o /out/task-shim ./cmd/task-shim \
  && CGO_ENABLED=0 go build -trimpath -o /out/codex ./cmd/fixture-cli
 FROM scratch
 COPY --from=build /out/task-shim /usr/local/bin/task-shim
 COPY --from=build /out/easygo-crew /usr/local/bin/easygo-crew
 COPY --from=build /out/codex /usr/local/bin/codex
+COPY --from=build /out/fixture-check /usr/local/bin/fixture-check
 USER 1000:1000
 WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/task-shim"]

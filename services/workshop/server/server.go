@@ -107,6 +107,21 @@ func Methods(service *workshop.Service) map[string]rpc.Method {
 			}
 			return summary(service.Cancel(p.Namespace, p.TaskID))
 		},
+		"workshop.evidence": func(ctx context.Context, raw json.RawMessage, stream *rpc.Stream) (any, *rpc.Error) {
+			var p struct {
+				taskParams
+				RunID      string `json:"run_id,omitempty"`
+				EvidenceID string `json:"evidence_id,omitempty"`
+				Offset     int    `json:"offset,omitempty"`
+				Limit      int    `json:"limit,omitempty"`
+			}
+			p.Limit = 8192
+			if rpc.Decode(raw, &p) != nil || p.TaskID == "" {
+				return nil, rpc.InvalidParams()
+			}
+			out, err := service.Evidence(p.Namespace, p.TaskID, p.RunID, p.EvidenceID, p.Offset, p.Limit)
+			return out, domainError(err)
+		},
 		"workshop.message": func(ctx context.Context, raw json.RawMessage, stream *rpc.Stream) (any, *rpc.Error) {
 			var p struct {
 				taskParams

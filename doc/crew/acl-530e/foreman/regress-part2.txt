@@ -1,0 +1,9 @@
+HEAD 51dadc9
+go-workshop rc=0
+e2e-services rc=0
+e2e-platform rc=0
+e2e-faults rc=0
+harness-1 rc=0
+harness-2 rc=0
+leftover containers (excluding r3): 
+DONE

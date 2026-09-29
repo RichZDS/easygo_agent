@@ -1,0 +1,111 @@
+{
+  "scope": "P1 harness live sample",
+  "state": "/tmp/eglive/r-zV8VxK",
+  "model": "deepseek-flash",
+  "base_image": "easygo-task-runtime:platform",
+  "image": "easygo-task-runtime:acl-live",
+  "runtimes": [
+    {
+      "runtime": "openclaw",
+      "profile": "openclaw-main",
+      "task_id": "45c040b8-6c9d-495f-8760-aa83ad0d2c0b",
+      "status": "succeeded",
+      "error": null,
+      "outcome": "submitted",
+      "acceptance_state": "passed",
+      "false_green": false,
+      "elapsed_ms": 35082,
+      "messages": [
+        {
+          "sequence": 3,
+          "direction": "from_worker",
+          "kind": "report",
+          "claims": null,
+          "text": "Created package.json (type=module, test=node --test), src/slug.js (slugify), test/slug.test.js (5 cases including empty->'item'). npm test: 5 pass, 0 fail. Ready for review."
+        },
+        {
+          "sequence": 4,
+          "direction": "from_worker",
+          "kind": "submit",
+          "claims": {
+            "tests": "pass"
+          },
+          "text": "Files: package.json (\"type\":\"module\", scripts.test=\"node --test\"); src/slug.js exporting slugify(text); test/slug.test.js with 5 node:test/node:assert cases incl. slugify('!!!')==='item'. Command: npm test. Result: 5 pass / 0 fail. Node v26.10.0. Built-ins only, no installs, no network."
+        }
+      ],
+      "model_calls_usage": [
+        {
+          "input_tokens": 51789,
+          "output_tokens": 1501,
+          "cached_input_tokens": 44672
+        }
+      ],
+      "evidence": [
+        {
+          "check": "npm-test",
+          "exit_code": 0,
+          "timed_out": false,
+          "duration_ms": 937,
+          "output_bytes": 435,
+          "workspace_sha256": "d95457949fbf1051358e6fe9cae9524bfe5003037de583c1dfbc06fadca03bd9"
+        }
+      ],
+      "check_output_head": "\n> slug-project@1.0.0 test\n> node --test\n\n✔ lowercases and hyphenates simple text (1.40782ms)\n✔ collapses a run of non-alphanumeric characters into a single hyphen (0.214495ms)\n✔ strips leading and trailing separators (0.192877ms)\n✔ keeps digits (1.809672ms)\n✔ returns \"item\" when nothing is left (0.418861ms)\nℹ tests 5\nℹ suites 0\nℹ pass 5\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 123.014793\n",
+      "claimed_tests": "pass",
+      "harness_pass": true
+    },
+    {
+      "runtime": "pi",
+      "profile": "pi-main",
+      "task_id": "976ec2ad-abfd-4caa-aac0-74283fc4e5f4",
+      "status": "succeeded",
+      "error": null,
+      "outcome": "submitted",
+      "acceptance_state": "passed",
+      "false_green": false,
+      "elapsed_ms": 15028,
+      "messages": [
+        {
+          "sequence": 7,
+          "direction": "from_worker",
+          "kind": "report",
+          "claims": null,
+          "text": "Created ES module project: package.json (type module, test: node --test), src/slug.js exporting slugify, test/slug.test.js with 5 node:test cases. npm test passes 5/5. Ready for review."
+        },
+        {
+          "sequence": 8,
+          "direction": "from_worker",
+          "kind": "submit",
+          "claims": {
+            "tests": "pass"
+          },
+          "text": "Files: package.json, src/slug.js, test/slug.test.js. Command: npm test (node --test). Result: 5 tests, 5 pass, 0 fail. slugify lowercases, collapses non-[a-z0-9] runs to single hyphen, trims hyphens, returns 'item' when empty. No limitations."
+        }
+      ],
+      "model_calls_usage": [
+        {
+          "input_tokens": 20114,
+          "output_tokens": 1097,
+          "cached_input_tokens": 18944
+        }
+      ],
+      "evidence": [
+        {
+          "check": "npm-test",
+          "exit_code": 0,
+          "timed_out": false,
+          "duration_ms": 1804,
+          "output_bytes": 413,
+          "workspace_sha256": "5efd09eee284c917b8609c855f9da9ca8fd9bc7c29f35a64ccf95415cb5dc1f7"
+        }
+      ],
+      "check_output_head": "\n> slugify@1.0.0 test\n> node --test\n\n✔ lowercases the text (1.421749ms)\n✔ replaces runs of non-alphanumeric characters with a single hyphen (0.221945ms)\n✔ removes leading and trailing hyphens (0.168967ms)\n✔ keeps digits (4.549475ms)\n✔ returns 'item' when the result is empty (0.415772ms)\nℹ tests 5\nℹ suites 0\nℹ pass 5\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 134.865706\n",
+      "claimed_tests": "pass",
+      "harness_pass": true
+    }
+  ],
+  "paid_provider": true,
+  "pass": true,
+  "image_id": "sha256:7ae91504ac77c146cc07abb6982f93a805cec34ae5b3328a736a1f4aa0159ba3",
+  "key_leaks": 0
+}

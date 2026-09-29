@@ -1,0 +1,127 @@
+{
+  "scope": "P1 harness live sample",
+  "state": "/tmp/eglive/r-mY4dwU",
+  "model": "deepseek-flash",
+  "base_image": "easygo-task-runtime:platform",
+  "image": "easygo-task-runtime:acl-live",
+  "runtimes": [
+    {
+      "runtime": "claude",
+      "profile": "claude-messages",
+      "task_id": "55c9281e-189c-42e6-9bae-e8a90a5b3853",
+      "status": "succeeded",
+      "error": null,
+      "outcome": "submitted",
+      "acceptance_state": "passed",
+      "false_green": false,
+      "elapsed_ms": 20030,
+      "messages": [
+        {
+          "sequence": 6,
+          "direction": "from_worker",
+          "kind": "report",
+          "claims": null,
+          "text": "Starting: creating ES module slug project (package.json, src/slug.js, test/slug.test.js)"
+        },
+        {
+          "sequence": 10,
+          "direction": "from_worker",
+          "kind": "submit",
+          "claims": {
+            "tests": "pass"
+          },
+          "text": "Created ES module slug project.\n\nFiles:\n- package.json: \"type\":\"module\", \"scripts\":{\"test\":\"node --test\"}\n- src/slug.js: exports slugify(text) — lowercases, replaces each run of non-[a-z0-9] with a single hyphen, strips leading/trailing hyphens, returns \"item\" when empty. Also default-exports slugify.\n- test/slug.test.js: node:test + node:assert/strict, 6 cases (lowercasing, collapsing runs, trimm"
+        }
+      ],
+      "model_calls_usage": [
+        {
+          "input_tokens": 3636,
+          "output_tokens": 1837,
+          "cached_input_tokens": 21248
+        }
+      ],
+      "evidence": [
+        {
+          "check": "npm-test",
+          "exit_code": 0,
+          "timed_out": false,
+          "duration_ms": 1961,
+          "output_bytes": 503,
+          "workspace_sha256": "09b0a95df414272c7c1abb70d73088acb19b6345ee7cd38bb6a1e6c40af0d7f5"
+        }
+      ],
+      "check_output_head": "\n> slug-project@1.0.0 test\n> node --test\n\n✔ lowercases the text (1.279673ms)\n✔ replaces runs of non-alphanumeric characters with a single hyphen (0.218666ms)\n✔ removes leading and trailing hyphens (0.152037ms)\n✔ keeps digits and collapses mixed separators (3.947377ms)\n✔ returns \"item\" when the result would be empty (0.246625ms)\n✔ returns \"item\" for empty input (0.174126ms)\nℹ tests 6\nℹ suites 0\nℹ pass 6\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 199.441273\n",
+      "claimed_tests": "pass",
+      "harness_pass": true
+    },
+    {
+      "runtime": "pi",
+      "profile": "pi-main",
+      "task_id": "a3630146-ff5b-484e-a9b1-05ecf1895f8f",
+      "status": "succeeded",
+      "error": null,
+      "outcome": "submitted",
+      "acceptance_state": "error",
+      "false_green": false,
+      "elapsed_ms": 72910,
+      "messages": [
+        {
+          "sequence": 8,
+          "direction": "from_worker",
+          "kind": "report",
+          "claims": null,
+          "text": "Created package.json (type=module, test=node --test), src/slug.js (slugify), test/slug.test.js (5 node:test cases incl. empty->item). npm test passes 5/5."
+        },
+        {
+          "sequence": 9,
+          "direction": "from_worker",
+          "kind": "submit",
+          "claims": {
+            "tests": "pass"
+          },
+          "text": "Added package.json (type module, test script node --test), src/slug.js exporting slugify, and test/slug.test.js with 5 node:test/node:assert cases including empty-result->item. Ran 'npm test' in /workspace: 5 tests, 5 pass, 0 fail. No deps, no network. Note: /pack/checks/npm-test.sh not present in this container so I could not run the platform check directly."
+        }
+      ],
+      "model_calls_usage": [
+        {
+          "input_tokens": 24628,
+          "output_tokens": 1347,
+          "cached_input_tokens": 20864
+        }
+      ],
+      "evidence": [
+        {
+          "check": "npm-test",
+          "exit_code": 0,
+          "timed_out": false,
+          "duration_ms": 25681,
+          "output_bytes": 471,
+          "workspace_sha256": "84415c8f0d19559f639d739038fad57daedf161f70168e686effd9ce1bb67320"
+        }
+      ],
+      "check_output_head": "\n> slug-project@1.0.0 test\n> node --test\n\n✔ lowercases the text (1.377911ms)\n✔ collapses runs of non-alphanumeric characters into a single hyphen (0.232585ms)\n✔ removes leading and trailing hyphens (0.208206ms)\n✔ keeps digits (1.320133ms)\n✔ returns \"item\" for input that produces an empty slug (0.250275ms)\nℹ tests 5\nℹ suites 0\nℹ pass 5\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 147.723381\n\nplatform: check infrastructure failed\n",
+      "claimed_tests": "pass",
+      "harness_pass": false
+    },
+    {
+      "runtime": "openclaw",
+      "profile": "openclaw-main",
+      "task_id": "c98e250c-b9dd-4ef8-83a2-cf7d2fe8de18",
+      "status": "failed",
+      "error": "Docker cleanup previously failed; operator recovery required",
+      "outcome": "none",
+      "acceptance_state": "skipped",
+      "false_green": false,
+      "elapsed_ms": 5028,
+      "messages": [],
+      "model_calls_usage": [],
+      "evidence": [],
+      "claimed_tests": null,
+      "harness_pass": false
+    }
+  ],
+  "paid_provider": true,
+  "pass": false,
+  "image_id": "sha256:7ae91504ac77c146cc07abb6982f93a805cec34ae5b3328a736a1f4aa0159ba3",
+  "key_leaks": 0
+}

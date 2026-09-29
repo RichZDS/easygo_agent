@@ -1,0 +1,62 @@
+{
+  "scope": "P1 harness live sample",
+  "state": "/tmp/eglive/r-wd7ynQ",
+  "model": "deepseek-flash",
+  "base_image": "easygo-task-runtime:platform",
+  "image": "easygo-task-runtime:acl-live",
+  "runtimes": [
+    {
+      "runtime": "codex",
+      "profile": "codex-responses",
+      "task_id": "fb0122e1-7343-4b43-a4e9-fdfc5d7ea072",
+      "status": "succeeded",
+      "error": null,
+      "outcome": "submitted",
+      "acceptance_state": "passed",
+      "false_green": false,
+      "elapsed_ms": 20027,
+      "messages": [
+        {
+          "sequence": 6,
+          "direction": "from_worker",
+          "kind": "report",
+          "claims": null,
+          "text": "Created package.json (type module, test script), src/slug.js (slugify), test/slug.test.js (5 cases). npm test passes 5/5. Submitting for review."
+        },
+        {
+          "sequence": 7,
+          "direction": "from_worker",
+          "kind": "submit",
+          "claims": {
+            "tests": "pass"
+          },
+          "text": "Created npm ES module project: package.json with \"type\":\"module\" and test script \"node --test\"; src/slug.js exporting slugify(text) (lowercase, collapse non-[a-z0-9] runs to single hyphen, trim hyphens, empty->\"item\"); test/slug.test.js using node:test/node:assert with 5 cases incl. the \"item\" case. Ran npm test: 5/5 pass. Note: platform check /pack/checks/npm-test.sh not present in this container"
+        }
+      ],
+      "model_calls_usage": [
+        {
+          "input_tokens": 80066,
+          "output_tokens": 1216,
+          "cached_input_tokens": 77824
+        }
+      ],
+      "evidence": [
+        {
+          "check": "npm-test",
+          "exit_code": 0,
+          "timed_out": false,
+          "duration_ms": 601,
+          "output_bytes": 404,
+          "workspace_sha256": "c12e9a73869740f99a47b19ba9a942b6a8d151f4292a44fe4fdba0b5d0b825b6"
+        }
+      ],
+      "check_output_head": "\n> slug-project@1.0.0 test\n> node --test\n\n✔ lowercases and hyphenates spaces (1.084748ms)\n✔ collapses runs of non-alphanumeric characters (0.148597ms)\n✔ trims leading and trailing hyphens (0.111737ms)\n✔ returns 'item' when nothing remains (0.845112ms)\n✔ keeps digits (0.189347ms)\nℹ tests 5\nℹ suites 0\nℹ pass 5\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 72.959049\n",
+      "claimed_tests": "pass",
+      "harness_pass": true
+    }
+  ],
+  "paid_provider": true,
+  "pass": true,
+  "image_id": "sha256:7ae91504ac77c146cc07abb6982f93a805cec34ae5b3328a736a1f4aa0159ba3",
+  "key_leaks": 0
+}

@@ -1,4 +1,10 @@
-# EasyGo RPC Services
+# EasyGo Agent 集群
+
+EasyGo 是一个可以快速部署的**通用 Agent 集群基础版**，只负责 Agent 的运行、通信、协作、质量和交付，不负责具体业务。使用者在它上面加一个 Agent 包（角色、工作流、技能、工具、验收检查），就能改造成专用 Agent。
+
+目前已经完成的是"运行"和服务间通信：下面的三个服务和托管平台。协作、质量闸、交付和 Agent 包还在设计阶段，见[定位与设计草案](doc/agent-cluster-design.md)。
+
+## 三个服务
 
 三个可以分别部署的服务，通过 **JSON-RPC over HTTPS + 双向 TLS** 调用。每个服务拥有自己的私钥；对端根据公钥证书确认身份，再检查方法和 namespace 权限。
 

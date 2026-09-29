@@ -155,7 +155,7 @@ func (r *CommandRunner) Run(ctx context.Context, in Invocation, emit func(Event)
 			cmd.Env = append(cmd.Env, name+"="+value)
 		}
 		sort.Strings(cmd.Env)
-		cmd.Stdin = strings.NewReader(in.Workflow.Instructions + "\n\nUser input:\n" + in.Input)
+		cmd.Stdin = strings.NewReader(invocationPrompt(in))
 		if err := configureProcess(cmd); err != nil {
 			return err
 		}

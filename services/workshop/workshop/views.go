@@ -26,6 +26,7 @@ const (
 // TaskSummary omits private workspace/configuration and earlier run payloads.
 // Truncation flags describe previews; raw operator endpoints retain full data.
 type TaskSummary struct {
+	RunIDs    []string     `json:"run_ids"`
 	Runtime   string       `json:"runtime,omitempty"`
 	Engine    string       `json:"engine"`
 	Model     string       `json:"model"`
@@ -37,6 +38,10 @@ type TaskSummary struct {
 }
 
 type RunSummary struct {
+	Outcome            string     `json:"outcome,omitempty"`
+	AcceptanceState    string     `json:"acceptance_state"`
+	FalseGreen         bool       `json:"false_green"`
+	EvidenceCount      int        `json:"evidence_count"`
 	ID                 string     `json:"id"`
 	Status             Status     `json:"status"`
 	Error              string     `json:"error,omitempty"`
@@ -63,10 +68,14 @@ type TaskMetadata struct {
 }
 
 type RunMetadata struct {
-	ID            string `json:"id"`
-	Status        Status `json:"status"`
-	TextBytes     int    `json:"text_bytes"`
-	ArtifactCount int    `json:"artifact_count"`
+	Outcome         string `json:"outcome,omitempty"`
+	AcceptanceState string `json:"acceptance_state"`
+	FalseGreen      bool   `json:"false_green"`
+	EvidenceCount   int    `json:"evidence_count"`
+	ID              string `json:"id"`
+	Status          Status `json:"status"`
+	TextBytes       int    `json:"text_bytes"`
+	ArtifactCount   int    `json:"artifact_count"`
 }
 
 type TaskPage struct {
@@ -97,12 +106,15 @@ func prefix(text string, maxBytes int) string {
 }
 
 func summarize(task *Task) TaskSummary {
-	out := TaskSummary{Runtime: task.Workflow.Runtime, Engine: task.Workflow.Engine, Model: task.Workflow.Model, ID: task.ID, Namespace: task.Namespace, Status: task.Status, RunCount: len(task.Runs), Runs: []RunSummary{}}
+	out := TaskSummary{Runtime: task.Workflow.Runtime, Engine: task.Workflow.Engine, Model: task.Workflow.Model, ID: task.ID, Namespace: task.Namespace, Status: task.Status, RunCount: len(task.Runs), Runs: []RunSummary{}, RunIDs: []string{}}
+	for _, run := range task.Runs {
+		out.RunIDs = append(out.RunIDs, run.ID)
+	}
 	if len(task.Runs) == 0 {
 		return out
 	}
 	run := task.Runs[len(task.Runs)-1]
-	r := RunSummary{ID: run.ID, Status: run.Status, Error: prefix(run.Error, summaryErrorBytes), Text: prefix(run.Text, summaryTextBytes), TextBytes: len(run.Text), ArtifactCount: len(run.Artifacts), Artifacts: []Artifact{}}
+	r := RunSummary{Outcome: run.Outcome, AcceptanceState: "skipped", ID: run.ID, Status: run.Status, Error: prefix(run.Error, summaryErrorBytes), Text: prefix(run.Text, summaryTextBytes), TextBytes: len(run.Text), ArtifactCount: len(run.Artifacts), Artifacts: []Artifact{}}
 	r.ErrorTruncated = len(r.Error) < len(run.Error)
 	r.TextTruncated = len(r.Text) < len(run.Text)
 	for _, artifact := range run.Artifacts {
@@ -157,7 +169,7 @@ func (s *Service) ListPage(namespace string, offset, limit int) (*TaskPage, erro
 		item := TaskMetadata{Runtime: task.Workflow.Runtime, Engine: task.Workflow.Engine, Model: task.Workflow.Model, ID: task.ID, Namespace: task.Namespace, Status: task.Status, RunCount: len(task.Runs), Runs: []RunMetadata{}}
 		if len(task.Runs) > 0 {
 			run := task.Runs[len(task.Runs)-1]
-			item.Runs = append(item.Runs, RunMetadata{ID: run.ID, Status: run.Status, TextBytes: len(run.Text), ArtifactCount: len(run.Artifacts)})
+			item.Runs = append(item.Runs, RunMetadata{Outcome: run.Outcome, AcceptanceState: "skipped", ID: run.ID, Status: run.Status, TextBytes: len(run.Text), ArtifactCount: len(run.Artifacts)})
 		}
 		page.Tasks = append(page.Tasks, item)
 	}

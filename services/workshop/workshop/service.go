@@ -27,23 +27,24 @@ var keysBucket = []byte("idempotency")
 // Service owns an exclusive bbolt lock and a bounded set of worker goroutines.
 // Namespace must come from a trusted caller, never model-generated arguments.
 type Service struct {
-	mu              sync.Mutex
-	db              *bolt.DB
-	root            string
-	workflows       map[string]Workflow
-	runtimes        map[string]RuntimeProfile
-	runner          Runner
-	queue           chan string
-	slots           chan struct{}
-	stop            chan struct{}
-	active          map[string]context.CancelFunc
-	resumeScans     map[string]struct{}
-	resumeQuotaScan func(context.Context, string) error // nil uses Docker CheckDiskQuota; test seam
-	wg              sync.WaitGroup
-	closed          bool
-	closeOnce       sync.Once
-	closeErr        error
-	err             error // durability failure: reject subsequent mutations
+	workerInstructions string
+	mu                 sync.Mutex
+	db                 *bolt.DB
+	root               string
+	workflows          map[string]Workflow
+	runtimes           map[string]RuntimeProfile
+	runner             Runner
+	queue              chan string
+	slots              chan struct{}
+	stop               chan struct{}
+	active             map[string]context.CancelFunc
+	resumeScans        map[string]struct{}
+	resumeQuotaScan    func(context.Context, string) error // nil uses Docker CheckDiskQuota; test seam
+	wg                 sync.WaitGroup
+	closed             bool
+	closeOnce          sync.Once
+	closeErr           error
+	err                error // durability failure: reject subsequent mutations
 }
 
 // Workflows returns a name-sorted metadata catalog. Each call returns independent
@@ -115,6 +116,10 @@ func New(cfg Config, runner Runner) (*Service, error) {
 		return nil, err
 	}
 	s := &Service{root: root, workflows: map[string]Workflow{}, runtimes: map[string]RuntimeProfile{}, runner: runner, queue: make(chan string, cfg.Concurrency+cfg.QueueCapacity), slots: make(chan struct{}, cfg.Concurrency+cfg.QueueCapacity), stop: make(chan struct{}), active: map[string]context.CancelFunc{}, resumeScans: map[string]struct{}{}}
+	s.workerInstructions, err = readWorkerInstructions(cfg.PackDir)
+	if err != nil {
+		return nil, err
+	}
 	for id, p := range cfg.RuntimeProfiles {
 		if strings.TrimSpace(id) == "" || len(id) > 128 {
 			return nil, ErrInvalid
@@ -210,6 +215,9 @@ func New(cfg Config, runner Runner) (*Service, error) {
 			}
 			if !terminal(task.Status) {
 				finish(&task, Interrupted, "service restarted; explicit resume required")
+				if err := finishCrewOutcome(tx, &task); err != nil {
+					return err
+				}
 				recovered = append(recovered, &task)
 			}
 			return nil
@@ -443,6 +451,9 @@ func (s *Service) Cancel(namespace, id string) (*Task, error) {
 		}
 		if task.Status == Queued {
 			finish(task, Cancelled, "cancelled before start")
+			if err := finishCrewOutcome(tx, task); err != nil {
+				return err
+			}
 		} else {
 			task.Status = Cancelling
 			task.Runs[len(task.Runs)-1].Status = Cancelling
@@ -473,6 +484,9 @@ func (s *Service) Resume(namespace, id, input string) (*Task, error) {
 	task, err := s.Get(namespace, id)
 	if err != nil {
 		return nil, err
+	}
+	if len(task.Runs) >= 256 {
+		return nil, ErrRunLimit
 	}
 	if !terminal(task.Status) || task.SessionID == "" {
 		return nil, ErrConflict
@@ -509,6 +523,9 @@ func (s *Service) Resume(namespace, id, input string) (*Task, error) {
 			}
 			return nil, err
 		}
+		if len(task.Runs) >= 256 {
+			return nil, ErrRunLimit
+		}
 		if !terminal(task.Status) || task.ID != scanID || task.Workspace != workspace || task.SessionID != sessionID || len(task.Runs) != runCount {
 			return nil, ErrConflict
 		}
@@ -521,6 +538,9 @@ func (s *Service) Resume(namespace, id, input string) (*Task, error) {
 	task.Status, task.UpdatedAt = Queued, time.Now().UTC()
 	task.Runs = append(task.Runs, Run{ID: uuid.NewString(), Input: input, ResumeSessionID: task.SessionID, Status: Queued})
 	err = s.db.Update(func(tx *bolt.Tx) error {
+		if err := resumeCrewInput(tx, task); err != nil {
+			return err
+		}
 		if err := putTask(tx, task); err != nil {
 			return err
 		}
@@ -610,7 +630,7 @@ func (s *Service) execute(id string) {
 	}
 	s.mu.Unlock()
 	defer cancel()
-	result, runErr := s.runner.Run(ctx, Invocation{Namespace: task.Namespace, Workflow: task.Workflow, Workspace: task.Workspace, Input: run.Input, SessionID: run.ResumeSessionID}, func(event Event) error {
+	result, runErr := s.runner.Run(ctx, Invocation{Crew: runCrew{service: s, namespace: task.Namespace, taskID: task.ID, runID: run.ID}, WorkerInstructions: s.workerInstructions, Namespace: task.Namespace, Workflow: task.Workflow, Workspace: task.Workspace, Input: run.Input, SessionID: run.ResumeSessionID}, func(event Event) error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		err := s.db.Update(func(tx *bolt.Tx) error {
@@ -658,6 +678,9 @@ func (s *Service) execute(id string) {
 			status, reason = Failed, runErr.Error()
 		}
 		finish(current, status, reason)
+		if err := finishCrewOutcome(tx, current); err != nil {
+			return err
+		}
 		r := &current.Runs[len(current.Runs)-1]
 		r.Text, r.Usage = result.Text, result.Usage
 		if status == Succeeded {
@@ -681,6 +704,7 @@ func finish(task *Task, status Status, reason string) {
 	task.Status, task.UpdatedAt = status, now
 	run := &task.Runs[len(task.Runs)-1]
 	run.Status, run.FinishedAt, run.Error = status, &now, reason
+	run.Outcome = "none"
 }
 
 func collectArtifacts(workspace string, paths []string) ([]Artifact, error) {
@@ -738,6 +762,9 @@ func (s *Service) Close() error {
 				}
 				if !terminal(task.Status) {
 					finish(&task, Interrupted, "service stopped; explicit resume required")
+					if err := finishCrewOutcome(tx, &task); err != nil {
+						return err
+					}
 					tasks = append(tasks, &task)
 				}
 				return nil

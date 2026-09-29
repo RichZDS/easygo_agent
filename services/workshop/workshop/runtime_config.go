@@ -34,7 +34,7 @@ func apiName(protocol string) string {
 	return map[string]string{"responses": "openai-responses", "anthropic": "anthropic-messages", "chat_completions": "openai-completions"}[protocol]
 }
 func reservedEnvironment(name string) bool {
-	return name == "HOME" || name == "PATH" || name == "CODEX_HOME" || name == "CLAUDE_CONFIG_DIR" || name == "NODE_OPTIONS" || name == "LD_PRELOAD" || name == "LD_LIBRARY_PATH" || strings.HasPrefix(name, "XDG_") || strings.HasPrefix(name, "PI_") || strings.HasPrefix(name, "OPENCLAW_") || strings.HasPrefix(name, "EASYGO_RUNTIME_")
+	return name == "HOME" || name == "PATH" || name == "CODEX_HOME" || name == "CLAUDE_CONFIG_DIR" || name == "NODE_OPTIONS" || name == "LD_PRELOAD" || name == "LD_LIBRARY_PATH" || strings.HasPrefix(name, "XDG_") || strings.HasPrefix(name, "PI_") || strings.HasPrefix(name, "OPENCLAW_") || strings.HasPrefix(name, "EASYGO_RUNTIME_") || strings.HasPrefix(name, "EASYGO_CREW_")
 }
 
 // configureRuntime returns task-only args/env. Secret values stay in process
@@ -54,10 +54,12 @@ func (r *CommandRunner) configureRuntime(ctx context.Context, in Invocation, arg
 	baseURL, key := p.BaseURL, ""
 	if p.GatewayModel != "" {
 		var err error
-		baseURL, key, cleanup, err = startModelRelay(ctx, r.gateway, in.Namespace, *p)
+		baseURL, key, cleanup, err = startModelRelay(ctx, r.gateway, in.Namespace, *p, in.Crew)
 		if err != nil {
 			return nil, nil, func() {}, err
 		}
+		env["EASYGO_CREW_URL"] = strings.TrimSuffix(baseURL, "/v1") + "/crew"
+		env["EASYGO_CREW_TOKEN"] = key
 	} else {
 		key = os.Getenv(p.APIKeyEnv)
 		if key == "" {
@@ -134,7 +136,7 @@ func configureRuntimeEndpoint(in Invocation, args []string, env map[string]strin
 		if session == "" {
 			session = uuid.NewString()
 		}
-		args = append(args, "--session-id", session, "--message", in.Workflow.Instructions+"\n\nUser input:\n"+in.Input)
+		args = append(args, "--session-id", session, "--message", invocationPrompt(in))
 	}
 	return args, nil
 }

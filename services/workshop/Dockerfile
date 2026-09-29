@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
  && rm -rf /var/lib/apt/lists/* && mkdir /data && chown 1000:1000 /data
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=build /out/server /usr/local/bin/server
+COPY packs/base /opt/easygo/packs/base
 WORKDIR /
 USER 1000:1000
 EXPOSE 8443

@@ -243,3 +243,29 @@ recovery; it does not claim to simulate a machine power loss.
 Design references were read only: reference runner C's engine profiles, subprocess launch and
 resume logic, normalized activity and workflow models. The implementation avoids
 its business workflow state machine, deployment hooks and compatibility layers.
+
+
+## P1 施工者通道
+
+配置 `pack_dir` 可加载 `<pack_dir>/roles/worker.md`（可选，UTF-8，最多 16 KiB）。controller 镜像内置 `/opt/easygo/packs/base`。工坊在工作流说明之前插入施工者说明，保留 `User input:\n` 输入分隔符；未配置 pack 时沿用原输入。
+
+任务容器和带模型 relay 的 host 任务会收到 `EASYGO_CREW_URL`、`EASYGO_CREW_TOKEN`。`easygo-crew` 复用该 relay，通过 `report` 汇报、`ask` 提问、`blocked` 报卡住、`submit --tests pass|fail|not_run` 报审，用 `inbox [--after N]` 收取工头消息。每次提交有持久化 id/sequence 回执；网络失败最多重试三次，复用 client_id。没有通道时命令退出 2。
+
+工头用 `workshop.message` 写入任务收件箱，用 `workshop.events` 读取 `crew.message` 和 `crew.read`。消息支持幂等键；运行中可读取，任务停止后收到的未读消息在下次 resume 输入中补入并标记已读。每个 run 的施工者消息最多 200 条，收件箱每页最多 50 条。JSON 字段、大小和鉴权要求见 [P1 契约](../contracts/rpc-v1.md#p1-harness-扩展v13)。
+
+run 结束后 `outcome` 按最后一条 submit/blocked/ask 判定为 submitted/blocked/asked；没有则为 none，report 不改变判定。进行中的 run 不输出 outcome。任务最多 256 个 run，get 的 `run_ids` 提供按时间排列的完整 id 集合。
+
+### 离线 crew 夹具
+
+`fixture-cli` 接受 `{"mode":"crew","script":[...]}`。脚本按顺序执行：
+
+| op | 字段与作用 |
+|---|---|
+| crew | `args`：easygo-crew 参数数组，如 `["report","started"]` 或 `["submit","--tests","pass","ready"]` |
+| write | `path` 为工作区相对路径，`text` 为文件内容 |
+| inbox | 轮询至收到消息；`text` 可指定匹配片段，`after` 缺省 0，`timeout_ms` 缺省 5000、上限 60000 |
+| duplicate | 用相同 `client_id`/`kind`/`text` 连续 POST 两次，核对同一回执；kind 缺省 report，submit 时另带 tests |
+| silent | 只发 native 成功终止事件，不发 crew 消息，然后退出 |
+| exit | `exit_code` 为 0 时 native 成功退出，为 1..125 时失败退出 |
+
+命令回执和 inbox 响应作为 native 文本事件输出，便于场景库检查。脚本结束默认 native 成功退出。`silent` 在空脚本或只有此动作时产生 outcome=none。

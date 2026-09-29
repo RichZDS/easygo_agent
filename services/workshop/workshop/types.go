@@ -5,6 +5,7 @@ package workshop
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -13,6 +14,7 @@ var (
 	ErrWorkflow = errors.New("unknown workflow")
 	ErrFull     = errors.New("workshop capacity reached")
 	ErrConflict = errors.New("task state or idempotency conflict")
+	ErrRunLimit = fmt.Errorf("%w: run_limit", ErrConflict)
 	ErrClosed   = errors.New("workshop closed")
 	ErrInvalid  = errors.New("invalid request")
 )
@@ -51,6 +53,7 @@ type EngineConfig struct {
 }
 
 type Config struct {
+	PackDir         string                    `json:"pack_dir,omitempty"`
 	Sandbox         SandboxConfig             `json:"sandbox,omitempty"`
 	RuntimeProfiles map[string]RuntimeProfile `json:"runtime_profiles,omitempty"`
 	ModelGateway    *ModelGateway             `json:"model_gateway,omitempty"`
@@ -99,6 +102,7 @@ type Artifact struct {
 }
 
 type Run struct {
+	Outcome         string     `json:"outcome,omitempty"`
 	ID              string     `json:"id"`
 	Input           string     `json:"input"`
 	ResumeSessionID string     `json:"resume_session_id,omitempty"`
@@ -127,21 +131,25 @@ type Task struct {
 }
 
 type Event struct {
-	Sequence  uint64    `json:"sequence"`
-	RunID     string    `json:"run_id"`
-	Time      time.Time `json:"time"`
-	Kind      string    `json:"kind"`
-	Text      string    `json:"text,omitempty"`
-	SessionID string    `json:"session_id,omitempty"`
-	Usage     *Usage    `json:"usage,omitempty"`
+	Message   *CrewMessage `json:"message,omitempty"`
+	Read      *CrewRead    `json:"read,omitempty"`
+	Sequence  uint64       `json:"sequence"`
+	RunID     string       `json:"run_id"`
+	Time      time.Time    `json:"time"`
+	Kind      string       `json:"kind"`
+	Text      string       `json:"text,omitempty"`
+	SessionID string       `json:"session_id,omitempty"`
+	Usage     *Usage       `json:"usage,omitempty"`
 }
 
 type Invocation struct {
-	Namespace string
-	Workflow  Workflow
-	Workspace string
-	Input     string
-	SessionID string
+	Crew               CrewChannel
+	WorkerInstructions string
+	Namespace          string
+	Workflow           Workflow
+	Workspace          string
+	Input              string
+	SessionID          string
 }
 
 type Result struct {

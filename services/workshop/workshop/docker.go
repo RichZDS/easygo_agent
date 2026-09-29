@@ -462,7 +462,7 @@ func (r *DockerRunner) Run(ctx context.Context, in Invocation, emit func(Event) 
 		return result, err
 	}
 	socket := filepath.Join(relay, relaySocketName)
-	_, key, stop, err := startModelRelayOn(ctx, r.gateway, in.Namespace, *p, "unix", socket)
+	_, key, stop, err := startModelRelayOn(ctx, r.gateway, in.Namespace, *p, "unix", socket, in.Crew)
 	if err != nil {
 		return result, err
 	}
@@ -471,6 +471,8 @@ func (r *DockerRunner) Run(ctx context.Context, in Invocation, emit func(Event) 
 		return result, err
 	}
 	env := map[string]string{"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/workspace/.workshop-home", "CODEX_HOME": "/workspace/.workshop-home/codex", "CLAUDE_CONFIG_DIR": "/workspace/.workshop-home/claude", "TMPDIR": "/tmp", "EASYGO_RELAY_SOCKET": runtimeRelay + "/" + relaySocketName}
+	env["EASYGO_CREW_URL"] = "http://127.0.0.1:18080/crew"
+	env["EASYGO_CREW_TOKEN"] = key
 	childIn := in
 	childIn.Workspace = runtimeWorkspace
 	args, err = configureRuntimeEndpoint(childIn, args, env, "http://127.0.0.1:18080/v1", key, func(path string, v any) error {
@@ -551,7 +553,7 @@ func (r *DockerRunner) Run(ctx context.Context, in Invocation, emit func(Event) 
 		}
 	}()
 	result, err = runNative(runCtx, in.Workflow.Engine, r.maxOutput, []string{key}, emit, func(childCtx context.Context, stdout, stderr io.Writer) error {
-		return r.command(childCtx, strings.NewReader(in.Workflow.Instructions+"\n\nUser input:\n"+in.Input), stdout, stderr, "start", "--attach", "--interactive", name)
+		return r.command(childCtx, strings.NewReader(invocationPrompt(in)), stdout, stderr, "start", "--attach", "--interactive", name)
 	})
 	stopMonitor()
 	if quotaErr := <-quotaDone; quotaErr != nil {

@@ -198,6 +198,9 @@ func TestDockerRunUsesUDSOnlyAndCleansUp(t *testing.T) {
 				socketDir = strings.Split(strings.TrimPrefix(c.args[i+1], "type=bind,src="), ",")[0]
 			}
 		}
+		if env["EASYGO_CREW_URL"] != "http://127.0.0.1:18080/crew" || env["EASYGO_CREW_TOKEN"] != env["EASYGO_RUNTIME_API_KEY"] {
+			t.Fatal("crew environment missing or not run-scoped")
+		}
 		if env["HOME"] != "/workspace/.workshop-home" || env["EASYGO_RELAY_SOCKET"] != "/run/easygo-relay/model.sock" || env["EASYGO_RUNTIME_API_KEY"] == "" {
 			t.Fatal(env)
 		}

@@ -3,7 +3,8 @@ FROM golang:1.25-bookworm AS build
 COPY packages/rpc-go /src/packages/rpc-go
 COPY services/workshop /src/services/workshop
 WORKDIR /src/services/workshop
-RUN CGO_ENABLED=0 go build -trimpath -o /out/task-shim ./cmd/task-shim
+RUN CGO_ENABLED=0 go build -trimpath -o /out/easygo-crew ./cmd/easygo-crew \
+ && CGO_ENABLED=0 go build -trimpath -o /out/task-shim ./cmd/task-shim
 
 FROM node:26-bookworm-slim
 ARG CODEX_VERSION=0.157.1
@@ -18,6 +19,7 @@ RUN apt-get update \
  "@earendil-works/pi-coding-agent@${PI_VERSION}" "openclaw@${OPENCLAW_VERSION}" \
  && npm cache clean --force
 COPY --from=build /out/task-shim /usr/local/bin/task-shim
+COPY --from=build /out/easygo-crew /usr/local/bin/easygo-crew
 RUN mkdir -p /workspace /run/easygo-relay && chown 1000:1000 /workspace
 USER 1000:1000
 WORKDIR /workspace

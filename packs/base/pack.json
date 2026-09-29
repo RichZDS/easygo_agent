@@ -1,0 +1,6 @@
+{
+  "name": "base",
+  "version": "1.0.0",
+  "description": "General worker communication and platform acceptance conventions",
+  "roles": {"worker": "roles/worker.md", "assistant": "roles/assistant.md"}
+}

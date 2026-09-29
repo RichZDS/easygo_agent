@@ -107,6 +107,18 @@ func Methods(service *workshop.Service) map[string]rpc.Method {
 			}
 			return summary(service.Cancel(p.Namespace, p.TaskID))
 		},
+		"workshop.message": func(ctx context.Context, raw json.RawMessage, stream *rpc.Stream) (any, *rpc.Error) {
+			var p struct {
+				taskParams
+				Text           string `json:"text"`
+				IdempotencyKey string `json:"idempotency_key"`
+			}
+			if rpc.Decode(raw, &p) != nil {
+				return nil, rpc.InvalidParams()
+			}
+			out, err := service.Message(p.Namespace, p.TaskID, p.Text, p.IdempotencyKey)
+			return out, domainError(err)
+		},
 		"workshop.resume": func(ctx context.Context, raw json.RawMessage, s *rpc.Stream) (any, *rpc.Error) {
 			var p struct {
 				taskParams
@@ -195,6 +207,8 @@ func domainError(e error) *rpc.Error {
 		return rpc.Failure(-32015, "disk_quota_scan_failed")
 	case errors.Is(e, workshop.ErrArtifactTooLarge):
 		return rpc.Failure(-32013, "artifact_too_large")
+	case errors.Is(e, workshop.ErrRunLimit):
+		return rpc.Failure(-32009, "run_limit")
 	case errors.Is(e, workshop.ErrConflict):
 		return rpc.Failure(-32009, "conflict")
 	case errors.Is(e, workshop.ErrFull):

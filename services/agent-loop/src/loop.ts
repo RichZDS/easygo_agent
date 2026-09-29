@@ -2,7 +2,8 @@ import type { Config, Message, Request, Response, Run } from './types.js';
 import { RpcClient } from './rpc.js';
 import { Store } from './store.js';
 import type { Knowledge } from './knowledge/index.js';
-import { executeTool, recoverableToolError, TOOLS } from './tools.js';
+import { createToolRegistry, type ToolRegistry } from './tools/index.js';
+import { systemPrompt } from './tools/roles.js';
 import { object, RpcError, string } from './validation.js';
 
 export const RUN_TIMEOUT_MS = 10 * 60_000;
@@ -34,9 +35,13 @@ export class Loop {
   private heartbeat: NodeJS.Timeout;
   private gateway: RpcClient;
   private workshop: RpcClient;
+  private tools: ToolRegistry;
+  private prompt: string | undefined;
   constructor(private config: Config, private store: Store) {
+    this.prompt = systemPrompt(config);
     this.gateway = new RpcClient(config.tls, config.gateway);
     this.workshop = new RpcClient(config.tls, config.workshop);
+    this.tools = createToolRegistry(this.workshop);
     this.heartbeat = setInterval(() => {
       try { store.heartbeat(); this.syncKnowledge(); }
       catch { this.stopped = true; for (const work of this.active.values()) work.controller.abort(new RpcError(-32603, 'ownership_lost')); this.gateway.close(); this.workshop.close(); }
@@ -53,7 +58,8 @@ export class Loop {
     if (!Array.isArray(result)) throw new RpcError(-32000, 'invalid_workshop_catalog');
     return result;
   }
-  attachKnowledge(knowledge: Knowledge) { this.knowledge=knowledge; this.syncKnowledge(); knowledge.start(); }
+  attachKnowledge(knowledge: Knowledge) { this.tools=createToolRegistry(this.workshop, knowledge); this.knowledge=knowledge; }
+  startKnowledge() { this.syncKnowledge(); this.knowledge?.start(); }
   private syncKnowledge() {
     if (!this.knowledge || this.stopped) return;
     for (const item of this.store.knowledgePending()) {
@@ -67,7 +73,7 @@ export class Loop {
   }
   async workshopCall(method:string,params:Record<string,unknown>):Promise<unknown> {
     this.assertAvailable();
-    if (!['workshop.submit','workshop.get','workshop.list','workshop.cancel','workshop.resume','workshop.result','workshop.events','workshop.artifact'].includes(method)) throw new RpcError(-32601,'method_not_found');
+    if (!['workshop.submit','workshop.get','workshop.list','workshop.cancel','workshop.resume','workshop.result','workshop.events','workshop.artifact','workshop.message','workshop.evidence'].includes(method)) throw new RpcError(-32601,'method_not_found');
     return this.workshop.call(method,params,this.background.signal);
   }
   kick() {
@@ -96,8 +102,8 @@ export class Loop {
     await this.knowledge?.close();
   }
   private request(run:Run, messages: Message[], enabled: boolean): Request {
-    const system: Message[] = this.config.system_prompt ? [{ role: 'system', content: [{ type: 'text', text: this.config.system_prompt }] }] : [];
-    return { model: this.config.model ?? 'chat', messages: [...system,...(this.knowledge?.prompt(run.namespace)??[]), ...messages], ...(enabled ? { tools: [...TOOLS,...(this.knowledge?.tools()??[])] } : { tool_choice: 'none' }) };
+    const system: Message[] = this.prompt ? [{ role: 'system', content: [{ type: 'text', text: this.prompt }] }] : [];
+    return { model: this.config.model ?? 'chat', messages: [...system,...(this.knowledge?.prompt(run.namespace)??[]), ...messages], ...(enabled ? { tools: this.tools.definitions('assistant') } : { tool_choice: 'none' }) };
   }
   private async generate(run: Run, request: Request, signal: AbortSignal, summary = false): Promise<Response> {
     signal.throwIfAborted(); this.store.assertOwner();
@@ -155,8 +161,7 @@ export class Loop {
         for (const call of calls) {
           signal.throwIfAborted(); this.store.assertOwner();
           let result: unknown;
-          const knowledgeTool=this.knowledge?.tools().some(t=>t.name===call.name)??false;
-          try { result = knowledgeTool ? await this.knowledge!.execute(call,run.namespace,signal) : await executeTool(call, run, this.workshop, signal); }
+          try { result = await this.tools.execute('assistant', call, run, signal); }
           catch (error) {
             signal.throwIfAborted();
             const code = error instanceof RpcError ? error.reason : error instanceof Error && error.name === 'TimeoutError' ? 'deadline_exceeded' : 'tool_failed';
@@ -164,7 +169,7 @@ export class Loop {
             const message: Message = { role: 'tool', content: [{ type: 'tool_result', id: call.id, name: call.name, text: JSON.stringify(data), is_error: true }] };
             // Failed commits still throw before any subsequent tool or model call.
             this.store.append(run, message, {}); messages.push(message);
-            if (!recoverableToolError(error) && !(knowledgeTool && error instanceof RpcError && [-32004,-32009].includes(error.code))) throw error;
+            if (!this.tools.recoverable('assistant', call.name, error)) throw error;
             continue;
           }
           signal.throwIfAborted();

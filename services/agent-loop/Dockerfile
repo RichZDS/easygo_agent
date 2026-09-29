@@ -21,6 +21,7 @@ COPY services/agent-loop/package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
 COPY services/agent-loop/web ./web
+COPY packs/base /opt/easygo/packs/base
 RUN mkdir -p /data && chown 1000:1000 /data
 USER 1000:1000
 EXPOSE 8442 8080

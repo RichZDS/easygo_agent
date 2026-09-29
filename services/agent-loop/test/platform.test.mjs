@@ -180,6 +180,20 @@ async function apiFixture(t, extra = {}) {
   return { app, call, register, seen, base, file: config.database };
 }
 
+test('HTTP workshop message and evidence use authenticated namespace and retain CSRF checks', async t => {
+  const {call,register,seen}=await apiFixture(t);
+  const user=await register('harness@example.test');
+  for(const method of ['workshop.message','workshop.evidence']) {
+    const params={task_id:'task',...(method==='workshop.message'?{text:'Continue',idempotency_key:'reply-1'}:{})};
+    assert.equal((await call('/api/rpc',{method,params})).status,401);
+    assert.equal((await call('/api/rpc',{method,params},user.cookie,{headers:{origin:'https://evil.test'}})).status,403);
+    assert.equal((await call('/api/rpc',{method,params:{...params,namespace:'other'}},user.cookie)).status,400);
+    assert.equal((await call('/api/rpc',{method,params},user.cookie)).status,200);
+    assert.deepEqual(seen.at(-1),{method,params:{...params,namespace:user.data.user.namespace}});
+  }
+  assert.equal(seen.length,2);
+});
+
 test('HTTP auth, zero signup, cookies, CSRF, role checks, namespace binding, allowlist and logout revocation', async t => {
   const { call, register, seen } = await apiFixture(t);
   assert.equal((await call('/api/me')).status, 401);

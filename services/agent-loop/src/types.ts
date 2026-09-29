@@ -22,7 +22,7 @@ export interface Config {
   knowledge?: import('./knowledge/index.js').KnowledgeConfig;
   listen?: string; tls: TLSConfig; authorization: Authorization[]; database?: string;
   gateway: Endpoint; workshop: Endpoint; model?: string; streaming?: boolean;
-  max_steps?: number; context_bytes?: number; concurrency?: number; system_prompt?: string;
+  max_steps?: number; context_bytes?: number; concurrency?: number; system_prompt?: string; pack_dir?: string;
 }
 export interface Run {
   id: string; namespace: string; session_id: string; status: 'queued' | 'running' | 'completed' | 'failed' | 'canceled' | 'interrupted';

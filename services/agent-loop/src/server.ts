@@ -13,7 +13,7 @@ import { METHODS, type Config } from './types.js';
 import { fields, integer, namespace, object, rpcFailure, RpcError, string } from './validation.js';
 
 export function parseConfig(value: unknown): Config {
-  const c = fields(value, ['listen', 'tls', 'authorization', 'database', 'gateway', 'workshop', 'model', 'streaming', 'max_steps', 'context_bytes', 'concurrency', 'system_prompt','platform','knowledge']);
+  const c = fields(value, ['listen', 'tls', 'authorization', 'database', 'gateway', 'workshop', 'model', 'streaming', 'max_steps', 'context_bytes', 'concurrency', 'system_prompt','pack_dir','platform','knowledge']);
   const tls = fields(c.tls, ['cert_file', 'key_file', 'ca_file']);
   for (const k of ['cert_file', 'key_file', 'ca_file']) string(tls[k], 4096);
   if (!Array.isArray(c.authorization)) throw new Error('authorization must be an array');
@@ -32,6 +32,10 @@ export function parseConfig(value: unknown): Config {
   }
   for (const k of ['listen', 'database', 'model']) if (c[k] !== undefined) string(c[k], 4096);
   if (c.system_prompt !== undefined && (typeof c.system_prompt !== 'string' || Buffer.byteLength(c.system_prompt) > 65536)) throw new Error('Invalid system_prompt');
+  if (c.pack_dir !== undefined) {
+    string(c.pack_dir, 4096);
+    if (c.system_prompt !== undefined) throw new Error('pack_dir conflicts with system_prompt');
+  }
   if (c.streaming !== undefined && typeof c.streaming !== 'boolean') throw new Error('Invalid streaming');
   integer(c.concurrency, 4, 32, 1); integer(c.max_steps, 20, 100, 0); integer(c.context_bytes, 128000, 4 * 1024 * 1024, 512);
   if(c.knowledge!==undefined){const k=fields(c.knowledge,['database','profile_limit','consolidate_interval_ms']);string(k.database,4096);integer(k.profile_limit,5,20,1);integer(k.consolidate_interval_ms,86400000,2147483647,1000);}
@@ -129,7 +133,10 @@ export async function startServer(input: Config) {
     }
   }
   try {
-    if(config.knowledge) knowledge=new Knowledge(config.knowledge,{generate:(ns,messages)=>loop.knowledgeGenerate(ns,messages)});
+    if(config.knowledge) {
+      knowledge=new Knowledge(config.knowledge,{generate:(ns,messages)=>loop.knowledgeGenerate(ns,messages)});
+      loop.attachKnowledge(knowledge);
+    }
     if(config.platform) platform=await createPlatform(config.platform,{rpc:async(method,params)=>{if(!ready||closing)throw new RpcError(-32029,'starting_or_stopping');return await dispatch(method,params);}});
   }catch(error){await knowledge?.close();await loop.close();store.close();throw error;}
   const server = https.createServer({ ...options, requestCert: true, maxHeaderSize: 16384 }, (req, res) => { void handle(req, res); });
@@ -138,7 +145,7 @@ export async function startServer(input: Config) {
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(address.port, address.host, () => { server.removeListener('error', reject); resolve(); }); });
   } catch (error) { await platform?.close();await knowledge?.close(); await loop.close(); store.close(); throw error; }
   ready=true;
-  if(knowledge)loop.attachKnowledge(knowledge);
+  loop.startKnowledge();
   loop.kick();
   let closePromise: Promise<void> | undefined;
   return {

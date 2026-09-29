@@ -253,7 +253,7 @@ packs/<name>/
 
 - **Web 是唯一的主控制台。** 班子看板、消息、证据、放行按钮只做在 Web 上，多人使用都走 Web。
 - **CLI 保留，只给个人用。** 登录者本人在终端里使用自己的会话、任务、记忆和技能。CLI 不做管理、钱包管理，也不做班子的看板、消息、证据和放行。
-- **CLI 先与旧应用断开。** 现在的 CLI（`cmd/easygo-remote`）是旧 Bubble Tea 界面加一层平台适配，依赖旧应用约 20 个类型和接口声明：`agentruntime.QueueManager` 与事件类型、`conversation` 的 run 记录与通知接口、`task.Store`。这些声明要先挪到一个小包里，这样 P5 移除旧应用时 CLI 不受影响。这项工作和 P1 并行，单独做。
+- **CLI 已与旧应用断开**（`58f57f6`）。CLI 现在只由 `internal/tui`、`internal/remotetui` 和新的 `internal/clientapi`（运行队列接口、run 记录、运行事件等共用声明）组成；旧应用的 `agentruntime`、`conversation` 改用类型别名引用这些声明，任务列表通过 `internal/app` 里的适配器接入。P5 移除旧应用时 CLI 不受影响，`TestCLIDependsOnlyOnClientPackages` 防止回退。`--rpc` 只接受 10 个记忆/技能方法。说明见 [cli.md](cli.md)。
 
 ## 10. 部署与模式（P5）
 
@@ -295,5 +295,5 @@ packs/<name>/
 | 09-29 | 放行闸 | 默认开启 |
 | 09-29 | 工头模型 | 默认强推理模型，包里可以换 |
 | 09-29 | 积分遗留问题 | 暂缓，先做协作和 harness |
-| 09-29 | 界面 | Web 是唯一的主控制台，班子相关只做在 Web；CLI 保留，只给个人用，先与旧应用断开（§9） |
+| 09-29 | 界面 | Web 是唯一的主控制台，班子相关只做在 Web；CLI 保留，只给个人用，已与旧应用断开（§9，`58f57f6`） |
 | 09-29 | Harness 的含义 | 按 §4 理解，已确认 |

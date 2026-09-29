@@ -637,25 +637,43 @@ func TestDockerCleanupDefersConfirmedStoppedContainerUntilSweep(t *testing.T) {
 	}
 }
 
-func TestDockerCleanupFailsClosedWhenStillRunning(t *testing.T) {
-	r, f, in := dockerFixture(t)
-	fastCleanupBackoff(r)
-	name := "still-running"
-	c := registerFakeContainer(r, f, name)
-	c.rmFailReal = 1000
-	c.State.Running = true
-	err := r.cleanup(name)
-	if err == nil || errors.Is(err, errCleanupDeferred) {
-		t.Fatalf("expected fail-closed, got %v", err)
-	}
-	r.mu.Lock()
-	broken := r.cleanupFailure
-	r.mu.Unlock()
-	if broken == nil {
-		t.Fatal("cleanupFailure not set for a still-running container")
-	}
-	if _, e := r.Run(context.Background(), in, func(Event) error { return nil }); e == nil {
-		t.Fatal("Run admitted after cleanup failure")
+// TestDockerCleanupFailsClosedWhenStillActive locks each of the three
+// still-active State fields to its own subtest, with Status already
+// "exited" so the fail-closed outcome can only come from the field under
+// test - never from an otherwise-ambiguous zero-value Status that would fail
+// closed on its own regardless (the same pitfall the foreman flagged for the
+// W-5 confirmation-transport-failure and label-mismatch tests).
+func TestDockerCleanupFailsClosedWhenStillActive(t *testing.T) {
+	for _, field := range []string{"Running", "Paused", "Restarting"} {
+		t.Run(field, func(t *testing.T) {
+			r, f, in := dockerFixture(t)
+			fastCleanupBackoff(r)
+			name := "still-active-" + field
+			c := registerFakeContainer(r, f, name)
+			c.rmFailReal = 1000
+			c.State.Status = "exited"
+			switch field {
+			case "Running":
+				c.State.Running = true
+			case "Paused":
+				c.State.Paused = true
+			case "Restarting":
+				c.State.Restarting = true
+			}
+			err := r.cleanup(name)
+			if err == nil || errors.Is(err, errCleanupDeferred) {
+				t.Fatalf("expected fail-closed, got %v", err)
+			}
+			r.mu.Lock()
+			broken := r.cleanupFailure
+			r.mu.Unlock()
+			if broken == nil {
+				t.Fatalf("cleanupFailure not set for %s=true", field)
+			}
+			if _, e := r.Run(context.Background(), in, func(Event) error { return nil }); e == nil {
+				t.Fatal("Run admitted after cleanup failure")
+			}
+		})
 	}
 }
 

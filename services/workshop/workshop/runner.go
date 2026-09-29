@@ -178,11 +178,8 @@ func runNative(ctx context.Context, engine string, maxOutput int, secrets []stri
 	err := execute(childCtx, parser, diagnostics)
 	parseErr := parser.finish()
 	result := parser.result
-	text := redact(diagnostics.buf.String())
-	truncated := diagnostics.overflow || len(text) > diagnosticLimit
-	if len(text) > diagnosticLimit {
-		text = text[:diagnosticLimit]
-	}
+	text, lenTruncated := redactAndBound(diagnostics.buf.String(), redact, secrets, diagnosticLimit)
+	truncated := diagnostics.overflow || lenTruncated
 	if truncated {
 		text += " [diagnostics truncated]"
 	}
@@ -242,6 +239,59 @@ func redactor(secrets []string) func(string) string {
 		}
 		return text
 	}
+}
+
+// minSecretSuffixLength is the shortest secret-prefix fragment worth
+// stripping from a truncation boundary. Shorter runs are common by chance
+// and not useful to an attacker.
+const minSecretSuffixLength = 4
+
+// secretPrefixSuffixLength returns the length of the longest suffix of text
+// that exactly equals a prefix (at least minLen long) of some secret. Every
+// candidate suffix ends at the same final byte of text, so the longest match
+// found across every secret and every length necessarily contains any
+// shorter one; the caller only needs to strip this one span.
+func secretPrefixSuffixLength(text string, secrets []string, minLen int) int {
+	longest := 0
+	for _, secret := range secrets {
+		upper := len(secret)
+		if upper > len(text) {
+			upper = len(text)
+		}
+		for n := upper; n >= minLen; n-- {
+			if text[len(text)-n:] == secret[:n] {
+				if n > longest {
+					longest = n
+				}
+				break
+			}
+		}
+	}
+	return longest
+}
+
+// redactAndBound is the one place that redacts and then bounds text length,
+// used by every diagnostic/result truncation site. Redacting first can only
+// shrink text (a whole secret becomes the shorter "[REDACTED]" marker), so an
+// earlier full match's removal shifts where a length limit lands, and that
+// cut can land inside a later, non-matching partial occurrence of a secret -
+// or inside a partial secret the raw capture itself was cut off mid-way
+// through, before redaction ever saw the full string. After bounding, this
+// strips the longest trailing run that exactly matches a secret's prefix, so
+// neither cause can leave a usable partial secret sitting at the boundary.
+// It only ever removes bytes, so limit is still respected, and it removes
+// the minimum necessary to do so, keeping as much of the surrounding text as
+// possible.
+func redactAndBound(raw string, redact func(string) string, secrets []string, limit int) (text string, truncated bool) {
+	text = redact(raw)
+	truncated = len(text) > limit
+	if truncated {
+		text = text[:limit]
+	}
+	if n := secretPrefixSuffixLength(text, secrets, minSecretSuffixLength); n > 0 {
+		text = text[:len(text)-n]
+	}
+	return text, truncated
 }
 
 type nativeEvent struct {

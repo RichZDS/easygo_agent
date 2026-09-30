@@ -453,13 +453,6 @@ func (model *Model) refreshQueue() {
 
 func (model *Model) loadQueue() { model.refreshQueue() }
 
-func (model *Model) selectedRunID() string {
-	if len(model.queueItems) == 0 || model.selected < 0 || model.selected >= len(model.queueItems) {
-		return ""
-	}
-	return model.queueItems[model.selected].ID
-}
-
 func (model *Model) selectQueue(delta int) {
 	if len(model.queueItems) == 0 {
 		return

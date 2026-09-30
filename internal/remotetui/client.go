@@ -31,7 +31,8 @@ func NewClient(address string) (*Client, error) {
 		return nil, errors.New("platform URL must be an origin")
 	}
 	ip := net.ParseIP(u.Hostname())
-	if u.Scheme != "https" && !(u.Scheme == "http" && (u.Hostname() == "localhost" || ip != nil && ip.IsLoopback())) {
+	loopback := u.Hostname() == "localhost" || ip != nil && ip.IsLoopback()
+	if u.Scheme != "https" && (u.Scheme != "http" || !loopback) {
 		return nil, errors.New("HTTPS required except loopback development")
 	}
 	jar, _ := cookiejar.New(nil)

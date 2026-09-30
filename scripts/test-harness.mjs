@@ -2,20 +2,16 @@
 // Deterministic P1 harness proof: fixture model -> loop -> workshop -> Docker CLI
 // -> crew RPC -> durable events -> loop tools. No provider credentials are read.
 import assert from 'node:assert/strict';
-import { spawn, execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { once } from 'node:events';
 import http from 'node:http';
-import net from 'node:net';
 import { mkdtemp, mkdir, readFile, writeFile, copyFile, rm, readdir, lstat, readlink, chmod } from 'node:fs/promises';
-import { openSync, closeSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { createRPCClient } from './rpc-call.mjs';
+import { exec, go, loopServer, ports, root, running, testbed, until } from './lib/procs.mjs';
+import { pki } from './lib/pki.mjs';
+import { writeConfigs } from './lib/config.mjs';
 
-const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
-const exec = promisify(execFile);
 const args = process.argv.slice(2);
 if (![2, 4].includes(args.length) || args[0] !== '--evidence' || (args.length === 4 && args[2] !== '--scenarios'))
   throw Error('Usage: node scripts/test-harness.mjs --evidence NEW_DIRECTORY [--scenarios S1,S2,...,S9]');
@@ -26,7 +22,6 @@ assert.ok(
   selected.length > 0 && new Set(selected).size === selected.length && selected.every((id) => scenarioIDs.includes(id)),
   'Unknown or duplicate scenario'
 );
-const go = process.env.EASYGO_GO_BIN ?? 'go';
 const docker = process.env.EASYGO_DOCKER_TEST_BINARY;
 const endpoint = process.env.EASYGO_DOCKER_TEST_ENDPOINT;
 const image = process.env.EASYGO_DOCKER_TEST_IMAGE;
@@ -74,13 +69,21 @@ const report = {
   model_requests: 0,
   pass: false,
 };
-const children = [],
-  clients = [];
+const bed = testbed(state, { env: { GOMAXPROCS: '2' } });
+const clients = [];
 const stopSignal = new AbortController();
 let provider, agent, broker, current;
 for (const signal of ['SIGINT', 'SIGTERM'])
   process.once(signal, () => stopSignal.abort(Error(`Interrupted by ${signal}`)));
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Every wait gives up on interruption or as soon as a service has exited.
+const patience = {
+  timeout: 60_000,
+  interval: 200,
+  check(label) {
+    stopSignal.signal.throwIfAborted();
+    for (const entry of bed.all) if (!running(entry)) throw Error(`${entry.name} exited before ${label}`);
+  },
+};
 const textOf = (content) =>
   typeof content === 'string' ? content : (content ?? []).map((block) => block.text ?? '').join('');
 const taskTerminal = (task) => !['queued', 'running', 'cancelling'].includes(task.status);
@@ -103,60 +106,6 @@ async function command(name, bin, argv, cwd = root, extraEnv = {}) {
     throw Error(`${name} failed (exit ${error.code ?? 'unknown'})`);
   }
 }
-async function port() {
-  const server = net.createServer();
-  server.listen(0, '127.0.0.1');
-  await once(server, 'listening');
-  const port = server.address().port;
-  await new Promise((resolve) => server.close(resolve));
-  return port;
-}
-async function until(fn, label, timeout = 60000) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    stopSignal.signal.throwIfAborted();
-    const result = await fn();
-    if (result) return result;
-    for (const entry of children)
-      if (entry.child.exitCode !== null || entry.child.signalCode !== null)
-        throw Error(`${entry.name} exited before ${label}`);
-    await sleep(200);
-  }
-  throw Error(`Timed out: ${label}`);
-}
-function start(name, bin, argv, env = {}) {
-  const fd = openSync(join(state, `${name}.log`), 'a', 0o600);
-  const child = spawn(bin, argv, {
-    cwd: root,
-    env: { PATH: process.env.PATH, LANG: 'C.UTF-8', GOMAXPROCS: '2', ...env },
-    stdio: ['ignore', fd, fd],
-  });
-  closeSync(fd);
-  const entry = {
-    name,
-    child,
-    done: new Promise((resolve) => {
-      child.once('error', () => resolve({ error: 'spawn_failed' }));
-      child.once('exit', (code, signal) => resolve({ code, signal }));
-    }),
-  };
-  children.push(entry);
-}
-async function stop(entry) {
-  if (entry.child.exitCode === null && entry.child.signalCode === null) entry.child.kill('SIGTERM');
-  let timer;
-  const result = await Promise.race([
-    entry.done,
-    new Promise((resolve) => {
-      timer = setTimeout(() => {
-        entry.child.kill('SIGKILL');
-        resolve({ error: 'shutdown_timeout' });
-      }, 12000);
-    }),
-  ]);
-  clearTimeout(timer);
-  return result;
-}
 async function rpc(client, method, params = {}) {
   const value = await client.call(method, { namespace, ...params });
   if (current) current.rpc.push({ method, params, value });
@@ -173,10 +122,13 @@ async function tools(calls) {
     input: JSON.stringify({ harness_plan: calls }),
     idempotency_key: randomUUID(),
   });
-  const completed = await until(async () => {
-    const value = await rpc(agent, 'agent.run.get', { run_id: run.id });
-    return !['queued', 'running'].includes(value.status) && value;
-  }, 'loop run completion');
+  const completed = await until(
+    async () => {
+      const value = await rpc(agent, 'agent.run.get', { run_id: run.id });
+      return !['queued', 'running'].includes(value.status) && value;
+    },
+    { ...patience, label: 'loop run completion' }
+  );
   assert.equal(completed.status, 'completed', JSON.stringify(completed.error));
   const history = await rpc(agent, 'agent.session.history', { session_id: session.id, limit: 100 });
   const results = history.messages.filter((m) => m.role === 'tool').flatMap((m) => m.content);
@@ -193,10 +145,13 @@ async function submit(script, workflow = 'channel') {
   return task;
 }
 async function terminal(id) {
-  const task = await until(async () => {
-    const task = await rpc(broker, 'workshop.get', { task_id: id });
-    return taskTerminal(task) && task;
-  }, 'workshop terminal');
+  const task = await until(
+    async () => {
+      const task = await rpc(broker, 'workshop.get', { task_id: id });
+      return taskTerminal(task) && task;
+    },
+    { ...patience, label: 'workshop terminal' }
+  );
   if (task.status !== 'succeeded') await rpc(broker, 'workshop.events', { task_id: id, after: 0 });
   return task;
 }
@@ -528,10 +483,13 @@ async function S7() {
     { op: 'inbox', text: 'S7 proceed', timeout_ms: 60000 },
     crew('submit', '--tests', 'pass', 'S7 received instruction'),
   ]);
-  await until(async () => {
-    const events = await rpc(broker, 'workshop.events', { task_id: task.id });
-    return events.some((e) => e.message?.text === 'S7 waiting');
-  }, 'worker inbox ready');
+  await until(
+    async () => {
+      const events = await rpc(broker, 'workshop.events', { task_id: task.id });
+      return events.some((e) => e.message?.text === 'S7 waiting');
+    },
+    { ...patience, label: 'worker inbox ready' }
+  );
   const running = await rpc(broker, 'workshop.get', { task_id: task.id });
   assert.equal(running.status, 'running');
   const [reply] = await tools([tool('workshop_reply', { task_id: task.id, text: 'S7 proceed' })]);
@@ -583,14 +541,20 @@ async function S8() {
 }
 async function S9() {
   const task = await submit([crew('submit', '--tests', 'pass', 'S9 ready for checks')], 'cancel-check');
-  await until(async () => {
-    const current = await rpc(broker, 'workshop.get', { task_id: task.id });
-    return current.status === 'running' && current.runs.at(-1).acceptance_state === 'running';
-  }, 'acceptance running');
-  const checks = await until(async () => {
-    const checks = await ownChecks();
-    return checks.length === 1 && checks[0].state.Running && checks;
-  }, 'check container actually running');
+  await until(
+    async () => {
+      const current = await rpc(broker, 'workshop.get', { task_id: task.id });
+      return current.status === 'running' && current.runs.at(-1).acceptance_state === 'running';
+    },
+    { ...patience, label: 'acceptance running' }
+  );
+  const checks = await until(
+    async () => {
+      const checks = await ownChecks();
+      return checks.length === 1 && checks[0].state.Running && checks;
+    },
+    { ...patience, label: 'check container actually running' }
+  );
   current.running_check = checks[0];
   assert.deepEqual(checks[0].command, ['/usr/local/bin/fixture-check', 'sleep', '60']);
   await tools([tool('workshop_cancel', { task_id: task.id })]);
@@ -603,7 +567,10 @@ async function S9() {
   const { list } = await acceptanceEvidence(end);
   assert.equal(list.acceptance_state, 'cancelled');
   assert.equal(list.false_green, false);
-  await until(async () => (await ownChecks()).length === 0, 'cancelled check container cleanup');
+  await until(async () => (await ownChecks()).length === 0, {
+    ...patience,
+    label: 'cancelled check container cleanup',
+  });
   current.remaining_checks = await ownChecks();
   assert.deepEqual(current.remaining_checks, []);
 }
@@ -690,17 +657,9 @@ try {
   });
   provider.listen(0, '127.0.0.1');
   await once(provider, 'listening');
-  const gp = await port(),
-    wp = await port(),
-    ap = await port();
-  const identity = (name) => ({
-    cert_file: join(state, 'pki', name, 'tls.crt'),
-    key_file: join(state, 'pki', name, 'tls.key'),
-    ca_file: join(state, 'pki/public/ca.crt'),
-  });
-  const cert = (name) => join(state, 'pki/public', `${name}.crt`);
-  const ep = (name, port) => ({ url: `https://127.0.0.1:${port}/rpc`, peer_certificate_file: cert(name) });
-  const grant = (id, methods) => ({ id, cert_file: cert(id), methods, namespaces: [namespace] });
+  const [gp, wp, ap] = await ports(3);
+  const certs = pki(join(state, 'pki'), { namespaces: [namespace] });
+  const { identity, endpoint: ep, grant } = certs;
   const workshopMethods = [
     'workshop.workflows',
     'workshop.submit',
@@ -807,39 +766,20 @@ try {
     concurrency: 1,
     pack_dir: join(root, 'packs/base'),
   };
-  for (const [name, value] of Object.entries({ gateway, workshop, loop }))
-    await writeFile(join(state, `${name}.json`), JSON.stringify(value), { mode: 0o600 });
-  start('gateway', join(state, 'gateway'), ['--config', join(state, 'gateway.json')], {
+  await writeConfigs(state, { gateway, workshop, loop });
+  bed.start('gateway', join(state, 'gateway'), ['--config', join(state, 'gateway.json')], {
     HARNESS_FIXTURE_KEY: fixtureKey,
   });
-  start('workshop', join(state, 'workshop'), ['--config', join(state, 'workshop.json')]);
-  start('loop', process.execPath, [
-    join(root, 'services/agent-loop/dist/server.js'),
-    '--config',
-    join(state, 'loop.json'),
-  ]);
+  bed.start('workshop', join(state, 'workshop'), ['--config', join(state, 'workshop.json')]);
+  bed.start('loop', process.execPath, [loopServer, '--config', join(state, 'loop.json')]);
   for (const [name, port] of [
     ['ai-gateway', gp],
     ['workshop', wp],
     ['agent-loop', ap],
   ]) {
-    const tls = identity('client');
-    const client = createRPCClient({
-      url: ep(name, port).url,
-      certFile: tls.cert_file,
-      keyFile: tls.key_file,
-      caFile: tls.ca_file,
-      peerCertificateFile: cert(name),
-      timeoutMs: 10000,
-    });
+    const client = certs.client('client', name, port, { timeoutMs: 10000 });
     clients.push(client);
-    await until(async () => {
-      try {
-        return await client.health();
-      } catch {
-        return false;
-      }
-    }, `${name} health`);
+    await until(() => client.health(), { ...patience, label: `${name} health`, retryErrors: true });
     if (name === 'workshop') broker = client;
     if (name === 'agent-loop') agent = client;
   }
@@ -866,8 +806,7 @@ try {
   console.error(error.message);
 } finally {
   for (const client of clients) client.close();
-  report.shutdown = [];
-  for (const entry of children.reverse()) report.shutdown.push({ name: entry.name, ...(await stop(entry)) });
+  report.shutdown = await bed.stopAll();
   if (report.shutdown.some((entry) => entry.code !== 0)) {
     report.pass = false;
     process.exitCode = 1;
@@ -887,7 +826,7 @@ try {
     report.cleanup_error = error.message;
     process.exitCode = 1;
   }
-  for (const entry of children)
+  for (const entry of bed.all)
     await copyFile(join(state, `${entry.name}.log`), join(evidenceDir, `${entry.name}.log`)).catch(() => {});
   try {
     await unsealState(state);

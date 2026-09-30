@@ -9,25 +9,18 @@
 // Unless EASYGO_LIVE_KEEP=1, task workspaces, binaries, the image overlay and
 // the throwaway PKI are deleted after that scan; report.json and logs stay.
 import assert from 'node:assert/strict';
-import { spawn, execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import { once } from 'node:events';
-import net from 'node:net';
 import { mkdir, mkdtemp, writeFile, readFile, readdir, lstat, chmod, rm } from 'node:fs/promises';
-import { openSync, closeSync, createReadStream } from 'node:fs';
+import { createReadStream } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
-import { createRPCClient } from './rpc-call.mjs';
-const exec = promisify(execFile),
-  root = resolve(fileURLToPath(new URL('..', import.meta.url)));
+import { buildServices, exec, go, ports, root, testbed, until } from './lib/procs.mjs';
+import { createPKI } from './lib/pki.mjs';
+import { writeConfigs } from './lib/config.mjs';
 const env = (name) => {
   const v = process.env[name];
   if (!v) throw Error('Missing ' + name);
   return v;
 };
-const go = process.env.EASYGO_GO_BIN ?? 'go',
-  docker = env('EASYGO_DOCKER_TEST_BINARY'),
+const docker = env('EASYGO_DOCKER_TEST_BINARY'),
   endpoint = env('EASYGO_DOCKER_TEST_ENDPOINT');
 const baseImage = process.env.EASYGO_LIVE_BASE_IMAGE ?? 'easygo-task-runtime:platform',
   image = 'easygo-task-runtime:acl-live';
@@ -54,62 +47,8 @@ const report = {
   paid_provider: true,
   pass: false,
 };
-const children = [],
-  clients = [];
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function save() {
-  await writeFile(join(state, 'report.json'), JSON.stringify(report, null, 2));
-}
-async function port() {
-  const s = net.createServer();
-  s.listen(0, '127.0.0.1');
-  await once(s, 'listening');
-  const p = s.address().port;
-  await new Promise((r) => s.close(r));
-  return p;
-}
-async function until(fn, timeout, interval) {
-  const end = Date.now() + timeout;
-  while (Date.now() < end) {
-    const result = await fn();
-    if (result) return result;
-    await sleep(interval);
-  }
-  throw Error('Timed out waiting for condition');
-}
-function start(name, bin, args, extra = {}) {
-  const fd = openSync(join(state, name + '.log'), 'a', 0o600);
-  const child = spawn(bin, args, {
-    cwd: root,
-    env: { PATH: process.env.PATH, LANG: 'C.UTF-8', ...extra },
-    stdio: ['ignore', fd, fd],
-  });
-  closeSync(fd);
-  const entry = {
-    name,
-    child,
-    done: new Promise((r) => {
-      child.once('error', (e) => r({ error: e.message }));
-      child.once('exit', (code, signal) => r({ code, signal }));
-    }),
-  };
-  children.push(entry);
-  return entry;
-}
-async function stop(e) {
-  if (e.child.exitCode === null && e.child.signalCode === null) e.child.kill('SIGTERM');
-  let timer;
-  await Promise.race([
-    e.done,
-    new Promise((r) => {
-      timer = setTimeout(() => {
-        e.child.kill('SIGKILL');
-        r();
-      }, 15000);
-    }),
-  ]);
-  clearTimeout(timer);
-}
+const clients = [];
+const bed = testbed(state, { report, stopTimeout: 15_000 });
 async function fileHasKey(path) {
   let tail = '';
   for await (const chunk of createReadStream(path, { encoding: 'latin1', highWaterMark: 1 << 20 })) {
@@ -136,9 +75,8 @@ const spec = `Create a small Node.js ES module project in the current workspace.
 
 Run npm test yourself before you finish, and report through easygo-crew as your instructions describe.`;
 try {
-  await exec('bash', [join(root, 'scripts/dev-pki.sh'), join(state, 'pki')]);
-  await exec(go, ['build', '-o', join(state, 'gateway'), './cmd/server'], { cwd: join(root, 'services/ai-gateway') });
-  await exec(go, ['build', '-o', join(state, 'workshop'), './cmd/server'], { cwd: join(root, 'services/workshop') });
+  const certs = await createPKI(join(state, 'pki'), { namespaces: ['live'] });
+  await buildServices(state, { loop: false });
   // Layer the integrated easygo-crew client onto the pinned runtime image instead
   // of rebuilding its multi-gigabyte CLI layer.
   const overlay = join(state, 'overlay');
@@ -153,15 +91,8 @@ try {
   report.image_id = (
     await exec(docker, ['--host', endpoint, 'image', 'inspect', '--format', '{{.Id}}', image])
   ).stdout.trim();
-  const [gp, wp] = await Promise.all([port(), port()]);
-  const identity = (n) => ({
-    cert_file: join(state, 'pki', n, 'tls.crt'),
-    key_file: join(state, 'pki', n, 'tls.key'),
-    ca_file: join(state, 'pki/public/ca.crt'),
-  });
-  const cert = (n) => join(state, 'pki/public', n + '.crt');
-  const ep = (n, p) => ({ url: `https://127.0.0.1:${p}/rpc`, peer_certificate_file: cert(n) });
-  const grant = (id, methods, namespaces = ['live']) => ({ id, cert_file: cert(id), methods, namespaces });
+  const [gp, wp] = await ports(2);
+  const { identity, endpoint: ep, grant } = certs;
   const gateway = JSON.parse(await readFile(join(root, 'services/ai-gateway/config.deepseek.example.json'), 'utf8'));
   Object.assign(gateway, {
     listen: `127.0.0.1:${gp}`,
@@ -227,37 +158,17 @@ try {
       ],
     },
   };
-  for (const [name, config] of Object.entries({ gateway, workshop }))
-    await writeFile(join(state, name + '.json'), JSON.stringify(config), { mode: 0o600 });
-  start('gateway', join(state, 'gateway'), ['--config', join(state, 'gateway.json')], { DEEPSEEK_API_KEY: key });
-  start('workshop', join(state, 'workshop'), ['--config', join(state, 'workshop.json')]);
-  const tls = identity('client');
+  await writeConfigs(state, { gateway, workshop });
+  bed.start('gateway', join(state, 'gateway'), ['--config', join(state, 'gateway.json')], { DEEPSEEK_API_KEY: key });
+  bed.start('workshop', join(state, 'workshop'), ['--config', join(state, 'workshop.json')]);
   const client = (n, p) => {
-    const c = createRPCClient({
-      url: ep(n, p).url,
-      certFile: tls.cert_file,
-      keyFile: tls.key_file,
-      caFile: tls.ca_file,
-      peerCertificateFile: cert(n),
-      timeoutMs: 125000,
-    });
+    const c = certs.client('client', n, p, { timeoutMs: 125000 });
     clients.push(c);
     return c;
   };
   const gw = client('ai-gateway', gp),
     ws = client('workshop', wp);
-  for (const c of [gw, ws])
-    await until(
-      async () => {
-        try {
-          return await c.health();
-        } catch {
-          return false;
-        }
-      },
-      30000,
-      250
-    );
+  for (const c of [gw, ws]) await until(() => c.health(), { timeout: 30000, interval: 250, retryErrors: true });
   const call = (method, params) => ws.call(method, { namespace: 'live', ...params });
   for (const runtime of runtimes) {
     const began = Date.now();
@@ -276,8 +187,7 @@ try {
           const t = await call('workshop.get', { task_id: task.id });
           return !['queued', 'running', 'cancelling'].includes(t.status) && t;
         },
-        (taskSeconds + 360) * 1000,
-        5000
+        { timeout: (taskSeconds + 360) * 1000, interval: 5000 }
       );
       const run = task.runs.at(-1);
       Object.assign(entry, {
@@ -331,7 +241,7 @@ try {
       entry.harness_pass = false;
       entry.failure = String(e.message).split(key).join('<REDACTED>');
     }
-    await save();
+    await bed.save();
     console.log(
       `RUNTIME ${runtime} status=${entry.status} outcome=${entry.outcome} acceptance=${entry.acceptance_state} claimed=${entry.claimed_tests} false_green=${entry.false_green} harness=${entry.harness_pass ? 'pass' : 'fail'} ${Math.round((entry.elapsed_ms ?? 0) / 1000)}s`
     );
@@ -345,7 +255,7 @@ try {
   process.exitCode = 1;
 } finally {
   clients.forEach((c) => c.close());
-  for (const c of children.reverse()) await stop(c);
+  await bed.stopAll();
   try {
     const leaked = await scanForKey(state);
     report.key_leaks = leaked.length;
@@ -367,6 +277,6 @@ try {
         report.cleanup_error = e.message;
       });
     }
-  await save();
+  await bed.save();
   console.log('REPORT ' + join(state, 'report.json'));
 }

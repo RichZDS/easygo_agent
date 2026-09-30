@@ -3,100 +3,31 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import https from 'node:https';
-import net from 'node:net';
-import { spawn, execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { once } from 'node:events';
-import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { openSync, closeSync, readFileSync } from 'node:fs';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { createRPCClient } from './rpc-call.mjs';
+import { buildServices, exec, loopServer, ports, sleep, testbed, until } from './lib/procs.mjs';
+import { createPKI } from './lib/pki.mjs';
+import { writeConfigs } from './lib/config.mjs';
 
-const exec = promisify(execFile);
-const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const state = await mkdtemp(join(tmpdir(), 'easygo-rpc-e2e-'));
-const go = process.env.EASYGO_GO_BIN ?? 'go';
-const clients = [],
-  children = [];
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const clients = [];
 const log = (message) => process.stdout.write(`${message}\n`);
 let upstream;
 const report = { state, checks: [], paid_models: false, real_subprocess: true, real_mtls: true };
+const bed = testbed(state, { report });
 const checked = (name) => {
   report.checks.push(name);
   log(`PASS ${name}`);
 };
-async function waitFor(fn, timeout = 15_000) {
-  const end = Date.now() + timeout;
-  let last;
-  while (Date.now() < end) {
-    try {
-      const result = await fn();
-      if (result) return result;
-    } catch (error) {
-      last = error;
-    }
-    await sleep(30);
-  }
-  throw new Error(`Timed out waiting for proof${last ? `: ${last.message}` : ''}`);
-}
-async function freePorts(count) {
-  const held = [];
-  for (let i = 0; i < count; i++) {
-    const s = net.createServer();
-    s.listen(0, '127.0.0.1');
-    await once(s, 'listening');
-    held.push(s);
-  }
-  const ports = held.map((s) => s.address().port);
-  await Promise.all(held.map((s) => new Promise((resolve) => s.close(resolve))));
-  return ports;
-}
-function start(name, command, args, environment = {}) {
-  const output = openSync(join(state, `${name}.log`), 'a', 0o600);
-  const child = spawn(command, args, {
-    cwd: root,
-    env: { PATH: process.env.PATH, LANG: 'C.UTF-8', ...environment },
-    stdio: ['ignore', output, output],
-  });
-  closeSync(output);
-  const record = {
-    name,
-    child,
-    done: new Promise((resolve) => {
-      child.once('error', (error) => resolve({ error }));
-      child.once('exit', (code, signal) => resolve({ code, signal }));
-    }),
-  };
-  children.push(record);
-  return record;
-}
-async function stop(record, signal = 'SIGTERM') {
-  if (record.child.exitCode === null && record.child.signalCode === null) record.child.kill(signal);
-  let timer;
-  try {
-    return await Promise.race([
-      record.done,
-      new Promise((_, reject) => {
-        timer = setTimeout(() => {
-          record.child.kill('SIGKILL');
-          reject(new Error(`${record.name} did not stop`));
-        }, 12_000);
-      }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
+const proof = { timeout: 15_000, interval: 30, label: 'proof', retryErrors: true };
 
 try {
-  const pki = join(state, 'pki');
-  await exec('bash', [join(root, 'scripts/dev-pki.sh'), pki]);
-  const roguePKI = join(state, 'untrusted-pki');
-  await exec('bash', [join(root, 'scripts/dev-pki.sh'), roguePKI]);
+  const certs = await createPKI(join(state, 'pki'), { namespaces: [] });
+  const rogue = await createPKI(join(state, 'untrusted-pki'));
   const expiredCert = join(state, 'expired-client.crt');
   await exec('openssl', [
     'x509',
@@ -105,27 +36,19 @@ try {
     '-days',
     '0',
     '-in',
-    join(pki, 'client/request.csr'),
+    join(certs.dir, 'client/request.csr'),
     '-CA',
-    join(pki, 'public/ca.crt'),
+    certs.cert('ca'),
     '-CAkey',
-    join(pki, '.ca/ca.key'),
+    join(certs.dir, '.ca/ca.key'),
     '-CAserial',
-    join(pki, '.ca/serial'),
+    join(certs.dir, '.ca/serial'),
     '-extfile',
-    join(pki, 'client/extensions.cnf'),
+    join(certs.dir, 'client/extensions.cnf'),
     '-out',
     expiredCert,
   ]);
-  await exec(go, ['build', '-o', join(state, 'gateway'), './cmd/server'], {
-    cwd: join(root, 'services/ai-gateway'),
-    maxBuffer: 1024 * 1024,
-  });
-  await exec(go, ['build', '-o', join(state, 'workshop'), './cmd/server'], {
-    cwd: join(root, 'services/workshop'),
-    maxBuffer: 1024 * 1024,
-  });
-  await exec('npm', ['run', 'build'], { cwd: join(root, 'services/agent-loop'), maxBuffer: 1024 * 1024 });
+  await buildServices(state);
   checked('each service builds independently');
 
   const textOf = (content) =>
@@ -233,26 +156,10 @@ try {
   });
   upstream.listen(0, '127.0.0.1');
   await once(upstream, 'listening');
-  const [gatewayPort, agentPort, workshopPort, secondAgentPort] = await freePorts(4);
-  const identity = (name) => ({
-    cert_file: join(pki, name, 'tls.crt'),
-    key_file: join(pki, name, 'tls.key'),
-    ca_file: join(pki, 'public/ca.crt'),
-  });
-  const publicCert = (name) => join(pki, 'public', `${name}.crt`);
-  const grant = (id, methods, namespaces = []) => ({ id, cert_file: publicCert(id), methods, namespaces });
-  const endpoint = (name, port) => ({ url: `https://127.0.0.1:${port}/rpc`, peer_certificate_file: publicCert(name) });
+  const [gatewayPort, agentPort, workshopPort, secondAgentPort] = await ports(4);
+  const { identity, cert: publicCert, grant, endpoint } = certs;
   function client(name, target, port, changes = {}) {
-    const tls = identity(name);
-    const c = createRPCClient({
-      url: endpoint(target, port).url,
-      certFile: tls.cert_file,
-      keyFile: tls.key_file,
-      caFile: tls.ca_file,
-      peerCertificateFile: publicCert(target),
-      timeoutMs: 5_000,
-      ...changes,
-    });
+    const c = certs.client(name, target, port, { timeoutMs: 5_000, ...changes });
     clients.push(c);
     return c;
   }
@@ -291,7 +198,7 @@ print(json.dumps({'type':'agent_settled'}))
       grant('workshop', ['gateway.native'], ['demo']),
       {
         id: 'untrusted-ca-client',
-        cert_file: join(roguePKI, 'public/client.crt'),
+        cert_file: rogue.cert('client'),
         methods: ['gateway.models'],
         namespaces: ['demo'],
       },
@@ -381,24 +288,19 @@ print(json.dumps({'type':'agent_settled'}))
     concurrency: 2,
     system_prompt: 'Use configured tools to complete the request.',
   };
-  for (const [name, value] of Object.entries({ gateway: gatewayConfig, workshop: workshopConfig, agent: agentConfig }))
-    await writeFile(join(state, `${name}.json`), JSON.stringify(value), { mode: 0o600 });
-  const gatewayChild = start('gateway', join(state, 'gateway'), ['--config', join(state, 'gateway.json')], {
+  await writeConfigs(state, { gateway: gatewayConfig, workshop: workshopConfig, agent: agentConfig });
+  const gatewayChild = bed.start('gateway', join(state, 'gateway'), ['--config', join(state, 'gateway.json')], {
     EASYGO_RPC_TEST_PROVIDER_KEY: 'fixture-provider-key',
   });
-  const workshopChild = start('workshop', join(state, 'workshop'), ['--config', join(state, 'workshop.json')]);
-  let agentChild = start('agent', process.execPath, [
-    join(root, 'services/agent-loop/dist/server.js'),
-    '--config',
-    join(state, 'agent.json'),
-  ]);
+  const workshopChild = bed.start('workshop', join(state, 'workshop'), ['--config', join(state, 'workshop.json')]);
+  let agentChild = bed.start('agent', process.execPath, [loopServer, '--config', join(state, 'agent.json')]);
   const gatewayHealth = client('ai-gateway', 'ai-gateway', gatewayPort);
   const workshopHealth = client('workshop', 'workshop', workshopPort);
   const agentHealth = client('agent-loop', 'agent-loop', agentPort);
   const app = client('client', 'agent-loop', agentPort);
   const broker = client('agent-loop', 'workshop', workshopPort);
   const readonlyGateway = client('client', 'ai-gateway', gatewayPort);
-  await Promise.all([gatewayHealth, workshopHealth, agentHealth].map((c) => waitFor(() => c.health())));
+  await Promise.all([gatewayHealth, workshopHealth, agentHealth].map((c) => until(() => c.health(), proof)));
   checked('three independent processes accept only their configured mTLS identities');
 
   assert.deepEqual((await readonlyGateway.call('gateway.models', { namespace: 'demo' })).models, ['chat']);
@@ -417,8 +319,8 @@ print(json.dumps({'type':'agent_settled'}))
   const unknownPeer = client('workshop', 'ai-gateway', gatewayPort);
   await assert.rejects(unknownPeer.call('gateway.models', { namespace: 'demo' }));
   const untrusted = client('client', 'ai-gateway', gatewayPort, {
-    certFile: join(roguePKI, 'client/tls.crt'),
-    keyFile: join(roguePKI, 'client/tls.key'),
+    certFile: rogue.identity('client').cert_file,
+    keyFile: rogue.identity('client').key_file,
   });
   await assert.rejects(untrusted.call('gateway.models', { namespace: 'demo' }));
   const expired = client('client', 'ai-gateway', gatewayPort, { certFile: expiredCert });
@@ -444,10 +346,10 @@ print(json.dumps({'type':'agent_settled'}))
   const run = await app.call('agent.run.start', startParams);
   assert.equal((await app.call('agent.run.start', startParams)).id, run.id);
   await assert.rejects(app.call('agent.run.start', { ...startParams, input: 'different input' }));
-  const completed = await waitFor(async () => {
+  const completed = await until(async () => {
     const r = await app.call('agent.run.get', { namespace: 'demo', run_id: run.id });
     return ['completed', 'failed', 'canceled', 'interrupted'].includes(r.status) ? r : false;
-  });
+  }, proof);
   assert.equal(completed.status, 'completed', JSON.stringify(completed.error));
   assert.match(JSON.stringify(completed.result), /VERIFIED_WORKSHOP_ARTIFACT/);
   assert.equal(tasks.size, 1);
@@ -467,10 +369,10 @@ print(json.dumps({'type':'agent_settled'}))
     idempotency_key: 'reuse-once',
   };
   const reuseTask = await broker.call('workshop.submit', reuseParams);
-  const reuseResult = await waitFor(async () => {
+  const reuseResult = await until(async () => {
     const r = await broker.call('workshop.get', { namespace: 'demo', task_id: reuseTask.id });
     return ['succeeded', 'failed'].includes(r.status) ? r : false;
-  });
+  }, proof);
   assert.equal(reuseResult.status, 'succeeded', JSON.stringify(reuseResult));
   assert.equal(reuseResult.engine, 'pi');
   assert.equal(reuseResult.model, 'chat');
@@ -486,10 +388,10 @@ print(json.dumps({'type':'agent_settled'}))
     input: 'RECOVER_TOOL_ERROR',
     idempotency_key: 'safe-error',
   });
-  const recovered = await waitFor(async () => {
+  const recovered = await until(async () => {
     const r = await app.call('agent.run.get', { namespace: 'demo', run_id: recoveryRun.id });
     return ['completed', 'failed'].includes(r.status) ? r : false;
-  });
+  }, proof);
   assert.equal(recovered.status, 'completed', JSON.stringify(recovered.error));
   assert.match(JSON.stringify(recovered.result), /RECOVERED_TOOL_ERROR/);
   checked('ordinary tool errors are committed and returned to the model for a final answer');
@@ -501,12 +403,13 @@ print(json.dumps({'type':'agent_settled'}))
     input: 'CANCEL_ME',
     idempotency_key: 'cancel',
   });
-  await waitFor(() => started.has('cancel'));
+  await until(() => started.has('cancel'), proof);
   await app.call('agent.run.cancel', { namespace: 'demo', run_id: cancelRun.id });
-  await waitFor(
-    async () => (await app.call('agent.run.get', { namespace: 'demo', run_id: cancelRun.id })).status === 'canceled'
+  await until(
+    async () => (await app.call('agent.run.get', { namespace: 'demo', run_id: cancelRun.id })).status === 'canceled',
+    proof
   );
-  await waitFor(() => canceledProvider > 0);
+  await until(() => canceledProvider > 0, proof);
   checked('cancel propagates through two RPC hops to the blocked provider socket');
 
   const restartSession = await app.call('agent.session.create', { namespace: 'demo' });
@@ -516,24 +419,20 @@ print(json.dumps({'type':'agent_settled'}))
     input: 'RESTART_ME',
     idempotency_key: 'restart',
   });
-  await waitFor(() => started.has('restart'));
-  await stop(agentChild, 'SIGKILL');
+  await until(() => started.has('restart'), proof);
+  await bed.stop(agentChild, 'SIGKILL');
   log('Waiting for the crashed instance ownership lease to expire (31 seconds).');
   await sleep(31_000);
-  agentChild = start('agent-restarted', process.execPath, [
-    join(root, 'services/agent-loop/dist/server.js'),
-    '--config',
-    join(state, 'agent.json'),
-  ]);
-  await waitFor(() => agentHealth.health());
+  agentChild = bed.start('agent-restarted', process.execPath, [loopServer, '--config', join(state, 'agent.json')]);
+  await until(() => agentHealth.health(), proof);
   assert.equal((await app.call('agent.run.get', { namespace: 'demo', run_id: restartRun.id })).status, 'interrupted');
   assert.equal((await app.call('agent.run.get', { namespace: 'demo', run_id: run.id })).status, 'completed');
   await writeFile(
     join(state, 'second-agent.json'),
     JSON.stringify({ ...agentConfig, listen: `127.0.0.1:${secondAgentPort}` })
   );
-  const duplicate = start('agent-duplicate', process.execPath, [
-    join(root, 'services/agent-loop/dist/server.js'),
+  const duplicate = bed.start('agent-duplicate', process.execPath, [
+    loopServer,
     '--config',
     join(state, 'second-agent.json'),
   ]);
@@ -548,19 +447,18 @@ print(json.dumps({'type':'agent_settled'}))
   checked('crash recovery retains history, marks active work interrupted and excludes a second database owner');
 
   for (const c of clients) c.close();
-  for (const child of [agentChild, gatewayChild, workshopChild]) assert.equal((await stop(child)).code, 0);
+  for (const child of [agentChild, gatewayChild, workshopChild]) assert.equal((await bed.stop(child)).code, 0);
   checked('all three services shut down cleanly');
-  await writeFile(join(state, 'report.json'), JSON.stringify(report, null, 2));
+  await bed.save();
   log(`Evidence: ${state}`);
 } catch (error) {
   report.error = error.message;
-  await writeFile(join(state, 'report.json'), JSON.stringify(report, null, 2));
+  await bed.save();
   process.stderr.write(`FAIL ${error.stack}\nEvidence: ${state}\n`);
   process.exitCode = 1;
 } finally {
   for (const c of clients) c.close();
-  for (const child of children)
-    if (child.child.exitCode === null && child.child.signalCode === null) await stop(child).catch(() => {});
+  await bed.stopAll();
   upstream?.closeAllConnections();
   upstream?.close();
 }

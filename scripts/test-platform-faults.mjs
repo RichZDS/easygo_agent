@@ -3,21 +3,16 @@
 // never reads provider credentials. Each fault kills a real service process with
 // SIGKILL at a chosen point and checks durable accounting and task recovery.
 import assert from 'node:assert/strict';
-import { spawn, execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { once } from 'node:events';
 import http from 'node:http';
-import net from 'node:net';
-import { mkdtemp, writeFile, readFile } from 'node:fs/promises';
-import { openSync, closeSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { mkdtemp, readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { createRPCClient } from './rpc-call.mjs';
-const exec = promisify(execFile),
-  root = resolve(fileURLToPath(new URL('..', import.meta.url)));
-const go = process.env.EASYGO_GO_BIN ?? 'go',
-  docker = process.env.EASYGO_DOCKER_TEST_BINARY,
+import { buildServices, exec, loopServer, ports, running, sleep, testbed, until } from './lib/procs.mjs';
+import { createPKI } from './lib/pki.mjs';
+import { localPlatform, writeConfigs } from './lib/config.mjs';
+import { browser } from './lib/web.mjs';
+const docker = process.env.EASYGO_DOCKER_TEST_BINARY,
   endpoint = process.env.EASYGO_DOCKER_TEST_ENDPOINT,
   image = process.env.EASYGO_DOCKER_TEST_IMAGE;
 if (!docker || !endpoint || !image) throw Error('Explicit dedicated Docker test binary/endpoint/image required.');
@@ -33,58 +28,13 @@ const report = {
   native_requests: 0,
   paid_provider: false,
 };
-const procs = {},
-  clients = [];
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const clients = [];
+const bed = testbed(state, { report });
+const patience = { timeout: 30_000, interval: 500 };
 let model, beforeResponse;
 const check = (name) => {
   report.checks.push(name);
   console.log('PASS ' + name);
-};
-async function save() {
-  await writeFile(join(state, 'report.json'), JSON.stringify(report, null, 2));
-}
-async function port() {
-  const s = net.createServer();
-  s.listen(0, '127.0.0.1');
-  await once(s, 'listening');
-  const p = s.address().port;
-  await new Promise((r) => s.close(r));
-  return p;
-}
-async function until(fn, timeout = 30000, interval = 500) {
-  const end = Date.now() + timeout;
-  while (Date.now() < end) {
-    const result = await fn();
-    if (result) return result;
-    await sleep(interval);
-  }
-  throw Error('Timed out waiting for condition');
-}
-function launch(name, bin, args, env = {}) {
-  const fd = openSync(join(state, name + '.log'), 'a', 0o600);
-  const child = spawn(bin, args, {
-    cwd: root,
-    env: { PATH: process.env.PATH, LANG: 'C.UTF-8', ...env },
-    stdio: ['ignore', fd, fd],
-  });
-  closeSync(fd);
-  procs[name] = {
-    name,
-    bin,
-    args,
-    env,
-    child,
-    done: new Promise((r) => {
-      child.once('error', (e) => r({ error: e.message }));
-      child.once('exit', (code, signal) => r({ code, signal }));
-    }),
-  };
-  return procs[name];
-}
-const relaunch = (name) => {
-  const p = procs[name];
-  return launch(name, p.bin, p.args, p.env);
 };
 // Like a supervisor restart policy: a crashed loop keeps its 30s ownership lease, so
 // early restarts exit with database_owned until the lease expires.
@@ -93,7 +43,7 @@ async function recover(name, ready) {
   let attempts = 0;
   for (;;) {
     attempts++;
-    const p = relaunch(name);
+    const p = bed.relaunch(name);
     const r = await Promise.race([
       ready().then(
         () => 'up',
@@ -107,41 +57,6 @@ async function recover(name, ready) {
     await sleep(2000);
   }
 }
-async function stop(name, signal = 'SIGTERM') {
-  const e = procs[name];
-  if (e.child.exitCode === null && e.child.signalCode === null) e.child.kill(signal);
-  let timer;
-  await Promise.race([
-    e.done,
-    new Promise((r) => {
-      timer = setTimeout(() => {
-        e.child.kill('SIGKILL');
-        r();
-      }, 12000);
-    }),
-  ]);
-  clearTimeout(timer);
-}
-function browser(origin) {
-  let cookie = '';
-  return {
-    async request(path, body, method = body === undefined ? 'GET' : 'POST', expected = 200) {
-      const r = await fetch(origin + path, {
-        method,
-        headers: { 'Content-Type': 'application/json', Origin: origin, ...(cookie ? { Cookie: cookie } : {}) },
-        body: body === undefined ? undefined : JSON.stringify(body),
-      });
-      const set = r.headers.get('set-cookie');
-      if (set) cookie = set.split(';')[0];
-      const value = await r.json();
-      assert.equal(r.status, expected, JSON.stringify(value));
-      return value;
-    },
-    async rpc(method, params = {}) {
-      return (await this.request('/api/rpc', { method, params })).result;
-    },
-  };
-}
 async function containers() {
   const { stdout } = await exec(docker, [
     '--host',
@@ -154,21 +69,11 @@ async function containers() {
   return stdout.split(/\s+/).filter(Boolean);
 }
 try {
-  await exec('bash', [join(root, 'scripts/dev-pki.sh'), join(state, 'pki')]);
-  await exec(go, ['build', '-o', join(state, 'gateway'), './cmd/server'], { cwd: join(root, 'services/ai-gateway') });
-  await exec(go, ['build', '-o', join(state, 'workshop'), './cmd/server'], { cwd: join(root, 'services/workshop') });
-  await exec('npm', ['run', 'build'], { cwd: join(root, 'services/agent-loop') });
-  const [gp, wp, ap, hp] = await Promise.all([port(), port(), port(), port()]);
+  const certs = await createPKI(join(state, 'pki'));
+  await buildServices(state);
+  const [gp, wp, ap, hp] = await ports(4);
   const origin = `http://127.0.0.1:${hp}`;
   report.origin = origin;
-  const identity = (n) => ({
-    cert_file: join(state, 'pki', n, 'tls.crt'),
-    key_file: join(state, 'pki', n, 'tls.key'),
-    ca_file: join(state, 'pki/public/ca.crt'),
-  });
-  const cert = (n) => join(state, 'pki/public', n + '.crt');
-  const ep = (n, p) => ({ url: `https://127.0.0.1:${p}/rpc`, peer_certificate_file: cert(n) });
-  const grant = (id, methods, namespaces = ['*']) => ({ id, cert_file: cert(id), methods, namespaces });
   model = http.createServer(async (req, res) => {
     try {
       let text = '';
@@ -232,53 +137,15 @@ try {
   model.listen(0, '127.0.0.1');
   await once(model, 'listening');
   const mp = model.address().port;
-  const gateway = {
-    listen: `127.0.0.1:${gp}`,
-    tls: identity('ai-gateway'),
-    authorization: [
-      grant('client', ['health']),
-      grant('agent-loop', ['gateway.generate', 'gateway.models']),
-      grant('workshop', ['gateway.native']),
-    ],
-    meter: { ...ep('agent-loop', ap), database: join(state, 'meter.db'), max_output_tokens: 256 },
-    models: {
-      chat: {
-        protocol: 'chat_completions',
-        endpoint: `http://127.0.0.1:${mp}/chat`,
-        model: 'fixture-model',
-        api_key_env: 'FIXTURE_MODEL_KEY',
-      },
-      responses: {
-        protocol: 'responses',
-        endpoint: `http://127.0.0.1:${mp}/responses`,
-        model: 'fixture-model',
-        api_key_env: 'FIXTURE_MODEL_KEY',
-      },
-    },
-  };
-  const workshop = {
-    listen: `127.0.0.1:${wp}`,
-    tls: identity('workshop'),
-    authorization: [
-      grant('client', ['health']),
-      grant('agent-loop', [
-        'workshop.workflows',
-        'workshop.submit',
-        'workshop.get',
-        'workshop.list',
-        'workshop.cancel',
-        'workshop.resume',
-        'workshop.events',
-        'workshop.result',
-        'workshop.artifact',
-      ]),
-    ],
-    workshop: {
-      root: join(state, 'workshop-data'),
-      concurrency: 2,
-      queue_capacity: 8,
-      max_output_bytes: 4194304,
-      model_gateway: { ...ep('ai-gateway', gp), tls: identity('workshop') },
+  const { gateway, workshop, loop } = await localPlatform(
+    state,
+    certs,
+    { 'ai-gateway': gp, workshop: wp, 'agent-loop': ap, web: hp },
+    {
+      fixtureURL: `http://127.0.0.1:${mp}`,
+      maxOutputTokens: 256,
+      maxSteps: 4,
+      consolidateIntervalMs: 86400000,
       sandbox: {
         mode: 'docker',
         docker_binary: docker,
@@ -287,82 +154,27 @@ try {
         owner,
         host_root: join(state, 'workshop-data'),
       },
-      engines: { codex: { binary: 'codex' } },
-      runtime_profiles: { fixture: { engine: 'codex', protocol: 'responses', gateway_model: 'responses' } },
-      workflows: [
-        {
-          name: 'proof',
-          version: '1',
-          instructions: 'Execute offline proof.',
-          runtime: 'fixture',
-          policy: 'workspace-write',
-          timeout_seconds: 180,
-          artifacts: ['artifact.txt', 'isolation-proof.json'],
-        },
-      ],
-    },
-  };
-  const loop = {
-    listen: `127.0.0.1:${ap}`,
-    tls: identity('agent-loop'),
-    authorization: [
-      grant('client', ['health']),
-      grant('ai-gateway', ['platform.wallet.reserve', 'platform.wallet.settle']),
-    ],
-    database: join(state, 'agent.sqlite'),
-    gateway: ep('ai-gateway', gp),
-    workshop: ep('workshop', wp),
-    model: 'chat',
-    streaming: true,
-    max_steps: 4,
-    concurrency: 8,
-    context_bytes: 128000,
-    platform: {
-      listen: `127.0.0.1:${hp}`,
-      database: join(state, 'platform.sqlite'),
-      public_origin: origin,
-      secure_cookies: false,
-      registration: true,
-      bootstrap_admin: { email: 'admin@example.test', password_env: 'TEST_ADMIN_PASSWORD' },
-    },
-    knowledge: { database: join(state, 'knowledge.sqlite'), profile_limit: 5, consolidate_interval_ms: 86400000 },
-  };
-  for (const [name, config] of Object.entries({ gateway, workshop, loop }))
-    await writeFile(join(state, name + '.json'), JSON.stringify(config), { mode: 0o600 });
-  launch('gateway', join(state, 'gateway'), ['--config', join(state, 'gateway.json')], {
-    FIXTURE_MODEL_KEY: 'fixture-key',
-  });
-  launch('workshop', join(state, 'workshop'), ['--config', join(state, 'workshop.json')]);
-  launch(
-    'loop',
-    process.execPath,
-    [join(root, 'services/agent-loop/dist/server.js'), '--config', join(state, 'loop.json')],
-    { TEST_ADMIN_PASSWORD: 'test-admin-password-v1' }
+    }
   );
+  await writeConfigs(state, { gateway, workshop, loop });
+  bed.start('gateway', join(state, 'gateway'), ['--config', join(state, 'gateway.json')], {
+    DEEPSEEK_API_KEY: 'fixture-key',
+  });
+  bed.start('workshop', join(state, 'workshop'), ['--config', join(state, 'workshop.json')]);
+  bed.start('loop', process.execPath, [loopServer, '--config', join(state, 'loop.json')], {
+    EASYGO_ADMIN_PASSWORD: 'test-admin-password-v1',
+  });
   const health = {};
   for (const [name, p] of [
     ['ai-gateway', gp],
     ['workshop', wp],
     ['agent-loop', ap],
   ]) {
-    const tls = identity('client');
-    health[name] = createRPCClient({
-      url: ep(name, p).url,
-      certFile: tls.cert_file,
-      keyFile: tls.key_file,
-      caFile: tls.ca_file,
-      peerCertificateFile: cert(name),
-    });
+    health[name] = certs.client('client', name, p);
     clients.push(health[name]);
   }
   const healthy = async (name, timeout = 30000) =>
-    until(async () => {
-      try {
-        return await health[name].health();
-      } catch {
-        return false;
-      }
-    }, timeout);
+    until(() => health[name].health(), { ...patience, timeout, retryErrors: true });
   for (const name of Object.keys(health)) await healthy(name);
   const admin = browser(origin),
     alice = browser(origin);
@@ -385,14 +197,13 @@ try {
         const t = await alice.rpc('workshop.get', { task_id: id });
         return !['queued', 'running', 'cancelling'].includes(t.status) && t;
       },
-      60000,
-      750
+      { timeout: 60000, interval: 750 }
     );
   const terminalRun = (id) =>
     until(async () => {
       const v = await alice.rpc('agent.run.get', { run_id: id });
       return !['queued', 'running'].includes(v.status) && v;
-    });
+    }, patience);
   const newest = async (known) => {
     const all = await receipts();
     const fresh = all.filter((r) => !known.has(r.request_id));
@@ -402,14 +213,14 @@ try {
   const calls = () => report.model_requests - report.knowledge_requests;
   const quiesce = async () => {
     await alice.rpc('agent.memory.consolidate');
-    await until(async () => (await wallet()).held_micros === 0);
+    await until(async () => (await wallet()).held_micros === 0, patience);
   };
   const snapshot = async () => {
     await quiesce();
     return { wallet: await wallet(), known: new Set((await receipts()).map((r) => r.request_id)), model: calls() };
   };
   const loopDown = async () => {
-    await stop('loop', 'SIGKILL');
+    await bed.stop(bed.get('loop'), 'SIGKILL');
     report.faults.current.killed_at = Date.now();
   };
   // Warm path: one normal run so the steady-state charge is established.
@@ -419,7 +230,7 @@ try {
     idempotency_key: randomUUID(),
   });
   assert.equal((await terminalRun(warm.id)).status, 'completed');
-  await until(async () => (await wallet()).held_micros === 0);
+  await until(async () => (await wallet()).held_micros === 0, patience);
 
   // F1: wallet dies while a native model call is in flight. The provider answer
   // must be receipted durably by the gateway and settled exactly once after restart.
@@ -436,12 +247,12 @@ try {
       input: JSON.stringify({ mode: 'first', host_sentinel: join(state, 'none'), sibling: join(state, 'none') }),
       idempotency_key: 'fault-native',
     });
-    await until(() => procs.loop.child.exitCode !== null || procs.loop.child.signalCode !== null);
+    await until(() => !running(bed.get('loop')), patience);
     await sleep(4000);
     Object.assign(report.faults.current, await recover('loop', () => healthy('agent-loop', 95000)));
     report.faults.current.downtime_ms = Date.now() - report.faults.current.killed_at;
     assert.equal((await terminalTask(task.id)).status, 'succeeded');
-    await until(async () => (await wallet()).held_micros === 0);
+    await until(async () => (await wallet()).held_micros === 0, patience);
     const r = await newest(before.known),
       after = await wallet();
     assert.equal(r.source, 'gateway.native');
@@ -475,7 +286,7 @@ try {
       input: 'FAULT_CHAT',
       idempotency_key: randomUUID(),
     });
-    await until(() => procs.loop.child.exitCode !== null || procs.loop.child.signalCode !== null);
+    await until(() => !running(bed.get('loop')), patience);
     await sleep(4000);
     Object.assign(report.faults.current, await recover('loop', () => healthy('agent-loop', 95000)));
     const final = await terminalRun(run.id);
@@ -484,7 +295,7 @@ try {
     const r = await until(async () => {
       const x = (await receipts()).find((v) => !before.known.has(v.request_id));
       return x?.settlement && x;
-    });
+    }, patience);
     let w = await wallet();
     if (r.status === 'settled') {
       assert.equal(r.charged_micros, 25000);
@@ -530,7 +341,7 @@ try {
     const before = await snapshot();
     beforeResponse = async (url) => {
       assert.equal(url, '/chat');
-      await stop('gateway', 'SIGKILL');
+      await bed.stop(bed.get('gateway'), 'SIGKILL');
       report.faults.current.killed_at = Date.now();
     };
     const run = await alice.rpc('agent.run.start', {
@@ -543,13 +354,13 @@ try {
     const held = await wallet();
     assert.ok(held.held_micros > 0, 'hold must survive gateway crash');
     assert.equal(held.balance_micros, before.wallet.balance_micros);
-    relaunch('gateway');
+    bed.relaunch('gateway');
     await healthy('ai-gateway');
     report.faults.current.downtime_ms = Date.now() - report.faults.current.killed_at;
     const r = await until(async () => {
       const x = (await receipts()).find((v) => !before.known.has(v.request_id));
       return x?.status === 'pending' && x;
-    });
+    }, patience);
     assert.equal(r.settlement.outcome, 'uncertain');
     assert.equal(r.settlement.usage.known, false);
     assert.equal((await wallet()).held_micros, r.reserved_micros);
@@ -574,7 +385,7 @@ try {
       idempotency_key: randomUUID(),
     });
     assert.equal((await terminalRun(retry.id)).status, 'completed');
-    await until(async () => (await wallet()).held_micros === 0);
+    await until(async () => (await wallet()).held_micros === 0, patience);
     assert.equal(before.wallet.balance_micros - (await wallet()).balance_micros, 25000);
     Object.assign(report.faults.current, {
       request_id: r.request_id,
@@ -602,12 +413,12 @@ try {
       } catch {
         return false;
       }
-    });
-    await stop('workshop', 'SIGKILL');
+    }, patience);
+    await bed.stop(bed.get('workshop'), 'SIGKILL');
     const orphans = await containers();
     assert.equal(orphans.length, 1);
     report.faults.current.orphans_after_kill = orphans.length;
-    relaunch('workshop');
+    bed.relaunch('workshop');
     await healthy('workshop');
     assert.deepEqual(await containers(), []);
     const t = await alice.rpc('workshop.get', { task_id: task.id });
@@ -638,8 +449,8 @@ try {
     });
     await quiesce();
     const before = await view();
-    for (const name of ['loop', 'workshop', 'gateway']) await stop(name);
-    for (const name of ['gateway', 'workshop', 'loop']) relaunch(name);
+    for (const name of ['loop', 'workshop', 'gateway']) await bed.stop(bed.get(name));
+    for (const name of ['gateway', 'workshop', 'loop']) bed.relaunch(name);
     for (const name of Object.keys(health)) await healthy(name);
     assert.deepEqual(await view(), before);
     check('graceful restart of all three services preserves wallet, receipts and history');
@@ -670,7 +481,7 @@ try {
 } finally {
   delete report.faults.current;
   clients.forEach((c) => c.close());
-  for (const name of Object.keys(procs).reverse()) await stop(name);
+  await bed.stopAll();
   if (model) {
     model.closeAllConnections();
     await new Promise((r) => model.close(r));
@@ -678,6 +489,6 @@ try {
   try {
     for (const id of await containers()) await exec(docker, ['--host', endpoint, 'rm', '--force', id]);
   } catch {}
-  await save();
+  await bed.save();
   console.log('REPORT ' + join(state, 'report.json'));
 }

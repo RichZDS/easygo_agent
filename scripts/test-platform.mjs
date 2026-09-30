@@ -1,21 +1,16 @@
 #!/usr/bin/env node
 // Local fixture-backed managed integration. Never reads provider credentials.
 import assert from 'node:assert/strict';
-import { spawn, execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { once } from 'node:events';
 import http from 'node:http';
-import net from 'node:net';
-import { mkdtemp, mkdir, writeFile, readFile } from 'node:fs/promises';
-import { openSync, closeSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { mkdtemp, writeFile, readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { createRPCClient } from './rpc-call.mjs';
-const exec = promisify(execFile),
-  root = resolve(fileURLToPath(new URL('..', import.meta.url)));
-const go = process.env.EASYGO_GO_BIN ?? 'go',
-  docker = process.env.EASYGO_DOCKER_TEST_BINARY,
+import { buildServices, exec, go, ports, root, sleep, testbed, until, loopServer } from './lib/procs.mjs';
+import { createPKI } from './lib/pki.mjs';
+import { localPlatform, writeConfigs } from './lib/config.mjs';
+import { browser } from './lib/web.mjs';
+const docker = process.env.EASYGO_DOCKER_TEST_BINARY,
   endpoint = process.env.EASYGO_DOCKER_TEST_ENDPOINT,
   image = process.env.EASYGO_DOCKER_TEST_IMAGE;
 if (!docker || !endpoint || !image) throw Error('Explicit dedicated Docker test binary/endpoint/image required.');
@@ -29,107 +24,20 @@ const state = await mkdtemp('/tmp/egp-'),
     paid_provider: false,
     max_active_provider: 0,
   };
-const children = [],
-  clients = [];
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const clients = [];
+const bed = testbed(state, { report });
 let model;
 const check = (name) => {
   report.checks.push(name);
   console.log('PASS ' + name);
 };
-async function save() {
-  await writeFile(join(state, 'report.json'), JSON.stringify(report, null, 2));
-}
-async function port() {
-  const s = net.createServer();
-  s.listen(0, '127.0.0.1');
-  await once(s, 'listening');
-  const p = s.address().port;
-  await new Promise((r) => s.close(r));
-  return p;
-}
-async function until(fn, timeout = 20000, interval = 250) {
-  const end = Date.now() + timeout;
-  while (Date.now() < end) {
-    const result = await fn();
-    if (result) return result;
-    await sleep(interval);
-  }
-  throw Error('Timed out waiting for condition');
-}
-function start(name, bin, args, env = {}) {
-  const fd = openSync(join(state, name + '.log'), 'a', 0o600);
-  const child = spawn(bin, args, {
-    cwd: root,
-    env: { PATH: process.env.PATH, LANG: 'C.UTF-8', ...env },
-    stdio: ['ignore', fd, fd],
-  });
-  closeSync(fd);
-  const entry = {
-    name,
-    child,
-    done: new Promise((r) => {
-      child.once('error', (e) => r({ error: e.message }));
-      child.once('exit', (code, signal) => r({ code, signal }));
-    }),
-  };
-  children.push(entry);
-  return entry;
-}
-async function stop(e, signal = 'SIGTERM') {
-  if (e.child.exitCode === null && e.child.signalCode === null) e.child.kill(signal);
-  let timer;
-  await Promise.race([
-    e.done,
-    new Promise((r) => {
-      timer = setTimeout(() => {
-        e.child.kill('SIGKILL');
-        r();
-      }, 12000);
-    }),
-  ]);
-  clearTimeout(timer);
-}
-function browser(origin) {
-  let cookie = '';
-  return {
-    async request(path, body, method = body === undefined ? 'GET' : 'POST', expected = 200) {
-      const r = await fetch(origin + path, {
-        method,
-        headers: { 'Content-Type': 'application/json', Origin: origin, ...(cookie ? { Cookie: cookie } : {}) },
-        body: body === undefined ? undefined : JSON.stringify(body),
-      });
-      const set = r.headers.get('set-cookie');
-      if (set) cookie = set.split(';')[0];
-      const value = await r.json();
-      assert.equal(r.status, expected, JSON.stringify(value));
-      return value;
-    },
-    async rpc(method, params = {}) {
-      return (await this.request('/api/rpc', { method, params })).result;
-    },
-    get cookie() {
-      return cookie;
-    },
-  };
-}
 try {
-  await exec('bash', [join(root, 'scripts/dev-pki.sh'), join(state, 'pki')]);
-  await exec(go, ['build', '-o', join(state, 'gateway'), './cmd/server'], { cwd: join(root, 'services/ai-gateway') });
-  await exec(go, ['build', '-o', join(state, 'workshop'), './cmd/server'], { cwd: join(root, 'services/workshop') });
+  const certs = await createPKI(join(state, 'pki'));
+  await buildServices(state);
   await exec(go, ['build', '-o', join(state, 'remote'), './cmd/easygo-remote'], { cwd: root });
-  await exec('npm', ['run', 'build'], { cwd: join(root, 'services/agent-loop') });
-  const [gp, wp, ap, hp] = await Promise.all([port(), port(), port(), port()]);
+  const [gp, wp, ap, hp] = await ports(4);
   const origin = `http://127.0.0.1:${hp}`;
   report.origin = origin;
-  const identity = (n) => ({
-    cert_file: join(state, 'pki', n, 'tls.crt'),
-    key_file: join(state, 'pki', n, 'tls.key'),
-    ca_file: join(state, 'pki/public/ca.crt'),
-  });
-  const cert = (n) => join(state, 'pki/public', n + '.crt');
-  const ep = (n, p) => ({ url: `https://127.0.0.1:${p}/rpc`, peer_certificate_file: cert(n) });
-  const grant = (id, methods, namespaces = ['*']) => ({ id, cert_file: cert(id), methods, namespaces });
   let beforeResponse,
     activeProvider = 0;
   model = http.createServer(async (req, res) => {
@@ -242,53 +150,15 @@ try {
   model.listen(0, '127.0.0.1');
   await once(model, 'listening');
   const mp = model.address().port;
-  const gateway = {
-    listen: `127.0.0.1:${gp}`,
-    tls: identity('ai-gateway'),
-    authorization: [
-      grant('client', ['health']),
-      grant('agent-loop', ['gateway.generate', 'gateway.models']),
-      grant('workshop', ['gateway.native']),
-    ],
-    meter: { ...ep('agent-loop', ap), database: join(state, 'meter.db'), max_output_tokens: 256 },
-    models: {
-      chat: {
-        protocol: 'chat_completions',
-        endpoint: `http://127.0.0.1:${mp}/chat`,
-        model: 'fixture-model',
-        api_key_env: 'FIXTURE_MODEL_KEY',
-      },
-      responses: {
-        protocol: 'responses',
-        endpoint: `http://127.0.0.1:${mp}/responses`,
-        model: 'fixture-model',
-        api_key_env: 'FIXTURE_MODEL_KEY',
-      },
-    },
-  };
-  const workshop = {
-    listen: `127.0.0.1:${wp}`,
-    tls: identity('workshop'),
-    authorization: [
-      grant('client', ['health']),
-      grant('agent-loop', [
-        'workshop.workflows',
-        'workshop.submit',
-        'workshop.get',
-        'workshop.list',
-        'workshop.cancel',
-        'workshop.resume',
-        'workshop.events',
-        'workshop.result',
-        'workshop.artifact',
-      ]),
-    ],
-    workshop: {
-      root: join(state, 'workshop-data'),
-      concurrency: 2,
-      queue_capacity: 8,
-      max_output_bytes: 4194304,
-      model_gateway: { ...ep('ai-gateway', gp), tls: identity('workshop') },
+  const { gateway, workshop, loop } = await localPlatform(
+    state,
+    certs,
+    { 'ai-gateway': gp, workshop: wp, 'agent-loop': ap, web: hp },
+    {
+      fixtureURL: `http://127.0.0.1:${mp}`,
+      maxOutputTokens: 256,
+      maxSteps: 4,
+      consolidateIntervalMs: 86400000,
       sandbox: {
         mode: 'docker',
         docker_binary: docker,
@@ -297,79 +167,24 @@ try {
         owner: 'platform-' + state.split('/').at(-1),
         host_root: join(state, 'workshop-data'),
       },
-      engines: { codex: { binary: 'codex' } },
-      runtime_profiles: { fixture: { engine: 'codex', protocol: 'responses', gateway_model: 'responses' } },
-      workflows: [
-        {
-          name: 'proof',
-          version: '1',
-          instructions: 'Execute offline proof.',
-          runtime: 'fixture',
-          policy: 'workspace-write',
-          timeout_seconds: 180,
-          artifacts: ['artifact.txt', 'isolation-proof.json'],
-        },
-      ],
-    },
-  };
-  const loop = {
-    listen: `127.0.0.1:${ap}`,
-    tls: identity('agent-loop'),
-    authorization: [
-      grant('client', ['health']),
-      grant('ai-gateway', ['platform.wallet.reserve', 'platform.wallet.settle']),
-    ],
-    database: join(state, 'agent.sqlite'),
-    gateway: ep('ai-gateway', gp),
-    workshop: ep('workshop', wp),
-    model: 'chat',
-    streaming: true,
-    max_steps: 4,
-    concurrency: 8,
-    context_bytes: 128000,
-    platform: {
-      listen: `127.0.0.1:${hp}`,
-      database: join(state, 'platform.sqlite'),
-      public_origin: origin,
-      secure_cookies: false,
-      registration: true,
-      bootstrap_admin: { email: 'admin@example.test', password_env: 'TEST_ADMIN_PASSWORD' },
-    },
-    knowledge: { database: join(state, 'knowledge.sqlite'), profile_limit: 5, consolidate_interval_ms: 86400000 },
-  };
-  for (const [name, config] of Object.entries({ gateway, workshop, loop }))
-    await writeFile(join(state, name + '.json'), JSON.stringify(config), { mode: 0o600 });
-  start('gateway', join(state, 'gateway'), ['--config', join(state, 'gateway.json')], {
-    FIXTURE_MODEL_KEY: 'fixture-key',
-  });
-  start('workshop', join(state, 'workshop'), ['--config', join(state, 'workshop.json')]);
-  let agent = start(
-    'loop',
-    process.execPath,
-    [join(root, 'services/agent-loop/dist/server.js'), '--config', join(state, 'loop.json')],
-    { TEST_ADMIN_PASSWORD: 'test-admin-password-v1' }
+    }
   );
+  await writeConfigs(state, { gateway, workshop, loop });
+  bed.start('gateway', join(state, 'gateway'), ['--config', join(state, 'gateway.json')], {
+    DEEPSEEK_API_KEY: 'fixture-key',
+  });
+  bed.start('workshop', join(state, 'workshop'), ['--config', join(state, 'workshop.json')]);
+  bed.start('loop', process.execPath, [loopServer, '--config', join(state, 'loop.json')], {
+    EASYGO_ADMIN_PASSWORD: 'test-admin-password-v1',
+  });
   for (const [name, p] of [
     ['ai-gateway', gp],
     ['workshop', wp],
     ['agent-loop', ap],
   ]) {
-    const tls = identity('client');
-    const c = createRPCClient({
-      url: ep(name, p).url,
-      certFile: tls.cert_file,
-      keyFile: tls.key_file,
-      caFile: tls.ca_file,
-      peerCertificateFile: cert(name),
-    });
+    const c = certs.client('client', name, p);
     clients.push(c);
-    await until(async () => {
-      try {
-        return await c.health();
-      } catch {
-        return false;
-      }
-    });
+    await until(() => c.health(), { retryErrors: true });
   }
   const admin = browser(origin),
     alice = browser(origin),
@@ -455,8 +270,7 @@ try {
         const t = await alice.rpc('workshop.get', { task_id: id });
         return !['queued', 'running', 'cancelling'].includes(t.status) && t;
       },
-      timeout,
-      750
+      { timeout, interval: 750 }
     );
   }
   task = await terminalTask(task.id);
@@ -572,14 +386,14 @@ try {
       report.soak.elapsed_ms = Date.now() - began;
       if (Date.now() - lastSave >= 60000) {
         const memory = {};
-        for (const c of children) {
+        for (const c of bed.all) {
           const status = await readFile(`/proc/${c.child.pid}/status`, 'utf8');
           memory[c.name] = Number(status.match(/VmRSS:\s+(\d+)/)?.[1] ?? 0);
           assert.equal(c.child.exitCode, null);
         }
         samples.push({ elapsed_ms: Date.now() - began, rss_kib: memory, completed });
         lastSave = Date.now();
-        await save();
+        await bed.save();
         console.log('SOAK ' + JSON.stringify(samples.at(-1)));
       }
       await sleep(Math.min(Math.max(0, 15000 - (Date.now() - batch)), Math.max(0, deadline - Date.now())));
@@ -601,7 +415,7 @@ try {
     check('bounded concurrent soak and long task completed with exact aggregate credit accounting');
   }
   report.pass = true;
-  await save();
+  await bed.save();
   if (process.env.EASYGO_PLATFORM_KEEP === '1') {
     console.log('READY ' + JSON.stringify({ state, origin }));
     await new Promise((r) => {
@@ -616,11 +430,11 @@ try {
   process.exitCode = 1;
 } finally {
   clients.forEach((c) => c.close());
-  for (const c of children.reverse()) await stop(c);
+  await bed.stopAll();
   if (model) {
     model.closeAllConnections();
     await new Promise((r) => model.close(r));
   }
-  await save();
+  await bed.save();
   console.log('REPORT ' + join(state, 'report.json'));
 }

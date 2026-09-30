@@ -66,25 +66,29 @@ func New(c Config) (*http.Server, error) {
 	}
 	return rpc.NewServer(c.ServerConfig, Methods(g), c.MaxRequestBytes)
 }
+
+type modelsParams struct {
+	Namespace string `json:"namespace"`
+}
+type nativeParams struct {
+	Namespace string          `json:"namespace"`
+	Model     string          `json:"model"`
+	Protocol  string          `json:"protocol"`
+	Body      json.RawMessage `json:"body"`
+}
+type generateParams struct {
+	Namespace string      `json:"namespace"`
+	Request   *ai.Request `json:"request"`
+	Stream    bool        `json:"stream,omitempty"`
+}
+
 func Methods(g *gateway.Gateway) map[string]rpc.Method {
 	return map[string]rpc.Method{
-		"gateway.models": func(ctx context.Context, raw json.RawMessage, s *rpc.Stream) (any, *rpc.Error) {
-			var p struct {
-				Namespace string `json:"namespace"`
-			}
-			if rpc.Decode(raw, &p) != nil {
-				return nil, rpc.InvalidParams()
-			}
+		"gateway.models": rpc.Typed(func(ctx context.Context, _ modelsParams, s *rpc.Stream) (any, *rpc.Error) {
 			return map[string]any{"models": g.Models()}, nil
-		},
-		"gateway.native": func(ctx context.Context, raw json.RawMessage, s *rpc.Stream) (any, *rpc.Error) {
-			var p struct {
-				Namespace string          `json:"namespace"`
-				Model     string          `json:"model"`
-				Protocol  string          `json:"protocol"`
-				Body      json.RawMessage `json:"body"`
-			}
-			if rpc.Decode(raw, &p) != nil || p.Model == "" || len(p.Body) == 0 {
+		}),
+		"gateway.native": rpc.Typed(func(ctx context.Context, p nativeParams, s *rpc.Stream) (any, *rpc.Error) {
+			if p.Model == "" || len(p.Body) == 0 {
 				return nil, rpc.InvalidParams()
 			}
 			result, err := g.Native(gateway.WithNamespace(ctx, p.Namespace), p.Model, p.Protocol, s.ID(), p.Body)
@@ -92,14 +96,9 @@ func Methods(g *gateway.Gateway) map[string]rpc.Method {
 				return nil, domainError(err)
 			}
 			return result, nil
-		},
-		"gateway.generate": func(ctx context.Context, raw json.RawMessage, s *rpc.Stream) (any, *rpc.Error) {
-			var p struct {
-				Namespace string      `json:"namespace"`
-				Request   *ai.Request `json:"request"`
-				Stream    bool        `json:"stream,omitempty"`
-			}
-			if rpc.Decode(raw, &p) != nil || p.Request == nil {
+		}),
+		"gateway.generate": rpc.Typed(func(ctx context.Context, p generateParams, s *rpc.Stream) (any, *rpc.Error) {
+			if p.Request == nil {
 				return nil, rpc.InvalidParams()
 			}
 			p.Request.RequestID = s.ID()
@@ -118,7 +117,7 @@ func Methods(g *gateway.Gateway) map[string]rpc.Method {
 				return nil, nil
 			}
 			return result, nil
-		},
+		}),
 	}
 }
 func domainError(err error) *rpc.Error {

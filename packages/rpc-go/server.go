@@ -68,6 +68,18 @@ type request struct {
 }
 type Method func(context.Context, json.RawMessage, *Stream) (any, *Error)
 
+// Typed strictly decodes params into P before calling fn; params that Decode
+// rejects answer InvalidParams without running fn.
+func Typed[P any](fn func(context.Context, P, *Stream) (any, *Error)) Method {
+	return func(ctx context.Context, raw json.RawMessage, s *Stream) (any, *Error) {
+		var p P
+		if Decode(raw, &p) != nil {
+			return nil, InvalidParams()
+		}
+		return fn(ctx, p, s)
+	}
+}
+
 type Stream struct {
 	w        http.ResponseWriter
 	id       string

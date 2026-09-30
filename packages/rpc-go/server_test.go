@@ -185,3 +185,43 @@ func TestStrictDecodeOpaqueStateAndBounds(t *testing.T) {
 		}
 	}
 }
+func TestTypedDecodesStrictlyBeforeCalling(t *testing.T) {
+	type params struct {
+		Namespace string          `json:"namespace"`
+		N         int             `json:"n,omitempty"`
+		State     json.RawMessage `json:"state,omitempty"`
+	}
+	type key struct{}
+	var calls atomic.Int64
+	var got params
+	failure := rpc.Failure(-32000, "fixture_error")
+	stream := &rpc.Stream{}
+	method := rpc.Typed(func(ctx context.Context, p params, s *rpc.Stream) (any, *rpc.Error) {
+		calls.Add(1)
+		got = p
+		if ctx.Value(key{}) != "ctx" || s != stream {
+			t.Error("context or stream not passed through")
+		}
+		if p.N < 0 {
+			return nil, failure
+		}
+		return "ok", nil
+	})
+	ctx := context.WithValue(context.Background(), key{}, "ctx")
+	result, e := method(ctx, json.RawMessage(`{"namespace":"tenant-a","n":2,"state":{"x":[1]}}`), stream)
+	if e != nil || result != "ok" || got.Namespace != "tenant-a" || got.N != 2 || string(got.State) != `{"x":[1]}` {
+		t.Fatalf("valid params: %v %+v %+v", result, e, got)
+	}
+	if result, e = method(ctx, json.RawMessage(`{"namespace":"tenant-a","n":-1}`), stream); result != nil || e != failure {
+		t.Fatalf("handler error not returned as-is: %v %+v", result, e)
+	}
+	for _, bad := range []string{`{`, `[]`, `null`, `"x"`, `{"namespace":"a","x":0}`, `{"Namespace":"a"}`, `{"namespace":"a","n":null}`, `{"namespace":"a","n":1.2}`, `{"namespace":"a","namespace":"b"}`, "{\"namespace\":\"\xff\"}"} {
+		result, e = method(ctx, json.RawMessage(bad), stream)
+		if result != nil || e == nil || e.Code != -32602 || e.Data.Code != "invalid_params" {
+			t.Errorf("%q => %v %+v want invalid_params", bad, result, e)
+		}
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("handler ran %d times, want 2", calls.Load())
+	}
+}

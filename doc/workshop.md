@@ -38,6 +38,8 @@ executable, command options, timeout, policy or workspace path.
 
 ## HTTP contract
 
+> 已移除：本节的 `/v1/tasks`、`/v1/workflows` 路由和 bearer 鉴权已随 2026-09-30 的清理移除，现行工坊只提供 `workshop.*` mTLS RPC，见 [RPC 契约](../contracts/rpc-v1.md)。
+
 Task routes start at `/v1/tasks`; `GET /v1/workflows` discovers the configured
 catalog under the same bearer authentication. It returns a name-sorted array with
 only `name`, `version`, `engine`, `model`, `policy`, `timeout_seconds` and `artifacts`.

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { delimiter, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createServer } from 'node:net';
 import { spawn } from 'node:child_process';
@@ -11,9 +11,24 @@ import { Knowledge } from '../dist/knowledge/index.js';
 // This also runs after foreman integrates platform + Store outbox. In an isolated
 // worker checkout, an explicit compiled snapshot can be supplied for the proof.
 const dist = process.env.EASYGO_KNOWLEDGE_PLATFORM_DIST ?? fileURLToPath(new URL('../dist', import.meta.url));
+// The Go half runs the remote TUI adapter test from the repository root.
+const repo = resolve(fileURLToPath(new URL('../../../', import.meta.url)));
+const go =
+  process.env.EASYGO_GO ??
+  (process.env.PATH ?? '')
+    .split(delimiter)
+    .filter(Boolean)
+    .map((dir) => join(dir, 'go'))
+    .find((file) => existsSync(file));
 test(
   'actual TS public auth/Store completion outbox/Knowledge plus Go remote adapter',
-  { skip: !existsSync(join(dist, 'platform/server.js')), timeout: 60000 },
+  {
+    skip:
+      !existsSync(join(dist, 'platform/server.js')) ||
+      (!go && 'needs Go: set EASYGO_GO or put go on PATH') ||
+      (!existsSync(join(repo, 'internal/remotetui')) && 'needs the repository internal/remotetui'),
+    timeout: 60000,
+  },
   async (t) => {
     const { createPlatform } = await import(pathToFileURL(join(dist, 'platform/server.js')).href);
     const { Store } = await import(pathToFileURL(join(dist, 'store.js')).href);
@@ -135,9 +150,8 @@ test(
       bob.cookie
     );
     assert.notEqual(injected.status, 200);
-    const go = process.env.EASYGO_GO ?? '/home/ubuntu/sdk/go/bin/go';
     const command = spawn(go, ['test', './internal/remotetui', '-run', '^TestPlatformIntegration$', '-count=1', '-v'], {
-      cwd: resolve(fileURLToPath(new URL('../../../', import.meta.url))),
+      cwd: repo,
       env: {
         ...process.env,
         EASYGO_REMOTE_TEST_URL: origin,

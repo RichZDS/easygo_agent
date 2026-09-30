@@ -194,7 +194,16 @@ export async function harness(pki, options = {}) {
     streaming: false,
     ...options.config,
   };
-  const running = await startServer(config);
+  let running;
+  try {
+    running = await startServer(config);
+  } catch (error) {
+    // Leaving the fixtures listening keeps the test file alive until its timeout.
+    await gateway.close();
+    await workshop.close();
+    rmSync(dir, { recursive: true, force: true });
+    throw error;
+  }
   const endpoint = { url: `https://localhost:${running.address.port}/rpc`, peer_certificate_file: pki.cert('loop') };
   const client = new RpcClient(pki.tls('client'), endpoint);
   return {

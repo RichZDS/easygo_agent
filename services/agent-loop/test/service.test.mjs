@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { writeFileSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout } from 'node:timers/promises';
 import { startServer, parseConfig } from '../dist/server.js';
@@ -22,28 +22,42 @@ const envelope = (method, params = {}, id = 'test') => ({
   params: { namespace: 'demo', ...params },
 });
 
-test('pack assistant instructions reach model requests and missing roles reject startup', async () => {
-  const h = await harness(pki, {
-    config: { pack_dir: new URL('../../../packs/base', import.meta.url).pathname },
-    gateway: (b, res) => {
-      assert.match(b.params.request.messages[0].content[0].text, /outcome and platform acceptance/);
-      assert.equal(
-        b.params.request.tools.some((t) => t.name === 'calculator'),
-        false
+const packDir = new URL('../../../packs/base', import.meta.url).pathname;
+test(
+  'pack assistant instructions reach model requests and missing roles reject startup',
+  { skip: !existsSync(packDir) && 'needs the repository packs/base' },
+  async () => {
+    const h = await harness(pki, {
+      config: { pack_dir: packDir },
+      gateway: (b, res) => {
+        assert.match(b.params.request.messages[0].content[0].text, /outcome and platform acceptance/);
+        assert.equal(
+          b.params.request.tools.some((t) => t.name === 'calculator'),
+          false
+        );
+        json(res, b.id, response());
+      },
+    });
+    try {
+      const run = await start(h);
+      assert.equal((await terminal(h, run.id)).status, 'completed');
+      await assert.rejects(
+        startServer({ ...h.config, database: join(h.dir, 'missing-role.sqlite'), pack_dir: join(h.dir, 'absent') }),
+        /ENOENT/
       );
-      json(res, b.id, response());
-    },
-  });
-  try {
-    const run = await start(h);
-    assert.equal((await terminal(h, run.id)).status, 'completed');
-    await assert.rejects(
-      startServer({ ...h.config, database: join(h.dir, 'missing-role.sqlite'), pack_dir: join(h.dir, 'absent') }),
-      /ENOENT/
-    );
-  } finally {
-    await h.close();
+    } finally {
+      await h.close();
+    }
   }
+);
+
+test('harness closes its gateway and workshop fixtures when startServer fails', async () => {
+  // Closed servers leave the active list a tick after close() calls back, and no test here
+  // keeps one open, so the count must settle at zero both before and after.
+  const listening = () => process.getActiveResourcesInfo().filter((type) => type === 'TCPServerWrap').length;
+  await until(() => listening() === 0, 2000);
+  await assert.rejects(harness(pki, { config: { pack_dir: join(pki.dir, 'absent') } }), /ENOENT/);
+  await until(() => listening() === 0, 2000);
 });
 
 test('public mTLS surface: cert trust/pins, exact methods/namespaces, health and strict envelopes', async () => {

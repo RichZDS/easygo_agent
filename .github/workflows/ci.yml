@@ -28,5 +28,11 @@ jobs:
       - run: npm ci --prefix services/agent-loop
       - run: make build vet test fmt
       - run: make test-e2e
-      # golangci-lint is not installed here yet; see make lint.
-      - run: node scripts/check-cli-versions.mjs
+      # Install only, so make lint stays the single entry point (CLI version pins, then every Go module).
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.14.0
+          install-only: true
+      # make lint skips golangci-lint when it is not on PATH; fail here instead.
+      - run: golangci-lint version
+      - run: make lint

@@ -93,6 +93,8 @@ make test-e2e
 
 Go 在 PATH 中即可，或设置 `EASYGO_GO_BIN`（Makefile 和端到端脚本都认）。`make build`、`make vet`、`make fmt`、`make lint`、`make tidy` 分别是构建、静态检查、格式检查（gofmt + prettier）、golangci-lint（不在 PATH 上时跳过）和 `go mod tidy`，目标定义见 [`Makefile`](Makefile)。
 
+CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在每次 push 和 pull request 上跑 `make build vet test fmt`、`make test-e2e` 和 `make lint`，其中 golangci-lint 固定为 v2.14.0，本地跑 `make lint` 请用同一版本。
+
 <details>
 <summary>手动等价命令</summary>
 

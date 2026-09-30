@@ -197,7 +197,7 @@ EASYGO_DOCKER_SOCKET=/path/to/dedicated/docker.sock node scripts/test-compose.mj
 
 ## 11. `EASYGO_*` 环境变量总表
 
-仓库代码（`doc/` 以外）读取或设置的 `EASYGO_*` 变量共 68 个，按由谁设置分四组。**第 4 组是测试专用，生产部署不要设置。** 模型供应商 key（如 `DEEPSEEK_API_KEY`）不带这个前缀，不在表内。
+仓库代码（`doc/` 以外）读取或设置的 `EASYGO_*` 变量共 67 个（第 4 组另列一个已并入 `EASYGO_GO_BIN` 的旧名 `EASYGO_GO`），按由谁设置分四组。**第 4 组是测试专用，生产部署不要设置。** 模型供应商 key（如 `DEEPSEEK_API_KEY`）不带这个前缀，不在表内。
 
 ### 11.1 托管部署：`.env`，经 `compose.yaml` 和 init 生效
 

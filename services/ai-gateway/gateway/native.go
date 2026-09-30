@@ -92,11 +92,12 @@ func (g *Gateway) Native(ctx context.Context, alias, protocol, requestID string,
 	if e = validateNative(raw, contentType, protocol, g.eventLimit); e != nil {
 		return out, e
 	}
-	if contentType == "text/event-stream" {
+	switch contentType {
+	case "text/event-stream":
 		_, e = decodeStream(bytes.NewReader(raw), m, alias, limit, g.eventLimit, func(ai.Event) error { return nil })
-	} else if contentType == "application/json" {
+	case "application/json":
 		_, e = decodeResponse(m, alias, raw)
-	} else {
+	default:
 		return out, fail(CodeInvalidResponse, "unsupported native response content type")
 	}
 	// Usage and cost come from the accounting reader; parsing here only validates.
@@ -166,8 +167,10 @@ func validateNative(raw []byte, contentType, protocol string, eventLimit int) er
 		if e != nil {
 			return e
 		}
+		// chat_completions events carry no type; a missing or non-string type is
+		// neither terminal nor an error, and the stream still needs a terminal.
 		var typ string
-		json.Unmarshal(o["type"], &typ)
+		_ = json.Unmarshal(o["type"], &typ)
 		if typ == "error" || typ == "response.failed" || typ == "response.incomplete" {
 			return fail(CodeUpstreamError, "native provider failed")
 		}
@@ -176,8 +179,9 @@ func validateNative(raw []byte, contentType, protocol string, eventLimit int) er
 			if e != nil {
 				return e
 			}
+			// A missing or non-string status is not "completed" and fails below.
 			var status string
-			json.Unmarshal(response["status"], &status)
+			_ = json.Unmarshal(response["status"], &status)
 			if status != "completed" {
 				return fail(CodeIncompleteResponse, "native response incomplete")
 			}

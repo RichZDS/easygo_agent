@@ -38,7 +38,7 @@ func Resolve(file FileConfig) (Config, error) {
 		return value, nil
 	}
 	for alias, f := range file.Models {
-		f.Model.APIKey, err = resolve(f.APIKeyEnv)
+		f.APIKey, err = resolve(f.APIKeyEnv)
 		if err != nil {
 			return Config{}, err
 		}

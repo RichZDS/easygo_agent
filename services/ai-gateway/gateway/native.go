@@ -36,22 +36,22 @@ func (g *Gateway) Native(ctx context.Context, alias, protocol, requestID string,
 	var accounting *accountingReader
 	var price *Pricing
 	defer func() {
-		if e := g.settleObservation(&obs, start, accounting, price, settle, err, "invalid_response"); e != nil {
+		if e := g.settleObservation(&obs, start, accounting, price, settle, err); e != nil {
 			err, out = e, NativeResponse{}
 		}
 	}()
 	m, ok := g.models[alias]
 	if !ok {
-		return out, fail("unknown_model", "model alias is not configured")
+		return out, fail(CodeUnknownModel, "model alias is not configured")
 	}
 	obs.Protocol = m.Protocol
 	price = m.Price
 	if protocol != m.Protocol || protocol == "custom" {
-		return out, fail("unsupported_capability", "runtime protocol does not match model route")
+		return out, fail(CodeUnsupportedCapability, "runtime protocol does not match model route")
 	}
 	var body map[string]json.RawMessage
 	if int64(len(raw)) > g.bodyLimit || rpc.Decode(raw, &body) != nil || body == nil {
-		return out, fail("invalid_request", "invalid native request")
+		return out, fail(CodeInvalidRequest, "invalid native request")
 	}
 	// Operator parameters remain authoritative. Native framework tool definitions
 	// are intentionally retained instead of translated into the neutral tool API.
@@ -65,7 +65,7 @@ func (g *Gateway) Native(ctx context.Context, alias, protocol, requestID string,
 	body["model"], _ = json.Marshal(m.Model)
 	data, e := json.Marshal(body)
 	if e != nil || int64(len(data)) > g.bodyLimit {
-		return out, fail("request_too_large", "native request exceeds limit")
+		return out, fail(CodeRequestTooLarge, "native request exceeds limit")
 	}
 	data, settle, e = g.admit(ctx, m, obs.RequestID, alias, "gateway.native", data)
 	if e != nil {
@@ -97,19 +97,19 @@ func (g *Gateway) Native(ctx context.Context, alias, protocol, requestID string,
 	} else if contentType == "application/json" {
 		_, e = decodeResponse(m, alias, raw)
 	} else {
-		return out, fail("invalid_response", "unsupported native response content type")
+		return out, fail(CodeInvalidResponse, "unsupported native response content type")
 	}
 	// Usage and cost come from the accounting reader; parsing here only validates.
 	// Native framework-specific tools may exceed the neutral parser's vocabulary,
 	// so unsupported_capability still forwards the original bytes.
 	if e != nil {
 		var problem *Error
-		if !errors.As(e, &problem) || problem.Code != "unsupported_capability" {
+		if !errors.As(e, &problem) || problem.Code != CodeUnsupportedCapability {
 			return out, e
 		}
 	}
 	if ctx.Err() != nil {
-		return out, caused("canceled", "request canceled", ctx.Err())
+		return out, caused(CodeCanceled, "request canceled", ctx.Err())
 	}
 	return NativeResponse{ContentType: contentType, Body: raw}, nil
 }
@@ -120,10 +120,10 @@ func validateNative(raw []byte, contentType, protocol string, eventLimit int) er
 	check := func(data []byte) (map[string]json.RawMessage, error) {
 		var o map[string]json.RawMessage
 		if rpc.Decode(data, &o) != nil || o == nil {
-			return nil, fail("invalid_response", "invalid native JSON")
+			return nil, fail(CodeInvalidResponse, "invalid native JSON")
 		}
 		if value, ok := o["error"]; ok && !bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
-			return nil, fail("upstream_error", "native provider error")
+			return nil, fail(CodeUpstreamError, "native provider error")
 		}
 		return o, nil
 	}
@@ -132,7 +132,7 @@ func validateNative(raw []byte, contentType, protocol string, eventLimit int) er
 		return e
 	}
 	if !bytes.HasSuffix(raw, []byte("\n\n")) && !bytes.HasSuffix(raw, []byte("\r\n\r\n")) {
-		return fail("truncated_stream", "native SSE framing incomplete")
+		return fail(CodeTruncatedStream, "native SSE framing incomplete")
 	}
 	var data []string
 	size := 0
@@ -141,7 +141,7 @@ func validateNative(raw []byte, contentType, protocol string, eventLimit int) er
 		if line != "" {
 			size += len(line)
 			if size > eventLimit {
-				return fail("response_too_large", "native SSE frame exceeds limit")
+				return fail(CodeResponseTooLarge, "native SSE frame exceeds limit")
 			}
 			if strings.HasPrefix(line, "data:") {
 				data = append(data, strings.TrimPrefix(line[5:], " "))
@@ -156,7 +156,7 @@ func validateNative(raw []byte, contentType, protocol string, eventLimit int) er
 		data = nil
 		size = 0
 		if done {
-			return fail("invalid_response", "native SSE data after terminal")
+			return fail(CodeInvalidResponse, "native SSE data after terminal")
 		}
 		if payload == "[DONE]" && protocol == "chat_completions" {
 			done = true
@@ -169,7 +169,7 @@ func validateNative(raw []byte, contentType, protocol string, eventLimit int) er
 		var typ string
 		json.Unmarshal(o["type"], &typ)
 		if typ == "error" || typ == "response.failed" || typ == "response.incomplete" {
-			return fail("upstream_error", "native provider failed")
+			return fail(CodeUpstreamError, "native provider failed")
 		}
 		if protocol == "responses" && typ == "response.completed" {
 			response, e := check(o["response"])
@@ -179,7 +179,7 @@ func validateNative(raw []byte, contentType, protocol string, eventLimit int) er
 			var status string
 			json.Unmarshal(response["status"], &status)
 			if status != "completed" {
-				return fail("incomplete_response", "native response incomplete")
+				return fail(CodeIncompleteResponse, "native response incomplete")
 			}
 			done = true
 		}
@@ -188,7 +188,7 @@ func validateNative(raw []byte, contentType, protocol string, eventLimit int) er
 		}
 	}
 	if !done {
-		return fail("truncated_stream", "native SSE has no terminal event")
+		return fail(CodeTruncatedStream, "native SSE has no terminal event")
 	}
 	return nil
 }

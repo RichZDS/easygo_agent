@@ -36,13 +36,13 @@ func validPath(p string) bool {
 }
 func validateMapping(c *CustomMapping) error {
 	if c == nil || c.Request["model"] == "" || c.Request["messages"] == "" || c.Response["finish_reason"] == "" || (c.Response["text"] == "") == (c.Response["content"] == "") {
-		return fail("invalid_config", "custom mapping requires model/messages, finish_reason and exactly one of text/content")
+		return fail(CodeInvalidConfig, "custom mapping requires model/messages, finish_reason and exactly one of text/content")
 	}
 	if (c.Response["usage.input_tokens"] == "") != (c.Response["usage.output_tokens"] == "") {
-		return fail("invalid_config", "custom usage requires both input and output mappings")
+		return fail(CodeInvalidConfig, "custom usage requires both input and output mappings")
 	}
 	if c.Response["usage.input_tokens"] == "" && (c.Response["usage.cache_read_tokens"] != "" || c.Response["usage.cache_write_tokens"] != "") {
-		return fail("invalid_config", "custom cache usage requires input and output mappings")
+		return fail(CodeInvalidConfig, "custom cache usage requires input and output mappings")
 	}
 	for _, side := range []struct {
 		paths   map[string]string
@@ -51,11 +51,11 @@ func validateMapping(c *CustomMapping) error {
 		paths := []string{}
 		for field, path := range side.paths {
 			if !side.allowed[field] || !validPath(path) {
-				return fail("invalid_config", "custom mapping field or path is invalid")
+				return fail(CodeInvalidConfig, "custom mapping field or path is invalid")
 			}
 			for _, other := range paths {
 				if path == other || strings.HasPrefix(path, other+".") || strings.HasPrefix(other, path+".") {
-					return fail("invalid_config", "custom mapping paths overlap")
+					return fail(CodeInvalidConfig, "custom mapping paths overlap")
 				}
 			}
 			paths = append(paths, path)
@@ -71,13 +71,13 @@ func setPath(o object, path string, value any) error {
 		}
 		child := obj(o[p])
 		if child == nil {
-			return fail("invalid_parameters", "custom parameter collides with mapped field")
+			return fail(CodeInvalidParameters, "custom parameter collides with mapped field")
 		}
 		o = child
 	}
 	last := parts[len(parts)-1]
 	if _, ok := o[last]; ok {
-		return fail("invalid_parameters", "custom parameter collides with mapped field")
+		return fail(CodeInvalidParameters, "custom parameter collides with mapped field")
 	}
 	o[last] = value
 	return nil
@@ -136,13 +136,13 @@ func encodeCustom(m Model, r ai.Request) (object, error) {
 	for _, path := range m.Custom.Request {
 		root := strings.Split(path, ".")[0]
 		if _, ok := out[root]; ok {
-			return nil, fail("invalid_parameters", "parameter overrides custom request mapping")
+			return nil, fail(CodeInvalidParameters, "parameter overrides custom request mapping")
 		}
 	}
 	for field, v := range canonical {
 		path := m.Custom.Request[field]
 		if path == "" {
-			return nil, fail("unsupported_capability", "custom mapping does not support a requested field")
+			return nil, fail(CodeUnsupportedCapability, "custom mapping does not support a requested field")
 		}
 		if e := setPath(out, path, v); e != nil {
 			return nil, e
@@ -156,7 +156,7 @@ func decodeCustom(m Model, alias string, o object) (ai.Response, error) {
 	for field, path := range m.Custom.Response {
 		v, ok := getPath(o, path)
 		if !ok {
-			return r, fail("invalid_response", "custom response is missing a mapped field")
+			return r, fail(CodeInvalidResponse, "custom response is missing a mapped field")
 		}
 		values[field] = v
 	}
@@ -164,21 +164,21 @@ func decodeCustom(m Model, alias string, o object) (ai.Response, error) {
 		var good bool
 		r.ID, good = v.(string)
 		if !good {
-			return r, fail("invalid_response", "custom id must be a string")
+			return r, fail(CodeInvalidResponse, "custom id must be a string")
 		}
 	}
 	if v, ok := values["text"]; ok {
 		s, good := v.(string)
 		if !good {
-			return r, fail("invalid_response", "custom text must be a string")
+			return r, fail(CodeInvalidResponse, "custom text must be a string")
 		}
 		r.Message.Content = append(r.Message.Content, ai.Block{Type: "text", Text: s})
 	} else {
 		if _, ok := values["content"].([]any); !ok {
-			return r, fail("invalid_response", "custom content must be an array")
+			return r, fail(CodeInvalidResponse, "custom content must be an array")
 		}
 		if json.Unmarshal(rawJSON(values["content"]), &r.Message.Content) != nil {
-			return r, fail("invalid_response", "custom content is invalid")
+			return r, fail(CodeInvalidResponse, "custom content is invalid")
 		}
 	}
 	var err error
@@ -193,7 +193,7 @@ func decodeCustom(m Model, alias string, o object) (ai.Response, error) {
 	i, io := number(values["usage.input_tokens"])
 	n, no := number(values["usage.output_tokens"])
 	if (values["usage.input_tokens"] != nil && !io) || (values["usage.output_tokens"] != nil && !no) {
-		return r, fail("invalid_response", "invalid custom usage counters")
+		return r, fail(CodeInvalidResponse, "invalid custom usage counters")
 	}
 	if io && no {
 		u.Known = true
@@ -204,13 +204,13 @@ func decodeCustom(m Model, alias string, o object) (ai.Response, error) {
 		if v, ok := values[field]; ok {
 			n, good := number(v)
 			if !good {
-				return r, fail("invalid_response", "invalid custom cache usage")
+				return r, fail(CodeInvalidResponse, "invalid custom cache usage")
 			}
 			*dst = n
 		}
 	}
 	if !validUsage(u) {
-		return r, fail("invalid_response", "inconsistent custom usage")
+		return r, fail(CodeInvalidResponse, "inconsistent custom usage")
 	}
 	r.Usage = u
 	return r, nil

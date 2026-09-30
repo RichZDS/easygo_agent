@@ -74,8 +74,17 @@ type Method func(context.Context, json.RawMessage, *Stream) (any, *Error)
 // Typed strictly decodes params into P before calling fn; params that Decode
 // rejects answer InvalidParams without running fn.
 func Typed[P any](fn func(context.Context, P, *Stream) (any, *Error)) Method {
+	var zero P
+	return TypedWith(zero, fn)
+}
+
+// TypedWith is Typed with defaults: fields absent from params keep their value
+// from defaults, while explicit values, including zero, replace it. defaults is
+// copied by value per call, so it must not hold non-nil maps, slices or
+// pointers, which Decode would write through into state shared by all calls.
+func TypedWith[P any](defaults P, fn func(context.Context, P, *Stream) (any, *Error)) Method {
 	return func(ctx context.Context, raw json.RawMessage, s *Stream) (any, *Error) {
-		var p P
+		p := defaults
 		if Decode(raw, &p) != nil {
 			return nil, InvalidParams()
 		}

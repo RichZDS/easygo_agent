@@ -1,7 +1,6 @@
 package workshop
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -13,13 +12,12 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 )
 
-// maxRelayBodyBytes bounds a relayed request and the gateway's response; the
-// in-container proxy (cmd/task-shim) applies the same request limit.
+// maxRelayBodyBytes bounds a relayed request (the gateway reply is bounded by
+// rpc.Client's equal 16 MiB default); cmd/task-shim applies the same limit.
 const maxRelayBodyBytes = 16 << 20
 
 // A task-local capability exposes only the selected model generation operation.
@@ -32,23 +30,26 @@ func startModelRelayOn(ctx context.Context, cfg *ModelGateway, namespace string,
 	if cfg == nil || !rpc.ValidNamespace(namespace) {
 		return "", "", nil, errors.New("model gateway unavailable")
 	}
-	endpoint, e := url.Parse(cfg.URL)
-	if e != nil || endpoint.Scheme != "https" || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
-		return "", "", nil, errors.New("invalid model gateway URL")
-	}
 	tlsConfig, e := rpc.ClientTLS(cfg.TLS, cfg.PeerCertificateFile)
 	if e != nil {
 		return "", "", nil, e
 	}
-	transport := &http.Transport{TLSClientConfig: tlsConfig}
-	client := &http.Client{Transport: transport, Timeout: 120 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	// With a TLS config and valid limits, NewClient fails only on the endpoint
+	// (https, host, no user info, query or fragment). Replies keep the client's
+	// 16 MiB default, the same bound as maxRelayBodyBytes.
+	client, e := rpc.NewClient(cfg.URL, tlsConfig, rpc.Options{Timeout: 120 * time.Second})
+	if e != nil {
+		return "", "", nil, errors.New("invalid model gateway URL")
+	}
 	listener, e := net.Listen(network, address)
 	if e != nil {
+		client.Close()
 		return "", "", nil, e
 	}
 	secret := make([]byte, 32)
 	if _, e = rand.Read(secret); e != nil {
 		listener.Close()
+		client.Close()
 		return "", "", nil, e
 	}
 	token := hex.EncodeToString(secret)
@@ -59,7 +60,7 @@ func startModelRelayOn(ctx context.Context, cfg *ModelGateway, namespace string,
 		case slots <- struct{}{}:
 			defer func() { <-slots }()
 		default:
-			http.Error(w, "model relay capacity exceeded", 429)
+			http.Error(w, "model relay capacity exceeded", http.StatusTooManyRequests)
 			return
 		}
 		credential := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -67,7 +68,7 @@ func startModelRelayOn(ctx context.Context, cfg *ModelGateway, namespace string,
 			credential = r.Header.Get("X-Api-Key")
 		}
 		if subtle.ConstantTimeCompare([]byte(credential), []byte(token)) != 1 {
-			http.Error(w, "unauthorized", 401)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/crew/") {
@@ -78,7 +79,7 @@ func startModelRelayOn(ctx context.Context, cfg *ModelGateway, namespace string,
 			serveCrew(w, r, crew[0])
 			return
 		}
-		if r.Method != "POST" || r.URL.Path != path || (r.URL.RawQuery != "" && !(profile.Protocol == "anthropic" && r.URL.RawQuery == "beta=true")) {
+		if r.Method != "POST" || r.URL.Path != path || (r.URL.RawQuery != "" && (profile.Protocol != "anthropic" || r.URL.RawQuery != "beta=true")) {
 			http.Error(w, "unsupported model operation", 404)
 			return
 		}
@@ -92,50 +93,42 @@ func startModelRelayOn(ctx context.Context, cfg *ModelGateway, namespace string,
 		stop := context.AfterFunc(ctx, cancel)
 		defer stop()
 		defer cancel()
-		idBytes := make([]byte, 16)
-		if _, e = rand.Read(idBytes); e != nil {
-			http.Error(w, "unavailable", 503)
+		// The child sees only a constant 502 text, never the gateway's error,
+		// envelope or transport detail.
+		var reply json.RawMessage
+		if e = client.Call(callCtx, "gateway.native", map[string]any{"namespace": namespace, "model": profile.GatewayModel, "protocol": profile.Protocol, "body": object}, &reply); e != nil {
+			var rejected *rpc.Error
+			if errors.As(e, &rejected) {
+				http.Error(w, "model gateway rejected request", http.StatusBadGateway)
+			} else {
+				http.Error(w, "model gateway unavailable", http.StatusBadGateway)
+			}
 			return
 		}
-		id := hex.EncodeToString(idBytes)
-		payload, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": "gateway.native", "params": map[string]any{"namespace": namespace, "model": profile.GatewayModel, "protocol": profile.Protocol, "body": object}})
-		request, e := http.NewRequestWithContext(callCtx, "POST", cfg.URL, bytes.NewReader(payload))
-		if e != nil {
-			http.Error(w, "unavailable", 503)
+		// Strict decode, as before rpc.Client: unknown fields and a null result fail.
+		var result struct {
+			ContentType string `json:"content_type"`
+			Body        string `json:"body"`
+		}
+		if rpc.Decode(reply, &result) != nil {
+			http.Error(w, "model gateway rejected request", http.StatusBadGateway)
 			return
 		}
-		request.Header.Set("Content-Type", "application/json")
-		response, e := client.Do(request)
-		if e != nil {
-			http.Error(w, "model gateway unavailable", 502)
-			return
-		}
-		defer response.Body.Close()
-		body, e := io.ReadAll(io.LimitReader(response.Body, maxRelayBodyBytes+1))
-		var envelope struct {
-			JSONRPC string `json:"jsonrpc"`
-			ID      string `json:"id"`
-			Result  *struct {
-				ContentType string `json:"content_type"`
-				Body        string `json:"body"`
-			} `json:"result"`
-			Error json.RawMessage `json:"error"`
-		}
-		if e != nil || len(body) > maxRelayBodyBytes || response.StatusCode != 200 || rpc.Decode(body, &envelope) != nil || envelope.JSONRPC != "2.0" || envelope.ID != id || envelope.Result == nil || len(envelope.Error) != 0 {
-			http.Error(w, "model gateway rejected request", 502)
-			return
-		}
-		result := envelope.Result
 		decoded, decodeErr := base64.StdEncoding.DecodeString(result.Body)
 		if (result.ContentType != "application/json" && result.ContentType != "text/event-stream") || decodeErr != nil || len(decoded) > 8<<20 {
-			http.Error(w, "invalid model response", 502)
+			http.Error(w, "invalid model response", http.StatusBadGateway)
 			return
 		}
 		w.Header().Set("Content-Type", result.ContentType)
 		w.Header().Set("Cache-Control", "no-store")
-		w.Write(decoded)
+		_, _ = w.Write(decoded) // headers are sent; a vanished child has nothing left to tell
 	})
 	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 15 * time.Second, WriteTimeout: 150 * time.Second}
-	go server.Serve(listener)
-	return "http://" + listener.Addr().String() + "/v1", token, func() { server.Close(); transport.CloseIdleConnections() }, nil
+	go func() {
+		// stop's Close ends Serve with ErrServerClosed. Any other error leaves the
+		// child without a relay, so its model calls and the run fail on their own;
+		// stderr carries the controller's JSON log and must not get raw text.
+		_ = server.Serve(listener)
+	}()
+	return "http://" + listener.Addr().String() + "/v1", token, func() { server.Close(); client.Close() }, nil
 }

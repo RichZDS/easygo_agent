@@ -20,6 +20,8 @@ flowchart LR
     Loop --> Tools[Explicit sequential tool registry]
 ```
 
+> 已移除：图中 `Standalone /v1/generate` 这条远程网关分支已随 2026-09-30 的清理移除，现行网关只提供 mTLS RPC。
+
 ## Loop contract
 
 `agentloop.New(Config)` validates the client, positive `MaxSteps`, nonnegative `MaxDuration`, and tool definitions. `Run(ctx, ai.Request, emit)` owns its message history. Each tool has an `ai.Tool` definition and an explicit `Execute(ctx, ai.Block)` function; the complete call block includes its ID and arguments.
@@ -74,6 +76,8 @@ model:
 `parameters` accepts JSON-compatible provider parameters; `parameter_map` renames allowed parameter keys according to the gateway's validation. `subagent` accepts the same fields and otherwise inherits the main model configuration. Missing pricing means unknown cost, not zero cost. Custom JSON mappings are configured on the standalone gateway (for example the `custom` alias in `configs/ai-gateway.example.json`) and selected from application YAML through the remote topology below.
 
 ### Remote canonical gateway
+
+> 已移除：下面这种 `protocol: easygo` 接法依赖的 `cmd/ai-gateway` 进程和 `POST /v1/generate` 已随 2026-09-30 的清理移除，现行网关只提供 mTLS RPC。
 
 Use `protocol: easygo` to connect the same CLI/TUI/HTTP application to a separately running `cmd/ai-gateway`. `endpoint` is the full generation URL, ending in `/v1/generate`; `base_url` is not a shorthand in this mode. `name` is the remote configured alias, and `apikey` resolves the gateway bearer token rather than the provider credential. Startup makes no discovery or model-list request.
 

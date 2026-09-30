@@ -363,6 +363,7 @@ test('messages reject forged scopes, unknown runs, bad enums/types and invalid t
     [event(0)],
     [event(1, 'state', { text: 'invalid' })],
     [event(1, 'acceptance', { acceptance: { state: 'pending' } })],
+    [event(1, 'acceptance', { acceptance: { state: 'skipped' } })],
     [event(1, 'crew.read', { read: { message_ids: [1] } })],
   ])
     await assert.rejects(

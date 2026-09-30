@@ -244,9 +244,9 @@ EASYGO_DOCKER_SOCKET=/path/to/dedicated/docker.sock node scripts/test-compose.mj
 
 | 变量 | 读取方 | 作用 |
 |---|---|---|
-| `EASYGO_GO_BIN` | `Makefile`（`make test-e2e`）、`scripts/lib/procs.mjs` | 端到端脚本使用的 go 可执行文件，默认 `go` |
-| `EASYGO_GO` | `services/agent-loop/test/knowledge-platform.test.mjs` | 同样是 go 可执行文件，但只有这个测试读它，默认值是某台开发机上的绝对路径 |
-| `EASYGO_KNOWLEDGE_PLATFORM_DIST` | 同上 | 被测的 agent-loop 编译产物目录，默认 `services/agent-loop/dist` |
+| `EASYGO_GO_BIN` | `Makefile`（`make test-e2e`）、`scripts/lib/procs.mjs`、`services/agent-loop/test/knowledge-platform.test.mjs` | go 可执行文件。端到端脚本默认 `go`；knowledge-platform 测试没设时用 PATH 上的 go，找不到就跳过 |
+| `EASYGO_GO` | 已移除 | 已并入 `EASYGO_GO_BIN`，knowledge-platform 测试不再读它 |
+| `EASYGO_KNOWLEDGE_PLATFORM_DIST` | `services/agent-loop/test/knowledge-platform.test.mjs` | 被测的 agent-loop 编译产物目录，默认 `services/agent-loop/dist` |
 | `EASYGO_REMOTE_TEST_URL` / `EASYGO_REMOTE_TEST_EMAIL` / `EASYGO_REMOTE_TEST_PASSWORD` | `internal/remotetui/integration_test.go`，由上一个测试设置 | 远程 TUI 集成测试连接的平台地址和夹具账户；不设 URL 时跳过 |
 | `EASYGO_RPC_TEST_PROVIDER_KEY` | `scripts/test-services.mjs` | 夹具供应商的假 key，由脚本自己设置；测试断言它不会进入任务进程 |
 | `EASYGO_FIXTURE_HELPER` | `services/workshop/cmd/fixture-cli/crew_test.go` | 测试以子进程方式再次启动自己时的标记 |

@@ -7,7 +7,7 @@ GOTESTFLAGS ?=
 GOLANGCI_LINT ?= golangci-lint
 NODE ?= node
 NPM ?= npm
-PRETTIER ?= npx --yes prettier@3
+PRETTIER ?= npx --yes prettier@3.9.9
 
 GO_MODULES := . packages/rpc-go services/ai-gateway services/workshop
 LOOP := services/agent-loop

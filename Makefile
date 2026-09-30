@@ -7,7 +7,7 @@ GOTESTFLAGS ?=
 GOLANGCI_LINT ?= golangci-lint
 NODE ?= node
 NPM ?= npm
-PRETTIER ?= npx --yes prettier@3
+PRETTIER ?= npx --yes prettier@3.9.9
 
 GO_MODULES := . packages/rpc-go services/ai-gateway services/workshop
 LOOP := services/agent-loop
@@ -51,7 +51,7 @@ fmt:
 
 lint:
 	@if command -v $(GOLANGCI_LINT) >/dev/null 2>&1; then \
-		set -e; for m in $(GO_MODULES); do echo "==> $$m: golangci-lint run"; (cd $$m && $(GOLANGCI_LINT) run ./...); done; \
+		rc=0; for m in $(GO_MODULES); do echo "==> $$m: golangci-lint run"; (cd $$m && $(GOLANGCI_LINT) run ./...) || rc=1; done; exit $$rc; \
 	else \
 		echo "skip golangci-lint: not on PATH (go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest)"; \
 	fi

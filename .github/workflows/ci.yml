@@ -1,0 +1,30 @@
+# Offline checks only: Docker suites (make test-e2e-docker) and paid live scripts stay manual.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25'
+          cache-dependency-path: '**/go.sum'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: services/agent-loop/package-lock.json
+      - run: npm ci --prefix services/agent-loop
+      - run: make build vet test fmt
+      - run: make test-e2e

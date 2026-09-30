@@ -37,6 +37,17 @@ const runtimeProxyAddr = "127.0.0.1:18080"
 
 // dockerCleanupTimeout bounds one remove, confirm or sweep round.
 const dockerCleanupTimeout = 20 * time.Second
+
+// taskShimEntrypoint is the image entrypoint for task and probe containers;
+// acceptance checks pass their own command instead.
+const taskShimEntrypoint = "/usr/local/bin/task-shim"
+
+// codexContainerSandbox is Codex's sandbox_mode inside the task container.
+// Codex's nested bwrap cannot create user namespaces under this container's
+// security policy, so only this initialized Docker path delegates isolation to
+// the mandatory outer container and its workflow-specific workspace mounts.
+// Host CommandRunner keeps the workflow policy; approval_policy=never is shared.
+const codexContainerSandbox = "danger-full-access"
 const relaySocketPathLimit = 107
 
 // Go 1.25 os.MkdirTemp appends nextRandom's decimal uint32: at most 10 digits.
@@ -275,8 +286,8 @@ func (r *DockerRunner) hostPath(local string) (string, error) {
 // at construction time; nothing downstream searches the argument list for a
 // substring to append ",readonly" onto, so a change to field order or an
 // added field elsewhere in this string can never silently drop it.
-func (r *DockerRunner) containerOptions(name, workspace, relay string, workspaceReadOnly bool) []string {
-	args := []string{"create", "--name", name, "--pull", "never", "--interactive", "--user", "1000:1000", "--workdir", runtimeWorkspace, "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges=true", "--pids-limit", strconv.FormatInt(r.cfg.PIDsLimit, 10), "--memory", strconv.FormatInt(r.cfg.MemoryBytes, 10), "--memory-swap", strconv.FormatInt(r.cfg.MemoryBytes, 10), "--cpus", strconv.FormatFloat(float64(r.cfg.NanoCPUs)/1e9, 'f', 9, 64), "--ipc", "private", "--shm-size", "8388608", "--log-driver", "none", "--tmpfs", fmt.Sprintf("/tmp:rw,nosuid,nodev,noexec,size=%d,mode=1777", r.cfg.TmpfsBytes), "--entrypoint", "/usr/local/bin/task-shim"}
+func (r *DockerRunner) containerOptions(name, workspace, relay, entrypoint string, workspaceReadOnly bool) []string {
+	args := []string{"create", "--name", name, "--pull", "never", "--interactive", "--user", "1000:1000", "--workdir", runtimeWorkspace, "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges=true", "--pids-limit", strconv.FormatInt(r.cfg.PIDsLimit, 10), "--memory", strconv.FormatInt(r.cfg.MemoryBytes, 10), "--memory-swap", strconv.FormatInt(r.cfg.MemoryBytes, 10), "--cpus", strconv.FormatFloat(float64(r.cfg.NanoCPUs)/1e9, 'f', 9, 64), "--ipc", "private", "--shm-size", "8388608", "--log-driver", "none", "--tmpfs", fmt.Sprintf("/tmp:rw,nosuid,nodev,noexec,size=%d,mode=1777", r.cfg.TmpfsBytes), "--entrypoint", entrypoint}
 	args = append(args, "--ulimit", fmt.Sprintf("fsize=%d:%d", r.cfg.DiskQuotaBytes, r.cfg.DiskQuotaBytes))
 	labels := r.labels()
 	keys := []string{managedLabel, ownerLabel, rootLabel}
@@ -297,7 +308,7 @@ func (r *DockerRunner) containerOptions(name, workspace, relay string, workspace
 // A read-only workflow has an OS-enforced read-only workspace. Native state
 // remains writable only under its explicit task-private HOME submount.
 func (r *DockerRunner) taskContainerOptions(name, workspace, relay, home string, policy Policy) []string {
-	args := r.containerOptions(name, workspace, relay, policy == PolicyReadOnly)
+	args := r.containerOptions(name, workspace, relay, taskShimEntrypoint, policy == PolicyReadOnly)
 	if policy == PolicyReadOnly {
 		args = append(args, "--mount", "type=bind,src="+home+",dst="+runtimeWorkspace+"/.workshop-home,bind-propagation=rprivate")
 	}
@@ -556,7 +567,7 @@ func (r *DockerRunner) Initialize(ctx context.Context) (err error) {
 			r.mu.Unlock()
 		}
 	}()
-	args := r.containerOptions(name, host, "", false)
+	args := r.containerOptions(name, host, "", taskShimEntrypoint, false)
 	args = append(args, r.cfg.Image, "--verify-root", marker)
 	if _, err = r.output(ctx, args...); err != nil {
 		return err
@@ -587,7 +598,7 @@ func (r *DockerRunner) Run(ctx context.Context, in Invocation, emit func(Event) 
 	if p == nil || p.GatewayModel == "" || p.validate() != nil || p.Engine != in.Workflow.Engine || p.model() != in.Workflow.Model {
 		return result, errors.New("Docker requires a matching gateway runtime profile")
 	}
-	args, err := engineArgs(in)
+	args, err := engineArgs(in, codexContainerSandbox)
 	if err != nil {
 		return result, err
 	}
@@ -674,23 +685,6 @@ func (r *DockerRunner) Run(ctx context.Context, in Invocation, emit func(Event) 
 		}
 	}()
 	options := r.taskContainerOptions(name, host, relayHost, filepath.Join(host, ".workshop-home"), in.Workflow.Policy)
-	// Codex's nested bwrap cannot create user namespaces under this container's
-	// security policy. Only this initialized Docker path delegates isolation to
-	// the mandatory outer container and its workflow-specific workspace mounts.
-	// Host CommandRunner and approval_policy=never remain unchanged.
-	if in.Workflow.Engine == "codex" {
-		replaced := false
-		for i := 0; i+1 < len(args); i++ {
-			if args[i] == "-c" && args[i+1] == `sandbox_mode="`+string(in.Workflow.Policy)+`"` {
-				args[i+1] = `sandbox_mode="danger-full-access"`
-				replaced = true
-			}
-		}
-		if !replaced {
-			return result, errors.New("missing native Codex sandbox override")
-		}
-	}
-
 	keys := make([]string, 0, len(env))
 	for k := range env {
 		keys = append(keys, k)

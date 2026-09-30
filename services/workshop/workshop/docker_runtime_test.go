@@ -34,7 +34,7 @@ func TestDockerAndHostShellTools(t *testing.T) {
 					if resume {
 						in.SessionID = "11111111-1111-4111-8111-111111111111"
 					}
-					hostArgs, err := engineArgs(in)
+					hostArgs, err := engineArgs(in, policy)
 					if err != nil {
 						t.Fatal(err)
 					}

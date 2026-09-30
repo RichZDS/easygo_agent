@@ -210,7 +210,7 @@ func TestDockerOptionsAndPathMapping(t *testing.T) {
 	if e != nil || mapped != "/daemon/workshop/workspaces/"+filepath.Base(in.Workspace) {
 		t.Fatalf("mapping %s %v", mapped, e)
 	}
-	args := r.containerOptions("run", mapped, "/daemon/workshop/relays/run", false)
+	args := r.containerOptions("run", mapped, "/daemon/workshop/relays/run", taskShimEntrypoint, false)
 	for k, v := range map[string]string{"--user": "1000:1000", "--network": "none", "--cap-drop": "ALL", "--security-opt": "no-new-privileges=true", "--pids-limit": "128", "--memory": "1073741824", "--memory-swap": "1073741824", "--cpus": "1.000000000", "--pull": "never", "--log-driver": "none"} {
 		if option(args, k) != v {
 			t.Errorf("%s=%s", k, option(args, k))
@@ -512,7 +512,7 @@ func TestCodexInnerPolicyChangesOnlyAfterDockerInitialization(t *testing.T) {
 		t.Run(policy, func(t *testing.T) {
 			r, f, in := dockerFixture(t)
 			in.Workflow.Policy = Policy(policy)
-			hostArgs, err := engineArgs(in)
+			hostArgs, err := engineArgs(in, policy)
 			if err != nil {
 				t.Fatal(err)
 			}

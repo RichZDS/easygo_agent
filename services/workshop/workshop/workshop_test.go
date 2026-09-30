@@ -665,7 +665,7 @@ func TestReadOnlyArguments(t *testing.T) {
 		cfg := fixtureConfig(t, engine)
 		w := cfg.Workflows[0]
 		w.Policy = "read-only"
-		args, err := engineArgs(Invocation{Workflow: w})
+		args, err := engineArgs(Invocation{Workflow: w}, string(w.Policy))
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -2,7 +2,7 @@ import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { fields, object, string, RpcError } from '../validation.js';
-import { parseJSON } from '../strict-json.mjs';
+import { API_BODY_ERRORS, closeOnce, listen, parseListen, readJsonBody } from '../http.js';
 import { PlatformStore, Wallet, count, type Row } from './store.js';
 import { createClientAddress } from './client-address.mjs';
 
@@ -89,17 +89,9 @@ function token(req: IncomingMessage) {
   return /^[a-f0-9]{64}$/.test(value) ? value : '';
 }
 async function body(req: IncomingMessage) {
-  if (req.headers['content-type']?.split(';')[0] !== 'application/json') throw new RpcError(-32602, 'json_required');
-  if (Number(req.headers['content-length'] ?? 0) > 256 * 1024) throw new RpcError(-32602, 'body_too_large');
-  const chunks: Buffer[] = [];
-  let bytes = 0;
-  for await (const chunk of req) {
-    bytes += chunk.length;
-    if (bytes > 256 * 1024) throw new RpcError(-32602, 'body_too_large');
-    chunks.push(chunk);
-  }
+  const value = await readJsonBody(req, { maxBytes: 256 * 1024, errors: API_BODY_ERRORS });
   try {
-    return object(parseJSON(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))));
+    return object(value);
   } catch {
     throw new RpcError(-32602, 'invalid_json');
   }
@@ -133,8 +125,7 @@ export async function createPlatform(
     (origin.protocol === 'https:' && !config.secure_cookies)
   )
     throw new Error('Explicit registration/secure_cookies required; HTTPS requires secure cookies');
-  const bind = /^(?:\[([^\]]+)\]|([^:]*)):(\d+)$/.exec(config.listen);
-  if (!bind || Number(bind[3]) > 65535) throw new Error('listen must be host:port');
+  const address = parseListen(config.listen, '127.0.0.1');
   string(config.database, 4096);
   const store = new PlatformStore(config.database),
     wallet = new Wallet(store);
@@ -369,6 +360,7 @@ export async function createPlatform(
       json(res, { error: { code: 'not_found' } }, 404);
     } catch (e) {
       const err = e instanceof RpcError ? e : new RpcError(-32603, 'internal_error');
+      // REST statuses for the browser; /rpc keeps JSON-RPC's 200-with-error-body convention.
       const status =
         err.code === -32001
           ? 401
@@ -401,33 +393,20 @@ export async function createPlatform(
   server.headersTimeout = 15_000;
   server.timeout = 120_000;
   try {
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(Number(bind[3]), bind[1] || bind[2] || '127.0.0.1', () => {
-        server.removeListener('error', reject);
-        resolve();
-      });
-    });
+    await listen(server, address);
   } catch (e) {
     store.close();
     throw e;
   }
-  let closePromise: Promise<void> | undefined;
   return {
     server,
     address: server.address(),
     wallet,
-    close(): Promise<void> {
-      closePromise ??= (async () => {
-        closing = true;
-        await new Promise<void>((resolve, reject) => {
-          server.close((e) => (e ? reject(e) : resolve()));
-          server.closeAllConnections();
-        });
-        while (authInFlight) await new Promise((resolve) => setTimeout(resolve, 10));
-        store.close();
-      })();
-      return closePromise;
-    },
+    close: closeOnce(server, async (listenerClosed) => {
+      closing = true;
+      await listenerClosed;
+      while (authInFlight) await new Promise((resolve) => setTimeout(resolve, 10));
+      store.close();
+    }),
   };
 }

@@ -155,6 +155,20 @@ test('public ingress rejects duplicate envelope/namespace/input and deep/trailin
   }
 });
 
+test('public ingress rejects a UTF-8 byte order mark before the JSON body', async () => {
+  const h = await harness(pki);
+  try {
+    const body = '{"jsonrpc":"2.0","id":"bom","method":"agent.session.create","params":{"namespace":"demo"}}';
+    const result = await raw(pki, h.endpoint, '\uFEFF' + body);
+    assert.equal(result.status, 400);
+    assert.equal(JSON.parse(result.body).error.code, -32700);
+    assert.equal((await h.call('agent.session.list')).sessions.length, 0);
+    assert.equal((await raw(pki, h.endpoint, body)).status, 200);
+  } finally {
+    await h.close();
+  }
+});
+
 test('public ingress rejects malformed/truncated UTF8 but accepts valid codepoints split across chunks', async () => {
   const h = await harness(pki);
   const prefix = Buffer.from('{"jsonrpc":"2.0","id":"');

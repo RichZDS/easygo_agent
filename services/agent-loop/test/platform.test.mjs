@@ -447,6 +447,16 @@ test('HTTP auth, zero signup, cookies, CSRF, role checks, namespace binding, all
   assert.equal((await call('/api/login', { email: 'alice@example.test', password: 'wrong-password' })).status, 401);
 });
 
+test('browser API rejects a UTF-8 byte order mark before the JSON body', async (t) => {
+  const { call } = await apiFixture(t);
+  const credentials = { email: 'bom@example.test', password: 'long-enough-password' };
+  const rejected = await call('/api/register', '\uFEFF' + JSON.stringify(credentials));
+  assert.equal(rejected.status, 400);
+  assert.equal(rejected.data.error.code, 'invalid_json');
+  // The same body without the mark registers, so only the mark was refused.
+  assert.equal((await call('/api/register', credentials)).status, 201);
+});
+
 test('admin grants/usage/tariff API, strict JSON/body bounds, static CSP and rate limits', async (t) => {
   const { call, register, app } = await apiFixture(t);
   const user = await register('user@example.test');

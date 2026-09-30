@@ -92,13 +92,3 @@ export interface Run {
   result?: Response;
   error?: { code: string; message: string; upstream?: unknown };
 }
-export const METHODS = [
-  'agent.workshop.catalog',
-  'agent.session.create',
-  'agent.session.list',
-  'agent.session.history',
-  'agent.run.start',
-  'agent.run.get',
-  'agent.run.cancel',
-  'agent.run.events',
-];

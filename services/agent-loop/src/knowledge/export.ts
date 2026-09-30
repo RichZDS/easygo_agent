@@ -1,3 +1,4 @@
+import { namespace as validNamespace } from '../validation.js';
 import type { Knowledge, Memory, Skill } from './index.js';
 
 /** Explicit bounded export through the same namespace-scoped read surface.
@@ -5,9 +6,11 @@ import type { Knowledge, Memory, Skill } from './index.js';
  * import contains a preview payload suitable for a fresh target namespace.
  */
 export function exportKnowledge(knowledge: Knowledge, namespace: string) {
-  const memories = (knowledge.dispatch('agent.memory.list', { namespace }) as { memories: Memory[] }).memories;
-  const catalog = (knowledge.dispatch('agent.skills.list', { namespace }) as { skills: { name: string }[] }).skills;
-  const skills = catalog.map((s) => knowledge.dispatch('agent.skills.get', { namespace, name: s.name }) as Skill);
+  validNamespace(namespace);
+  const memories: Memory[] = knowledge.listMemories(namespace).memories;
+  const skills = knowledge
+    .listSkills(namespace)
+    .skills.map((s) => knowledge.getSkill(namespace, { name: s.name }) as Skill);
   const snapshot = {
     format: 'easygo-knowledge-v1',
     memories,

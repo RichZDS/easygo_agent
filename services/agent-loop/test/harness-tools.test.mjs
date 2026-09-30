@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createToolRegistry } from '../dist/tools/index.js';
-import { Loop } from '../dist/loop.js';
+import { callMethod } from '../dist/methods.js';
 import { RpcError } from '../dist/validation.js';
 
 const run = { id: 'loop-run', namespace: 'demo' };
@@ -182,23 +182,16 @@ test('get and list validate optional P1 run summary enums and types', async () =
 
 test('Web RPC forwarding permits message/evidence and rejects other workshop methods', async () => {
   const calls = [];
-  const receiver = {
-    assertAvailable() {},
-    workshop: {
-      call: async (...args) => {
-        calls.push(args);
-        return 'ok';
-      },
+  const loop = {
+    forwardWorkshop: async (...args) => {
+      calls.push(args);
+      return 'ok';
     },
-    background: { signal: signal() },
   };
   for (const method of ['workshop.message', 'workshop.evidence'])
-    assert.equal(
-      await Loop.prototype.workshopCall.call(receiver, method, { namespace: 'demo', task_id: 'task' }),
-      'ok'
-    );
-  await assert.rejects(
-    Loop.prototype.workshopCall.call(receiver, 'workshop.delete', {}),
+    assert.equal(await callMethod({ loop }, method, { namespace: 'demo', task_id: 'task' }), 'ok');
+  assert.throws(
+    () => callMethod({ loop }, 'workshop.delete', {}),
     (e) => e.reason === 'method_not_found'
   );
   assert.equal(calls.length, 2);

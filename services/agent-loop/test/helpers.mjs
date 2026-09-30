@@ -7,7 +7,7 @@ import { once } from 'node:events';
 import { setTimeout } from 'node:timers/promises';
 import { startServer } from '../dist/server.js';
 import { RpcClient, tlsOptions, Authorizer } from '../dist/rpc.js';
-import { METHODS } from '../dist/types.js';
+import { METHODS } from '../dist/methods.js';
 
 export function certificates() {
   const dir = mkdtempSync(join(tmpdir(), 'agent-loop-test-'));

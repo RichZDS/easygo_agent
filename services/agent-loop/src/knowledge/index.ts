@@ -205,7 +205,7 @@ export class Knowledge {
     }
     if (call.name === 'load_skill') {
       const p = fields(call.arguments, ['name']);
-      return this.dispatch('agent.skills.get', { namespace: ns, name: p.name });
+      return this.getSkill(ns, p);
     }
     return fail('unknown_tool');
   }
@@ -242,75 +242,34 @@ export class Knowledge {
       this.checkpoint(ns);
     });
   }
-  dispatch(method: string, params: unknown): unknown | Promise<unknown> {
-    const common = fields(params, [
-      'namespace',
-      'id',
-      'kind',
-      'content',
-      'importance',
-      'confidence',
-      'source_run_ids',
-      'expected_version',
-      'name',
-      'description',
-      'entries',
-      'dry_run',
-      'provenance',
-    ]);
-    const ns = namespace(common.namespace);
-    const allowed: Record<string, string[]> = {
-      'agent.memory.list': [],
-      'agent.memory.upsert': [
-        'id',
-        'kind',
-        'content',
-        'importance',
-        'confidence',
-        'source_run_ids',
-        'expected_version',
-      ],
-      'agent.memory.delete': ['id', 'expected_version'],
-      'agent.memory.consolidate': [],
-      'agent.memory.import': ['entries', 'dry_run', 'provenance'],
-      'agent.skills.list': [],
-      'agent.skills.get': ['name'],
-      'agent.skills.upsert': ['name', 'description', 'content', 'expected_version'],
-      'agent.skills.delete': ['name', 'expected_version'],
-      'agent.skills.import': ['entries', 'dry_run', 'provenance'],
-    };
-    if (!allowed[method]) throw new RpcError(-32601, 'method_not_found');
-    const p = fields(common, ['namespace', ...allowed[method]!]);
-    switch (method) {
-      case 'agent.memory.list':
-        return { memories: this.profile(ns), checkpoint: this.checkpoint(ns) };
-      case 'agent.skills.list':
-        return { skills: this.catalog(ns) };
-      case 'agent.skills.get': {
-        const r = this.existing('skills', ns, name(p.name));
-        if (!r || r.deleted) throw new RpcError(-32004, 'skill_not_found');
-        return JSON.parse(String(r.body));
-      }
-      case 'agent.memory.consolidate':
-        return this.consolidate(ns);
-      case 'agent.memory.upsert':
-        return this.tx(() => this.upsertMemory(ns, p, 'user'));
-      case 'agent.skills.upsert':
-        return this.tx(() => this.upsertSkill(ns, p, 'user'));
-      case 'agent.memory.delete':
-      case 'agent.skills.delete':
-        return this.tx(() => {
-          const table = method === 'agent.memory.delete' ? 'memories' : 'skills';
-          const id = table === 'memories' ? string(p.id) : name(p.name);
-          const old = this.existing(table, ns, id);
-          if (!old || old.deleted) throw new RpcError(-32004, 'entry_not_found');
-          const body = { ...JSON.parse(String(old.body)), version: this.version(old, p.expected_version) };
-          this.save(table, ns, id, body, true);
-          return { deleted: true, id, version: body.version };
-        });
-      default:
-        return this.importEntries(ns, method === 'agent.memory.import' ? 'memory' : 'skills', p);
-    }
+  // Operations behind the agent.memory.* and agent.skills.* RPC methods. The method registry
+  // (methods.ts) validates params and namespace before calling them.
+  listMemories(ns: string) {
+    return { memories: this.profile(ns), checkpoint: this.checkpoint(ns) };
+  }
+  listSkills(ns: string) {
+    return { skills: this.catalog(ns) };
+  }
+  getSkill(ns: string, p: Record<string, unknown>) {
+    const r = this.existing('skills', ns, name(p.name));
+    if (!r || r.deleted) throw new RpcError(-32004, 'skill_not_found');
+    return JSON.parse(String(r.body));
+  }
+  saveMemory(ns: string, p: Record<string, unknown>) {
+    return this.tx(() => this.upsertMemory(ns, p, 'user'));
+  }
+  saveSkill(ns: string, p: Record<string, unknown>) {
+    return this.tx(() => this.upsertSkill(ns, p, 'user'));
+  }
+  deleteEntry(table: 'memories' | 'skills', ns: string, p: Record<string, unknown>) {
+    return this.tx(() => {
+      const id = table === 'memories' ? string(p.id) : name(p.name);
+      const old = this.existing(table, ns, id);
+      if (!old || old.deleted) throw new RpcError(-32004, 'entry_not_found');
+      const body = { ...JSON.parse(String(old.body)), version: this.version(old, p.expected_version) };
+      this.save(table, ns, id, body, true);
+      return { deleted: true, id, version: body.version };
+    });
   }
   private upsertMemory(ns: string, p: Record<string, unknown>, provenance: string): Memory {
     const d = draft(
@@ -350,7 +309,7 @@ export class Knowledge {
     this.save('skills', ns, n, skill);
     return skill;
   }
-  private importEntries(ns: string, kind: 'memory' | 'skills', p: Record<string, unknown>) {
+  importEntries(ns: string, kind: 'memory' | 'skills', p: Record<string, unknown>) {
     if (
       !Array.isArray(p.entries) ||
       p.entries.length > (kind === 'memory' ? this.limit : 100) ||

@@ -37,13 +37,7 @@ func (s *Service) Evidence(namespace, id, runID, evidenceID string, offset, limi
 	if err != nil {
 		return nil, err
 	}
-	var run *Run
-	for i := range task.Runs {
-		if task.Runs[i].ID == runID || (runID == "" && i == len(task.Runs)-1) {
-			run = &task.Runs[i]
-			break
-		}
-	}
+	run := task.run(runID)
 	if run == nil {
 		return nil, ErrNotFound
 	}

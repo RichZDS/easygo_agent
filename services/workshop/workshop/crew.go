@@ -117,7 +117,7 @@ func (c runCrew) active(tx *bolt.Tx) (*Task, error) {
 	if err != nil {
 		return nil, err
 	}
-	if task.Status != Running || len(task.Runs) == 0 || task.Runs[len(task.Runs)-1].ID != c.runID {
+	if task.Status != Running || len(task.Runs) == 0 || task.latest().ID != c.runID {
 		return nil, ErrConflict
 	}
 	return task, nil
@@ -293,7 +293,7 @@ func resumeCrewInput(tx *bolt.Tx, task *Task) error {
 	if len(unread) == 0 {
 		return nil
 	}
-	run := &task.Runs[len(task.Runs)-1]
+	run := task.latest()
 	run.Input += "\n\nUnread messages from the foreman:"
 	ids := []string{}
 	for _, m := range unread {
@@ -303,40 +303,47 @@ func resumeCrewInput(tx *bolt.Tx, task *Task) error {
 	return appendEvent(tx, task, Event{Kind: "crew.read", Read: &CrewRead{MessageIDs: ids}})
 }
 
+// crewOutcome folds one run's worker messages into its outcome and, for a
+// final submit, the claimed test result. The last submit/blocked/ask wins.
+func crewOutcome(events []Event, runID string) (outcome, tests string) {
+	outcome = "none"
+	for _, event := range events {
+		m := event.Message
+		if event.RunID != runID || m == nil || m.Direction != "from_worker" {
+			continue
+		}
+		switch m.Kind {
+		case "submit":
+			outcome, tests = "submitted", ""
+			if m.Claims != nil {
+				tests = m.Claims.Tests
+			}
+		case "blocked":
+			outcome, tests = "blocked", ""
+		case "ask":
+			outcome, tests = "asked", ""
+		}
+	}
+	return outcome, tests
+}
+
 // finishCrewOutcome recomputes both run.Outcome and, when the run carries an
-// Acceptance record, run.Acceptance.FalseGreen from the same crew messages,
-// using the same truth table as acceptanceFalseGreen. finish (called just
-// before this, at every call site) may rewrite Acceptance.State (e.g. to
-// "interrupted") without updating FalseGreen; recomputing it here keeps the
-// two consistent instead of leaving a stale "submitted tests=pass" false
-// green attached to a state that no longer satisfies the truth table.
+// Acceptance record, run.Acceptance.FalseGreen from one scan of the crew
+// messages. finish (called just before this by finishRun) may rewrite
+// Acceptance.State (e.g. to "interrupted") without updating FalseGreen;
+// recomputing it here keeps the two consistent instead of leaving a stale
+// "submitted tests=pass" false green attached to a state that no longer
+// satisfies the truth table.
 func finishCrewOutcome(tx *bolt.Tx, task *Task) error {
 	events, err := taskEvents(tx, task.ID)
 	if err != nil {
 		return err
 	}
-	run := &task.Runs[len(task.Runs)-1]
-	run.Outcome = "none"
-	for _, event := range events {
-		m := event.Message
-		if event.RunID != run.ID || m == nil || m.Direction != "from_worker" {
-			continue
-		}
-		switch m.Kind {
-		case "submit":
-			run.Outcome = "submitted"
-		case "blocked":
-			run.Outcome = "blocked"
-		case "ask":
-			run.Outcome = "asked"
-		}
-	}
+	run := task.latest()
+	outcome, tests := crewOutcome(events, run.ID)
+	run.Outcome = outcome
 	if run.Acceptance != nil {
-		green, err := acceptanceFalseGreen(tx, task, run.Acceptance.State)
-		if err != nil {
-			return err
-		}
-		run.Acceptance.FalseGreen = green
+		run.Acceptance.FalseGreen = falseGreen(outcome, tests, run.Acceptance.State)
 	}
 	return nil
 }

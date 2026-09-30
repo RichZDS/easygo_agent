@@ -96,8 +96,11 @@ func fixtureMain() {
 		}
 	case "escape":
 		_ = os.Symlink("/etc/passwd", "note.md")
+	case "inner-link":
+		_ = os.WriteFile("real.md", []byte("fixture artifact"), 0600)
+		_ = os.Symlink("real.md", "note.md")
 	}
-	if mode != "escape" {
+	if mode != "escape" && mode != "inner-link" {
 		_ = os.WriteFile("note.md", []byte("fixture artifact"), 0600)
 	}
 	text := "fixture answer"
@@ -526,7 +529,7 @@ func TestQueueBoundAndConcurrency(t *testing.T) {
 }
 
 func TestArtifactsRejectTraversalAndSymlink(t *testing.T) {
-	for _, path := range []string{"../escape", "/etc/passwd", "a/../../escape", "a/../file", "."} {
+	for _, path := range []string{"../escape", "/etc/passwd", "a/../../escape", "a/../file", ".", "a\x00b"} {
 		t.Run(path, func(t *testing.T) {
 			cfg := fixtureConfig(t, "codex")
 			cfg.Workflows[0].Artifacts = []string{path}
@@ -562,6 +565,20 @@ func TestArtifactsRejectTraversalAndSymlink(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("artifact reader blocked on FIFO")
+	}
+}
+
+// A symlink to another workspace file must fail collection: downloads refuse
+// every symlink, so accepting it would record an artifact that can never be read.
+func TestArtifactSymlinkInsideWorkspaceFailsCollection(t *testing.T) {
+	s := newFixtureService(t, fixtureConfig(t, "codex"))
+	task := submit(t, s, "inner-link")
+	task = waitTask(t, s, task.Namespace, task.ID, func(t *Task) bool { return terminal(t.Status) })
+	if task.Status != Failed || len(task.Runs[0].Artifacts) != 0 {
+		t.Fatalf("in-workspace symlink artifact accepted: %+v", task)
+	}
+	if _, err := os.Lstat(filepath.Join(task.Workspace, "real.md")); err != nil {
+		t.Fatalf("fixture did not create the link target: %v", err)
 	}
 }
 

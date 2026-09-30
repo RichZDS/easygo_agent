@@ -15,7 +15,7 @@ import (
 // be a symlink; replacing a name during traversal cannot redirect an open parent.
 // Nonblocking avoids hanging on a malicious FIFO; caller requires a regular file.
 func openArtifactDownload(workspace, path string) (*os.File, error) {
-	if !filepath.IsAbs(workspace) || filepath.Clean(workspace) != workspace || !filepath.IsLocal(path) || filepath.Clean(path) != path || path == "." || strings.ContainsAny(path, "\\\x00") {
+	if !filepath.IsAbs(workspace) || filepath.Clean(workspace) != workspace || !validArtifactPath(path) {
 		return nil, errors.New("invalid artifact path")
 	}
 	fd, err := syscall.Open("/", syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_DIRECTORY, 0)

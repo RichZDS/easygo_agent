@@ -132,6 +132,26 @@ type Task struct {
 	Runs           []Run     `json:"runs"`
 }
 
+// latest returns the current attempt; callers guarantee at least one run.
+func (t *Task) latest() *Run { return &t.Runs[len(t.Runs)-1] }
+
+// run resolves a caller-supplied run ID; "" selects the latest attempt. It
+// returns nil when the task has no such run.
+func (t *Task) run(id string) *Run {
+	if id == "" {
+		if len(t.Runs) == 0 {
+			return nil
+		}
+		return t.latest()
+	}
+	for i := range t.Runs {
+		if t.Runs[i].ID == id {
+			return &t.Runs[i]
+		}
+	}
+	return nil
+}
+
 type Event struct {
 	Acceptance *AcceptanceEvent `json:"acceptance,omitempty"`
 	Message    *CrewMessage     `json:"message,omitempty"`

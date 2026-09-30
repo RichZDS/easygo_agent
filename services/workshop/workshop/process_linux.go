@@ -28,7 +28,3 @@ func killProcessGroup(cmd *exec.Cmd) {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 }
-
-func openArtifact(root *os.Root, path string) (*os.File, error) {
-	return root.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
-}

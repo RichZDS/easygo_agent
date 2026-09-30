@@ -404,10 +404,6 @@ func (p *streamParser) parse(line []byte) {
 		p.fail(errors.New("malformed engine JSONL event"))
 		return
 	}
-	if p.engine == "pi" {
-		p.parsePi(event)
-		return
-	}
 	id := event.SessionID
 	if p.engine == "codex" {
 		id = event.ThreadID

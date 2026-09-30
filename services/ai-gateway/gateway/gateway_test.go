@@ -423,7 +423,9 @@ func TestRedirectIsNotFollowed(t *testing.T) {
 	var followed atomic.Int32
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { followed.Add(1) }))
 	defer target.Close()
-	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, target.URL, 307) }))
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
 	defer s.Close()
 	g := newTestGateway(t, "responses", s.URL, nil)
 	_, err := g.Complete(context.Background(), canonicalRequest(), nil)

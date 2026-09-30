@@ -48,7 +48,7 @@ func TestCommandProcess(t *testing.T) {
 			t.Error("credential environment was not resolved")
 		}
 		if calls.Add(1) > 1 {
-			http.Error(w, "private-upstream-secret", 502)
+			http.Error(w, "private-upstream-secret", http.StatusBadGateway)
 			return
 		}
 		fmt.Fprint(w, `{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"command response"}]}]}`)

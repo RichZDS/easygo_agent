@@ -283,9 +283,10 @@ func parseUsage(v any, protocol string) (ai.Usage, error) {
 	u.InputTokens = i
 	u.OutputTokens = n
 	read, write := o["cache_read_input_tokens"], o["cache_creation_input_tokens"]
-	if protocol == "chat_completions" {
+	switch protocol {
+	case "chat_completions":
 		read = obj(o["prompt_tokens_details"])["cached_tokens"]
-	} else if protocol == "responses" {
+	case "responses":
 		read = obj(o["input_tokens_details"])["cached_tokens"]
 	}
 	for v, dst := range map[*int64]any{&u.CacheReadTokens: read, &u.CacheWriteTokens: write} {

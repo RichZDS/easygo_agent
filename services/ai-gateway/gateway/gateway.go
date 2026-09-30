@@ -238,32 +238,9 @@ func (g *Gateway) Complete(ctx context.Context, r ai.Request, emit func(ai.Event
 		obs.RequestID = newRequestID()
 	}
 	defer func() {
-		obs.Latency = time.Since(start)
-		obs.Usage = out.Usage
-		obs.Cost = out.Cost
-		if accounting != nil {
-			obs.Usage = accounting.Usage()
-			obs.Cost = calculateCost(obs.Usage, price)
-		}
-		if err != nil {
-			var e *Error
-			if errors.As(err, &e) {
-				obs.ErrorCode = e.Code
-			} else {
-				obs.ErrorCode = "internal_error"
-			}
-		}
-		if settle != nil {
-			if e := settle(obs); e != nil {
-				obs.ErrorCode = "billing_unavailable"
-				if err == nil {
-					err = fail("billing_unavailable", "usage could not be durably recorded")
-					out = ai.Response{}
-				}
-			}
-		}
-		if g.observer != nil {
-			g.observer(obs)
+		obs.Usage, obs.Cost = out.Usage, out.Cost
+		if e := g.settleObservation(&obs, start, accounting, price, settle, err, "internal_error"); e != nil {
+			err, out = e, ai.Response{}
 		}
 	}()
 	if ctx.Err() != nil {
@@ -290,52 +267,22 @@ func (g *Gateway) Complete(ctx context.Context, r ai.Request, emit func(ai.Event
 	if e != nil {
 		return out, e
 	}
-	req, e := http.NewRequestWithContext(ctx, http.MethodPost, m.Endpoint, bytes.NewReader(data))
-	if e != nil {
-		return out, fail("invalid_config", "invalid endpoint")
-	}
-	req.Header.Set("Content-Type", "application/json")
+	accept, limit := "application/json", g.bodyLimit
 	if emit != nil {
-		req.Header.Set("Accept", "text/event-stream")
-	} else {
-		req.Header.Set("Accept", "application/json")
+		accept, limit = "text/event-stream", g.streamLimit
 	}
-	for k, v := range m.Headers {
-		req.Header.Set(k, v)
+	var resp *http.Response
+	resp, accounting, e = g.upstream(ctx, m, m.Protocol, data, accept, limit)
+	if resp != nil {
+		defer resp.Body.Close()
+		obs.HTTPStatus = resp.StatusCode
 	}
-	if m.Protocol == "anthropic" {
-		if req.Header.Get("Anthropic-Version") == "" {
-			req.Header.Set("Anthropic-Version", anthropicVersion)
-		}
-		if m.APIKey != "" {
-			req.Header.Set("X-Api-Key", m.APIKey)
-		}
-	} else if m.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+m.APIKey)
-	}
-	resp, e := g.client.Do(req)
 	if e != nil {
-		if ctx.Err() != nil {
-			return out, caused("canceled", "request canceled", ctx.Err())
-		}
-		return out, caused("transport_error", "upstream request failed", e)
+		return out, e
 	}
-	defer resp.Body.Close()
-	obs.HTTPStatus = resp.StatusCode
 	var responseReader io.Reader = resp.Body
-	if m.Protocol != "custom" {
-		limit := g.bodyLimit
-		if emit != nil {
-			limit = g.streamLimit
-		}
-		accounting = newAccountingReader(resp.Body, m.Protocol, resp.Header.Get("Content-Type"), limit, g.eventLimit)
+	if accounting != nil {
 		responseReader = accounting
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if accounting != nil {
-			_, _ = io.Copy(io.Discard, accounting)
-		}
-		return out, &Error{Code: "upstream_http_error", Message: "upstream rejected request", Status: resp.StatusCode}
 	}
 	if emit != nil {
 		if !strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
@@ -373,6 +320,86 @@ func (g *Gateway) Complete(ctx context.Context, r ai.Request, emit func(ai.Event
 	}
 	out.Cost = calculateCost(out.Usage, m.Price)
 	return out, nil
+}
+
+// upstream posts data to the model's configured endpoint. For standard
+// protocols it wraps the response body in an accounting reader bounded by limit;
+// custom mappings report usage only through the decoded response. A non-2xx
+// status is drained through accounting and returned as upstream_http_error
+// together with resp. Callers record the status and close resp.Body whenever
+// resp is non-nil.
+func (g *Gateway) upstream(ctx context.Context, m Model, protocol string, data []byte, accept string, limit int64) (*http.Response, *accountingReader, error) {
+	req, e := http.NewRequestWithContext(ctx, http.MethodPost, m.Endpoint, bytes.NewReader(data))
+	if e != nil {
+		return nil, nil, fail("invalid_config", "invalid endpoint")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", accept)
+	for k, v := range m.Headers {
+		req.Header.Set(k, v)
+	}
+	if protocol == "anthropic" {
+		if req.Header.Get("Anthropic-Version") == "" {
+			req.Header.Set("Anthropic-Version", anthropicVersion)
+		}
+		if m.APIKey != "" {
+			req.Header.Set("X-Api-Key", m.APIKey)
+		}
+	} else if m.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+m.APIKey)
+	}
+	resp, e := g.client.Do(req)
+	if e != nil {
+		if ctx.Err() != nil {
+			return nil, nil, caused("canceled", "request canceled", ctx.Err())
+		}
+		return nil, nil, caused("transport_error", "upstream request failed", e)
+	}
+	var accounting *accountingReader
+	if protocol != "custom" {
+		accounting = newAccountingReader(resp.Body, protocol, resp.Header.Get("Content-Type"), limit, g.eventLimit)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if accounting != nil {
+			_, _ = io.Copy(io.Discard, accounting)
+		}
+		return resp, accounting, &Error{Code: "upstream_http_error", Message: "upstream rejected request", Status: resp.StatusCode}
+	}
+	return resp, accounting, nil
+}
+
+// settleObservation completes obs when a call returns: latency, accounted usage
+// and cost, the error code (fallback for errors that are not *Error), billing
+// settlement and the observer. It returns billing_unavailable only when
+// settlement fails for an otherwise successful call; the caller must then
+// discard its result.
+func (g *Gateway) settleObservation(obs *Observation, start time.Time, accounting *accountingReader, price *Pricing, settle func(Observation) error, err error, fallback string) error {
+	obs.Latency = time.Since(start)
+	if accounting != nil {
+		obs.Usage = accounting.Usage()
+		obs.Cost = calculateCost(obs.Usage, price)
+	}
+	if err != nil {
+		var e *Error
+		if errors.As(err, &e) {
+			obs.ErrorCode = e.Code
+		} else {
+			obs.ErrorCode = fallback
+		}
+	}
+	var unrecorded error
+	if settle != nil {
+		if e := settle(*obs); e != nil {
+			obs.ErrorCode = "billing_unavailable"
+			if err == nil {
+				unrecorded = fail("billing_unavailable", "usage could not be durably recorded")
+			}
+		}
+	}
+	if g.observer != nil {
+		g.observer(*obs)
+	}
+	return unrecorded
 }
 
 func readBounded(r io.Reader, limit int64) ([]byte, error) {

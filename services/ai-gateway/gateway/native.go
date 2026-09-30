@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -37,30 +36,8 @@ func (g *Gateway) Native(ctx context.Context, alias, protocol, requestID string,
 	var accounting *accountingReader
 	var price *Pricing
 	defer func() {
-		obs.Latency = time.Since(start)
-		if accounting != nil {
-			obs.Usage = accounting.Usage()
-			obs.Cost = calculateCost(obs.Usage, price)
-		}
-		if err != nil {
-			var e *Error
-			if errors.As(err, &e) {
-				obs.ErrorCode = e.Code
-			} else {
-				obs.ErrorCode = "invalid_response"
-			}
-		}
-		if settle != nil {
-			if e := settle(obs); e != nil {
-				obs.ErrorCode = "billing_unavailable"
-				if err == nil {
-					err = fail("billing_unavailable", "usage could not be durably recorded")
-					out = NativeResponse{}
-				}
-			}
-		}
-		if g.observer != nil {
-			g.observer(obs)
+		if e := g.settleObservation(&obs, start, accounting, price, settle, err, "invalid_response"); e != nil {
+			err, out = e, NativeResponse{}
 		}
 	}()
 	m, ok := g.models[alias]
@@ -94,43 +71,18 @@ func (g *Gateway) Native(ctx context.Context, alias, protocol, requestID string,
 	if e != nil {
 		return out, e
 	}
-	req, e := http.NewRequestWithContext(ctx, http.MethodPost, m.Endpoint, bytes.NewReader(data))
-	if e != nil {
-		return out, fail("invalid_config", "invalid endpoint")
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	for k, v := range m.Headers {
-		req.Header.Set(k, v)
-	}
-	if protocol == "anthropic" {
-		if req.Header.Get("Anthropic-Version") == "" {
-			req.Header.Set("Anthropic-Version", anthropicVersion)
-		}
-		if m.APIKey != "" {
-			req.Header.Set("X-Api-Key", m.APIKey)
-		}
-	} else if m.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+m.APIKey)
-	}
-	res, e := g.client.Do(req)
-	if e != nil {
-		return out, caused("transport_error", "native upstream failed", e)
-	}
-	defer res.Body.Close()
-	obs.HTTPStatus = res.StatusCode
-	accountingLimit := g.bodyLimit
-	if accountingLimit > nativeBodyLimit {
-		accountingLimit = nativeBodyLimit
-	}
-	accounting = newAccountingReader(res.Body, protocol, res.Header.Get("Content-Type"), accountingLimit, g.eventLimit)
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		_, _ = io.Copy(io.Discard, accounting)
-		return out, &Error{Code: "upstream_http_error", Message: "upstream rejected request", Status: res.StatusCode}
-	}
 	limit := g.bodyLimit
 	if limit > nativeBodyLimit {
 		limit = nativeBodyLimit
+	}
+	var res *http.Response
+	res, accounting, e = g.upstream(ctx, m, protocol, data, "application/json, text/event-stream", limit)
+	if res != nil {
+		defer res.Body.Close()
+		obs.HTTPStatus = res.StatusCode
+	}
+	if e != nil {
+		return out, e
 	}
 	raw, e = readBounded(accounting, limit)
 	if e != nil {

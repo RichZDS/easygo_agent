@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { mkdtemp, rm, readFile, stat } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -817,97 +818,111 @@ test('trusted_proxies rejects invalid startup configuration before touching the 
   assert.equal((await call('/api/me')).status, 401);
 });
 
-test('trusted_proxies CLI flag is repeatable, canonicalized and validated before creating state', async (t) => {
-  const dir = await mkdtemp(join(tmpdir(), 'platform-proxy-config-'));
-  t.after(() => rm(dir, { recursive: true, force: true }));
-  const cli = fileURLToPath(new URL('../../../scripts/configure-platform.mjs', import.meta.url)),
-    exec = promisify(execFile);
-  const state = join(dir, 'configured');
-  await exec(process.execPath, [
-    cli,
-    '--state',
-    state,
-    '--origin',
-    'https://agent.example.test',
-    '--fixture-url',
-    'http://127.0.0.1:9000',
-    '--trusted-proxy',
-    '::ffff:127.0.0.1',
-    '--trusted-proxy',
-    '2001:0DB8::1',
-  ]);
-  const config = JSON.parse(await readFile(join(state, 'loop.json'), 'utf8'));
-  assert.deepEqual(config.platform.trusted_proxies, ['127.0.0.1', '2001:db8::1']);
-  assert.equal(config.platform.secure_cookies, true);
-  const invalid = join(dir, 'invalid');
-  await assert.rejects(
-    exec(process.execPath, [cli, '--state', invalid, '--trusted-proxy', '127.0.0.1/32']),
-    (error) => error.code === 1 && /trusted_proxies/.test(error.stderr)
-  );
-  await assert.rejects(stat(invalid), { code: 'ENOENT' });
-});
+const configurePlatform = fileURLToPath(new URL('../../../scripts/configure-platform.mjs', import.meta.url));
+const needsConfigurePlatform = !existsSync(configurePlatform) && 'needs the repository scripts/configure-platform.mjs';
 
-test('config generator writes Compose init options and only overwrites with --force', async (t) => {
-  const dir = await mkdtemp(join(tmpdir(), 'platform-compose-config-'));
-  t.after(() => rm(dir, { recursive: true, force: true }));
-  const cli = fileURLToPath(new URL('../../../scripts/configure-platform.mjs', import.meta.url)),
-    exec = promisify(execFile);
-  const state = join(dir, 'configured'),
-    read = async (name) => JSON.parse(await readFile(join(state, name), 'utf8'));
-  const base = [
-    cli,
-    '--state',
-    state,
-    '--fixture-url',
-    'http://127.0.0.1:9000',
-    '--host-root',
-    '/srv/easygo/data/workshop',
-  ];
-  await exec(process.execPath, [
-    ...base,
-    '--registration',
-    'false',
-    '--task-memory-mib',
-    '512',
-    '--task-cpus',
-    '0.5',
-    '--task-pids',
-    '64',
-    '--max-output-tokens',
-    '8192',
-  ]);
-  let loop = await read('loop.json'),
-    sandbox = (await read('workshop.json')).workshop.sandbox;
-  assert.equal(loop.platform.registration, false);
-  assert.equal((await read('gateway.json')).meter.max_output_tokens, 8192);
-  assert.deepEqual(
-    [sandbox.host_root, sandbox.memory_bytes, sandbox.nano_cpus, sandbox.pids_limit],
-    ['/srv/easygo/data/workshop', 512 * 1048576, 500_000_000, 64]
-  );
-  await assert.rejects(
-    exec(process.execPath, [...base, '--registration', 'true']),
-    (error) => error.code === 1 && /EEXIST/.test(error.stderr)
-  );
-  assert.equal((await read('loop.json')).platform.registration, false);
-  await exec(process.execPath, [...base, '--registration', 'true', '--force']);
-  loop = await read('loop.json');
-  sandbox = (await read('workshop.json')).workshop.sandbox;
-  assert.equal(loop.platform.registration, true);
-  assert.deepEqual([sandbox.memory_bytes, sandbox.nano_cpus, sandbox.pids_limit], [2048 * 1048576, 1_000_000_000, 256]);
-  for (const [flag, value, message] of [
-    ['--registration', 'yes', /--registration/],
-    ['--host-root', 'relative/workshop', /--host-root/],
-    ['--host-root', '/srv/../workshop', /--host-root/],
-    ['--task-pids', '8', /--task-pids/],
-    ['--task-memory-mib', '100.5', /integers/],
-    ['--max-output-tokens', '200000', /--max-output-tokens/],
-    ['--task-cpus', 'lots', /--task-cpus/],
-  ]) {
+test(
+  'trusted_proxies CLI flag is repeatable, canonicalized and validated before creating state',
+  { skip: needsConfigurePlatform },
+  async (t) => {
+    const dir = await mkdtemp(join(tmpdir(), 'platform-proxy-config-'));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    const cli = configurePlatform,
+      exec = promisify(execFile);
+    const state = join(dir, 'configured');
+    await exec(process.execPath, [
+      cli,
+      '--state',
+      state,
+      '--origin',
+      'https://agent.example.test',
+      '--fixture-url',
+      'http://127.0.0.1:9000',
+      '--trusted-proxy',
+      '::ffff:127.0.0.1',
+      '--trusted-proxy',
+      '2001:0DB8::1',
+    ]);
+    const config = JSON.parse(await readFile(join(state, 'loop.json'), 'utf8'));
+    assert.deepEqual(config.platform.trusted_proxies, ['127.0.0.1', '2001:db8::1']);
+    assert.equal(config.platform.secure_cookies, true);
     const invalid = join(dir, 'invalid');
     await assert.rejects(
-      exec(process.execPath, [cli, '--state', invalid, flag, value]),
-      (error) => error.code === 1 && message.test(error.stderr)
+      exec(process.execPath, [cli, '--state', invalid, '--trusted-proxy', '127.0.0.1/32']),
+      (error) => error.code === 1 && /trusted_proxies/.test(error.stderr)
     );
     await assert.rejects(stat(invalid), { code: 'ENOENT' });
   }
-});
+);
+
+test(
+  'config generator writes Compose init options and only overwrites with --force',
+  { skip: needsConfigurePlatform },
+  async (t) => {
+    const dir = await mkdtemp(join(tmpdir(), 'platform-compose-config-'));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    const cli = configurePlatform,
+      exec = promisify(execFile);
+    const state = join(dir, 'configured'),
+      read = async (name) => JSON.parse(await readFile(join(state, name), 'utf8'));
+    const base = [
+      cli,
+      '--state',
+      state,
+      '--fixture-url',
+      'http://127.0.0.1:9000',
+      '--host-root',
+      '/srv/easygo/data/workshop',
+    ];
+    await exec(process.execPath, [
+      ...base,
+      '--registration',
+      'false',
+      '--task-memory-mib',
+      '512',
+      '--task-cpus',
+      '0.5',
+      '--task-pids',
+      '64',
+      '--max-output-tokens',
+      '8192',
+    ]);
+    let loop = await read('loop.json'),
+      sandbox = (await read('workshop.json')).workshop.sandbox;
+    assert.equal(loop.platform.registration, false);
+    assert.equal((await read('gateway.json')).meter.max_output_tokens, 8192);
+    assert.deepEqual(
+      [sandbox.host_root, sandbox.memory_bytes, sandbox.nano_cpus, sandbox.pids_limit],
+      ['/srv/easygo/data/workshop', 512 * 1048576, 500_000_000, 64]
+    );
+    await assert.rejects(
+      exec(process.execPath, [...base, '--registration', 'true']),
+      (error) => error.code === 1 && /EEXIST/.test(error.stderr)
+    );
+    assert.equal((await read('loop.json')).platform.registration, false);
+    await exec(process.execPath, [...base, '--registration', 'true', '--force']);
+    loop = await read('loop.json');
+    sandbox = (await read('workshop.json')).workshop.sandbox;
+    assert.equal(loop.platform.registration, true);
+    assert.deepEqual(
+      [sandbox.memory_bytes, sandbox.nano_cpus, sandbox.pids_limit],
+      [2048 * 1048576, 1_000_000_000, 256]
+    );
+    for (const [flag, value, message] of [
+      ['--registration', 'yes', /--registration/],
+      ['--host-root', 'relative/workshop', /--host-root/],
+      ['--host-root', '/srv/../workshop', /--host-root/],
+      ['--task-pids', '8', /--task-pids/],
+      ['--task-memory-mib', '100.5', /integers/],
+      ['--max-output-tokens', '200000', /--max-output-tokens/],
+      ['--task-cpus', 'lots', /--task-cpus/],
+    ]) {
+      const invalid = join(dir, 'invalid');
+      await assert.rejects(
+        exec(process.execPath, [cli, '--state', invalid, flag, value]),
+        (error) => error.code === 1 && message.test(error.stderr)
+      );
+      await assert.rejects(stat(invalid), { code: 'ENOENT' });
+    }
+  }
+);

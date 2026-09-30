@@ -8,10 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
-	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -62,9 +59,7 @@ type record struct {
 }
 type Manager struct {
 	db                 *bolt.DB
-	client             *http.Client
-	transport          *http.Transport
-	url                string
+	wallet             *rpc.Client
 	retention          time.Duration
 	authorizingTimeout time.Duration
 	observer           func(FlushReport)
@@ -95,15 +90,18 @@ func seconds(n int64, fallback time.Duration) (time.Duration, bool) {
 	return time.Duration(n) * time.Second, n > 0 && n <= math.MaxInt64/int64(time.Second)
 }
 func New(c Config, tlsIdentity rpc.TLSConfig) (*Manager, error) {
-	u, e := url.Parse(c.URL)
 	retention, validRetention := seconds(c.RetentionSeconds, 7*24*time.Hour)
 	authorizingTimeout, validTimeout := seconds(c.AuthorizingTimeoutSeconds, time.Hour)
-	if e != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || c.Database == "" || !validRetention || !validTimeout {
+	if c.Database == "" || !validRetention || !validTimeout {
 		return nil, errors.New("invalid meter configuration")
 	}
 	tlsConfig, e := rpc.ClientTLS(tlsIdentity, c.PeerCertificateFile)
 	if e != nil {
 		return nil, e
+	}
+	wallet, e := rpc.NewClient(c.URL, tlsConfig, rpc.Options{Timeout: 5 * time.Second, MaxResponseBytes: 1 << 20})
+	if e != nil {
+		return nil, errors.New("invalid meter configuration")
 	}
 	if e = os.MkdirAll(filepath.Dir(c.Database), 0700); e != nil {
 		return nil, e
@@ -112,8 +110,7 @@ func New(c Config, tlsIdentity rpc.TLSConfig) (*Manager, error) {
 	if e != nil {
 		return nil, fmt.Errorf("meter database unavailable: %w", e)
 	}
-	transport := &http.Transport{TLSClientConfig: tlsConfig, MaxIdleConnsPerHost: 4}
-	m := &Manager{db: db, url: c.URL, transport: transport, client: &http.Client{Transport: transport, Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, retention: retention, authorizingTimeout: authorizingTimeout, observer: c.Observer, stopped: make(chan struct{})}
+	m := &Manager{db: db, wallet: wallet, retention: retention, authorizingTimeout: authorizingTimeout, observer: c.Observer, stopped: make(chan struct{})}
 	e = db.Update(func(tx *bolt.Tx) error {
 		for _, name := range [][]byte{claims, pending} {
 			if _, e := tx.CreateBucketIfNotExists(name); e != nil {
@@ -176,46 +173,6 @@ func New(c Config, tlsIdentity rpc.TLSConfig) (*Manager, error) {
 	}()
 	return m, nil
 }
-func (m *Manager) call(ctx context.Context, method string, params any, out any) error {
-	payload, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": "meter-" + time.Now().UTC().Format("20060102T150405.000000000"), "method": method, "params": params})
-	var requestID struct {
-		ID string `json:"id"`
-	}
-	json.Unmarshal(payload, &requestID)
-	req, e := http.NewRequestWithContext(ctx, "POST", m.url, bytes.NewReader(payload))
-	if e != nil {
-		return e
-	}
-	req.Header.Set("Content-Type", "application/json")
-	res, e := m.client.Do(req)
-	if e != nil {
-		return errors.New("wallet transport unavailable")
-	}
-	defer res.Body.Close()
-	body, e := io.ReadAll(io.LimitReader(res.Body, (1<<20)+1))
-	if e != nil || len(body) > 1<<20 {
-		return errors.New("invalid wallet response")
-	}
-	var envelope struct {
-		JSONRPC string          `json:"jsonrpc"`
-		ID      string          `json:"id"`
-		Result  json.RawMessage `json:"result"`
-		Error   *rpc.Error      `json:"error,omitempty"`
-	}
-	if rpc.Decode(body, &envelope) != nil || envelope.JSONRPC != "2.0" || envelope.ID != requestID.ID || (len(envelope.Result) > 0) == (envelope.Error != nil) {
-		return errors.New("invalid wallet envelope")
-	}
-	if envelope.Error != nil {
-		return envelope.Error
-	}
-	if res.StatusCode != 200 {
-		return errors.New("wallet HTTP error")
-	}
-	if out != nil && json.Unmarshal(envelope.Result, out) != nil {
-		return errors.New("invalid wallet result")
-	}
-	return nil
-}
 func (m *Manager) Reserve(ctx context.Context, r gateway.Reservation) (func(gateway.Observation) error, error) {
 	if m.unhealthy.Load() {
 		return nil, &admissionError{"billing_unavailable"}
@@ -240,7 +197,7 @@ func (m *Manager) Reserve(ctx context.Context, r gateway.Reservation) (func(gate
 		ReservedMicros int64  `json:"reserved_micros"`
 		Duplicate      bool   `json:"duplicate"`
 	}
-	if e = m.call(ctx, "platform.wallet.reserve", r, &authorization); e != nil {
+	if e = m.wallet.Call(ctx, "platform.wallet.reserve", r, &authorization); e != nil {
 		var re *rpc.Error
 		if errors.As(e, &re) && re.Code == -32002 {
 			return nil, &admissionError{"insufficient_credits"}
@@ -388,7 +345,7 @@ func (m *Manager) settlePending(ctx context.Context) error {
 		if json.Unmarshal(item.raw, &p) != nil {
 			return errors.New("invalid pending receipt")
 		}
-		if e := m.call(ctx, "platform.wallet.settle", p, nil); e != nil {
+		if e := m.wallet.Call(ctx, "platform.wallet.settle", p, nil); e != nil {
 			last = e
 			continue
 		}
@@ -411,7 +368,7 @@ func (m *Manager) Close() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		m.Flush(ctx)
 		cancel()
-		m.transport.CloseIdleConnections()
+		m.wallet.Close()
 		e = m.db.Close()
 	})
 	return e

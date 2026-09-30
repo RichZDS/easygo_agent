@@ -3,6 +3,7 @@ package workshop
 import (
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 
 	"easygo-agent/rpc"
@@ -69,14 +70,6 @@ func (p RuntimeProfile) choice(id string) RuntimeChoice {
 	}
 	return RuntimeChoice{ID: id, Engine: p.Engine, Model: p.model(), Protocol: p.Protocol, Source: source}
 }
-func contains(values []string, value string) bool {
-	for _, v := range values {
-		if v == value {
-			return true
-		}
-	}
-	return false
-}
 func (s *Service) selectRuntime(w Workflow, id string) (Workflow, error) {
 	if id == "" {
 		id = w.Runtime
@@ -84,7 +77,7 @@ func (s *Service) selectRuntime(w Workflow, id string) (Workflow, error) {
 	if id == "" {
 		return w, nil
 	}
-	if id != w.Runtime && !contains(w.AllowedRuntimes, id) {
+	if id != w.Runtime && !slices.Contains(w.AllowedRuntimes, id) {
 		return w, fmt.Errorf("%w: runtime not allowed for workflow", ErrInvalid)
 	}
 	p, ok := s.runtimes[id]

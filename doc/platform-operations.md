@@ -194,3 +194,94 @@ EASYGO_DOCKER_SOCKET=/path/to/dedicated/docker.sock node scripts/test-compose.mj
 `test-compose.mjs` 检查 init 生成的配置（daemon 路径、属主和权限、配置里没有密码和 key），在这套部署上跑 `test-platform-compose.mjs`（注册、发额度、对话扣费、隔离任务和产物下载），再改一个 `.env` 值重新 `up`，确认新配置生效、PKI 和账户保留。镜像缺失时才构建，`EASYGO_COMPOSE_BUILD=1` 强制重建。
 
 各次实测结果与证据位置见 [平台验收记录](platform-verification.md)。
+
+## 11. `EASYGO_*` 环境变量总表
+
+仓库代码（`doc/` 以外）读取或设置的 `EASYGO_*` 变量共 68 个，按由谁设置分四组。**第 4 组是测试专用，生产部署不要设置。** 模型供应商 key（如 `DEEPSEEK_API_KEY`）不带这个前缀，不在表内。
+
+### 11.1 托管部署：`.env`，经 `compose.yaml` 和 init 生效
+
+| 变量 | 默认值 | 作用 |
+|---|---|---|
+| `EASYGO_ADMIN_PASSWORD` | 无，首次启动必填 | 首次启动创建的管理员密码，至少 12 个字符。init 只检查长度，agent-loop 按 `loop.json` 的 `password_env` 读取；管理员已存在后不再读取 |
+| `EASYGO_ADMIN_EMAIL` | `admin@example.com` | 首次启动创建的管理员邮箱 |
+| `EASYGO_PORT` / `EASYGO_BIND` | `8090` / `127.0.0.1` | Web 在宿主上的端口和绑定地址 |
+| `EASYGO_PUBLIC_ORIGIN` | `http://localhost:<EASYGO_PORT>` | 浏览器实际访问的 origin；以 `https:` 开头时打开 Secure cookie |
+| `EASYGO_REGISTRATION` | `false` | 是否开放自助注册，只接受 `true` / `false` |
+| `EASYGO_DATA_DIR` | `./state/platform` | 数据目录（配置、PKI、数据库、任务工作区），见第 7 节 |
+| `EASYGO_DOCKER_SOCKET` | `/var/run/docker.sock` | 挂给 init 和工坊的 Docker socket，应指向专用 daemon |
+| `EASYGO_HOST_DATA_DIR` | 空，init 通过 Docker API 查询 | daemon 看到的数据目录路径，写进 `workshop.json` 的 `host_root`；socket 不在本机时指定 |
+| `EASYGO_TRUSTED_PROXIES` | 空 | 反向代理地址，逗号或空白分隔，见第 3 节 |
+| `EASYGO_TASK_MEMORY_MIB` / `EASYGO_TASK_CPUS` / `EASYGO_TASK_PIDS` | `2048` / `1` / `256` | 每个任务容器的上限，允许范围 64–65536 / 0.1–32 / 16–4096 |
+| `EASYGO_MAX_OUTPUT_TOKENS` | `32768` | 每次模型调用的输出上限（1–131072），写进 `gateway.json` 的 `meter`，见第 4 节 |
+| `EASYGO_RUNTIME_IMAGE` | `easygo-task-runtime:platform` | 任务容器镜像：Compose 按这个名字构建，工坊按它启动任务 |
+| `EASYGO_PLATFORM_SUBNET` / `EASYGO_PLATFORM_GATEWAY` | `172.31.250.0/24` / `172.31.250.1` | Compose 内部网段；和宿主网段冲突时两项一起改，`EASYGO_TRUSTED_PROXIES` 也跟着改 |
+| `EASYGO_PKI_DAYS` | 见右 | `scripts/dev-pki.sh` 的证书有效期（天，1–99999），不设时 CA 30 天、服务证书 7 天。Compose 部署固定为 3650：init 在变量为空时用 3650，而 `compose.yaml` 不向 init 传这个变量。单独运行 `configure-platform.mjs` 或 `dev-pki.sh` 时才需要设 |
+
+### 11.2 三服务独立部署：`compose.services.yaml`
+
+只用于 `docker compose -f compose.services.yaml`，一键托管平台的 `compose.yaml` 不读这组变量。
+
+| 变量 | 默认值 | 作用 |
+|---|---|---|
+| `EASYGO_GATEWAY_PORT` / `EASYGO_AGENT_PORT` / `EASYGO_WORKSHOP_PORT` | `8441` / `8442` / `8443` | 三个 RPC 端口映射到宿主 `127.0.0.1` 上的端口 |
+| `EASYGO_GATEWAY_CONFIG` / `EASYGO_AGENT_CONFIG` / `EASYGO_WORKSHOP_CONFIG` | 各服务目录下的 `config.example.json` | 挂到容器内 `/run/easygo/config.json` 的配置文件 |
+| `EASYGO_PKI_DIR` | `./state/pki` | 各服务身份目录和 `public/` 证书目录所在的目录 |
+
+### 11.3 工坊为任务进程设置：不要手工设置
+
+| 变量 | 设置方 → 读取方 | 作用 |
+|---|---|---|
+| `EASYGO_RELAY_SOCKET` | 工坊 → `task-shim` | 本次执行的模型 relay UDS，固定为 `/run/easygo-relay/model.sock` |
+| `EASYGO_RUNTIME_API_KEY` | 工坊 → 原生 CLI 的生成配置 | 只在本次执行的 relay 上有效的能力 key，不是供应商 key |
+| `EASYGO_CREW_URL` / `EASYGO_CREW_TOKEN` | 工坊 → `easygo-crew` | 任务内 crew 接口的地址和令牌 |
+
+工坊配置里引擎的 `env_allowlist` 不能包含以 `EASYGO_RUNTIME_` 或 `EASYGO_CREW_` 开头的名字（启动时报配置无效），所以不能从宿主转发或覆盖这组变量。验收检查容器（`fixture-check`）要求环境里没有任何 `EASYGO_*`。
+
+### 11.4 测试专用：生产部署不要设置
+
+**离线**（不需要 Docker，不花钱）：
+
+| 变量 | 读取方 | 作用 |
+|---|---|---|
+| `EASYGO_GO_BIN` | `Makefile`（`make test-e2e`）、`scripts/lib/procs.mjs` | 端到端脚本使用的 go 可执行文件，默认 `go` |
+| `EASYGO_GO` | `services/agent-loop/test/knowledge-platform.test.mjs` | 同样是 go 可执行文件，但只有这个测试读它，默认值是某台开发机上的绝对路径 |
+| `EASYGO_KNOWLEDGE_PLATFORM_DIST` | 同上 | 被测的 agent-loop 编译产物目录，默认 `services/agent-loop/dist` |
+| `EASYGO_REMOTE_TEST_URL` / `EASYGO_REMOTE_TEST_EMAIL` / `EASYGO_REMOTE_TEST_PASSWORD` | `internal/remotetui/integration_test.go`，由上一个测试设置 | 远程 TUI 集成测试连接的平台地址和夹具账户；不设 URL 时跳过 |
+| `EASYGO_RPC_TEST_PROVIDER_KEY` | `scripts/test-services.mjs` | 夹具供应商的假 key，由脚本自己设置；测试断言它不会进入任务进程 |
+| `EASYGO_FIXTURE_HELPER` | `services/workshop/cmd/fixture-cli/crew_test.go` | 测试以子进程方式再次启动自己时的标记 |
+| `EASYGO_TUI_TEST_PASSWORD` | `scripts/test-remote-tui.py` | `--password-env` 的默认变量名，存放测试账户密码 |
+
+**专用 Docker daemon**（夹具模型，不花钱；`make test-e2e-docker` 缺前三个变量时直接报错）：
+
+| 变量 | 读取方 | 作用 |
+|---|---|---|
+| `EASYGO_DOCKER_TEST_BINARY` / `EASYGO_DOCKER_TEST_ENDPOINT` / `EASYGO_DOCKER_TEST_IMAGE` | `Makefile`、`test-harness.mjs`、`test-platform.mjs`、`test-platform-faults.mjs`、工坊的 Docker 集成测试；前两个付费脚本也读 | docker 可执行文件、专用 daemon 地址、夹具任务镜像（`deploy/runtime/Dockerfile.fixture`）。Go 集成测试缺地址或镜像时跳过 |
+| `EASYGO_DOCKER_TEST_ROOT` | `docker_integration_test.go` | 临时根目录的上级目录；checkout 路径太长、UDS 路径超过 AF_UNIX 的 108 字节时指定一个短路径 |
+| `EASYGO_DOCKER_NATIVE_IMAGE` | `docker_native_test.go` | 装有四个真实 CLI 的任务镜像，和 `EASYGO_DOCKER_TEST_ENDPOINT` 一起设 |
+| `EASYGO_DOCKER_QUOTA_IMAGE` | `disk_quota_integration_test.go` | 磁盘配额测试的夹具镜像，和 `EASYGO_DOCKER_TEST_ENDPOINT` 一起设 |
+| `EASYGO_PLATFORM_SOAK_SECONDS` | `test-platform.mjs` | soak 时长（秒），默认 0 不跑 |
+| `EASYGO_PLATFORM_KEEP` | `test-platform.mjs` | 为 `1` 时通过后不退出，保留平台直到收到 SIGTERM/SIGINT |
+| `EASYGO_DOCKER_BINARY` | `test-compose.mjs` | docker 可执行文件，默认 `docker` |
+| `EASYGO_COMPOSE_BUILD` | `test-compose.mjs` | 为 `1` 时强制重建镜像 |
+| `EASYGO_PLATFORM_ORIGIN` / `EASYGO_PLATFORM_EVIDENCE` / `EASYGO_REQUIRE_ARTIFACT` | `test-platform-compose.mjs`，由 `test-compose.mjs` 设置 | 被测 origin、证据目录（`test-compose.mjs` 自己也读）、为 `1` 时要求产物下载成功 |
+| `EASYGO_FIXTURE_URL` | `compose.fixture.yaml` 设置，init 读取 | 把网关的模型地址换成夹具模型（`configure-platform.mjs --fixture-url`） |
+
+**付费**（调用真实供应商；只由 `test-harness-live.mjs`、`test-platform-project.mjs`、`test-deepseek-live.mjs` 读取）：
+
+| 变量 | 读取方 | 作用 |
+|---|---|---|
+| `EASYGO_LIVE_KEY_FILE` | harness-live、platform-project | 供应商 key 文件路径，必填 |
+| `EASYGO_LIVE_MODEL` | harness-live、platform-project | 模型别名，默认 `deepseek-flash` |
+| `EASYGO_LIVE_STATE_ROOT` | 三个脚本 | 状态目录的上级目录，各脚本默认值不同 |
+| `EASYGO_LIVE_TASK_SECONDS` | harness-live、platform-project | 单个任务时限（秒），默认 900 / 1500 |
+| `EASYGO_LIVE_BASE_IMAGE` | harness-live | 基础任务镜像，默认 `easygo-task-runtime:platform` |
+| `EASYGO_LIVE_RUNTIMES` | harness-live | 要跑的运行时，默认 `codex,claude,pi,openclaw` |
+| `EASYGO_LIVE_KEEP` | harness-live | 为 `1` 时保留任务工作区、二进制、镜像 overlay 和临时 PKI |
+| `EASYGO_LIVE_RUNTIME` / `EASYGO_LIVE_RUNTIME_IMAGE` | platform-project | 运行时（默认 `codex`）和任务镜像（默认 `easygo-task-runtime:platform`） |
+| `EASYGO_LIVE_MAX_OUTPUT` / `EASYGO_LIVE_REPAIR_ROUNDS` / `EASYGO_LIVE_CREDITS` | platform-project | 输出上限（默认 32768）、修复轮数（默认 1）、积分预算（默认 3000） |
+| `EASYGO_LIVE_ENGINES` | deepseek-live | 要跑的引擎，逗号分隔，默认全部 |
+| `EASYGO_LIVE_TOOLS_ONLY` | deepseek-live | 为 `1` 时跳过协议检查，只跑工具调用部分 |
+| `EASYGO_LIVE_REPORT_DIR` / `EASYGO_LIVE_COMMIT` | deepseek-live | 报告目录（默认状态目录）和报告里记录的源码提交（默认 `working-tree`） |
+
+`doc/` 下的历史文档还提到 `EASYGO_TEST_DATABASE_URL` 和 `EASYGO_SANDBOX_INTEGRATION_URL`，它们属于已移除的旧 Go 应用，现行代码不读取。

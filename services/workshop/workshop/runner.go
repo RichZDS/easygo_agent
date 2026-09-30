@@ -63,7 +63,9 @@ func NewCommandRunner(engines map[string]EngineConfig, maxOutput int) (*CommandR
 	return r, nil
 }
 
-func engineArgs(in Invocation) ([]string, error) {
+// engineArgs builds the native CLI argv. codexSandbox is the Codex sandbox_mode
+// value: the workflow policy on the host, codexContainerSandbox under Docker.
+func engineArgs(in Invocation, codexSandbox string) ([]string, error) {
 	if err := validateWorkflow(in.Workflow); err != nil {
 		return nil, err
 	}
@@ -80,14 +82,14 @@ func engineArgs(in Invocation) ([]string, error) {
 			args = append(args, "resume")
 		}
 		// resume does not accept --sandbox. Config overrides are supported by both.
-		args = append(args, "--json", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "-c", `approval_policy="never"`, "-c", `sandbox_mode="`+w.Policy+`"`, "--model", w.Model)
+		args = append(args, "--json", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "-c", `approval_policy="never"`, "-c", `sandbox_mode="`+codexSandbox+`"`, "--model", w.Model)
 		if in.SessionID != "" {
 			args = append(args, in.SessionID)
 		}
 		return append(args, "-"), nil
 	case "pi":
 		tools := "read,grep,find,ls"
-		if w.Policy == "workspace-write" {
+		if w.Policy == PolicyWorkspaceWrite {
 			tools += ",edit,write"
 		}
 		return []string{"--print", "--mode", "json", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-approve", "--tools", tools, "--model", w.Model}, nil
@@ -95,7 +97,7 @@ func engineArgs(in Invocation) ([]string, error) {
 		return []string{"agent", "--local", "--json", "--agent", "main", "--timeout", fmt.Sprint(w.TimeoutSeconds)}, nil
 	case "claude":
 		tools, mode := "Read,Glob,Grep", "dontAsk"
-		if w.Policy == "workspace-write" {
+		if w.Policy == PolicyWorkspaceWrite {
 			tools, mode = "Read,Glob,Grep,Edit,Write", "acceptEdits"
 		}
 		// Restricted file tools are confined to cwd; there are no shell or MCP tools.
@@ -113,7 +115,7 @@ func (r *CommandRunner) Run(ctx context.Context, in Invocation, emit func(Event)
 	if !ok {
 		return Result{}, errors.New("engine not configured")
 	}
-	args, err := engineArgs(in)
+	args, err := engineArgs(in, string(in.Workflow.Policy))
 	if err != nil {
 		return Result{}, err
 	}
@@ -184,7 +186,7 @@ func runNative(ctx context.Context, engine string, maxOutput int, secrets []stri
 		text += " [diagnostics truncated]"
 	}
 	if text != "" {
-		if emitErr := emit(Event{Kind: "diagnostic", Text: text}); emitErr != nil {
+		if emitErr := emit(Event{Kind: EventDiagnostic, Text: text}); emitErr != nil {
 			return result, emitErr
 		}
 	}
@@ -404,10 +406,6 @@ func (p *streamParser) parse(line []byte) {
 		p.fail(errors.New("malformed engine JSONL event"))
 		return
 	}
-	if p.engine == "pi" {
-		p.parsePi(event)
-		return
-	}
 	id := event.SessionID
 	if p.engine == "codex" {
 		id = event.ThreadID
@@ -418,7 +416,7 @@ func (p *streamParser) parse(line []byte) {
 			return
 		}
 		p.result.SessionID = id
-		p.send(Event{Kind: "session", SessionID: id})
+		p.send(Event{Kind: EventSession, SessionID: id})
 	}
 	if p.err != nil {
 		return
@@ -444,7 +442,7 @@ func (p *streamParser) parse(line []byte) {
 			p.success = true
 			p.result.Text = p.redact(event.Result)
 			p.result.Usage = Usage{InputTokens: event.Usage.Input, OutputTokens: event.Usage.Output, CachedInputTokens: event.Usage.CacheRead}
-			p.send(Event{Kind: "result", Text: event.Result, Usage: &p.result.Usage})
+			p.send(Event{Kind: EventResult, Text: event.Result, Usage: &p.result.Usage})
 		}
 	} else {
 		switch event.Type {
@@ -463,10 +461,10 @@ func (p *streamParser) parse(line []byte) {
 			}
 			p.success = true
 			p.result.Usage = Usage{InputTokens: event.Usage.Input, OutputTokens: event.Usage.Output, CachedInputTokens: event.Usage.Cached}
-			p.send(Event{Kind: "result", Usage: &p.result.Usage})
+			p.send(Event{Kind: EventResult, Usage: &p.result.Usage})
 		}
 	}
 	if text != "" {
-		p.send(Event{Kind: "text", Text: text})
+		p.send(Event{Kind: EventText, Text: text})
 	}
 }

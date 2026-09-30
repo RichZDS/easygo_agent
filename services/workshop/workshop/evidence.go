@@ -8,12 +8,12 @@ import (
 )
 
 type EvidenceList struct {
-	Namespace       string     `json:"namespace"`
-	TaskID          string     `json:"task_id"`
-	RunID           string     `json:"run_id"`
-	AcceptanceState string     `json:"acceptance_state"`
-	FalseGreen      bool       `json:"false_green"`
-	Evidence        []Evidence `json:"evidence"`
+	Namespace       string          `json:"namespace"`
+	TaskID          string          `json:"task_id"`
+	RunID           string          `json:"run_id"`
+	AcceptanceState AcceptanceState `json:"acceptance_state"`
+	FalseGreen      bool            `json:"false_green"`
+	Evidence        []Evidence      `json:"evidence"`
 }
 type EvidencePage struct {
 	Namespace  string `json:"namespace"`
@@ -37,13 +37,7 @@ func (s *Service) Evidence(namespace, id, runID, evidenceID string, offset, limi
 	if err != nil {
 		return nil, err
 	}
-	var run *Run
-	for i := range task.Runs {
-		if task.Runs[i].ID == runID || (runID == "" && i == len(task.Runs)-1) {
-			run = &task.Runs[i]
-			break
-		}
-	}
+	run := task.run(runID)
 	if run == nil {
 		return nil, ErrNotFound
 	}

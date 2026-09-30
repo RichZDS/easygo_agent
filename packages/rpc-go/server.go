@@ -17,6 +17,9 @@ import (
 
 const DefaultMaxRequestBytes int64 = 8 * 1024 * 1024
 
+// writeDeadline bounds each stalled network write of a response or stream event.
+const writeDeadline = 30 * time.Second
+
 var namespacePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
 
 func ValidNamespace(s string) bool { return namespacePattern.MatchString(s) }
@@ -68,6 +71,27 @@ type request struct {
 }
 type Method func(context.Context, json.RawMessage, *Stream) (any, *Error)
 
+// Typed strictly decodes params into P before calling fn; params that Decode
+// rejects answer InvalidParams without running fn.
+func Typed[P any](fn func(context.Context, P, *Stream) (any, *Error)) Method {
+	var zero P
+	return TypedWith(zero, fn)
+}
+
+// TypedWith is Typed with defaults: fields absent from params keep their value
+// from defaults, while explicit values, including zero, replace it. defaults is
+// copied by value per call, so it must not hold non-nil maps, slices or
+// pointers, which Decode would write through into state shared by all calls.
+func TypedWith[P any](defaults P, fn func(context.Context, P, *Stream) (any, *Error)) Method {
+	return func(ctx context.Context, raw json.RawMessage, s *Stream) (any, *Error) {
+		p := defaults
+		if Decode(raw, &p) != nil {
+			return nil, InvalidParams()
+		}
+		return fn(ctx, p, s)
+	}
+}
+
 type Stream struct {
 	w        http.ResponseWriter
 	id       string
@@ -92,7 +116,7 @@ func (s *Stream) send(event string, value any) error {
 	}
 	// Bound stalled network writes while allowing long computations between events.
 	controller := http.NewResponseController(s.w)
-	_ = controller.SetWriteDeadline(time.Now().Add(30 * time.Second))
+	_ = controller.SetWriteDeadline(time.Now().Add(writeDeadline))
 	_, s.err = fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", event, b)
 	if s.err == nil {
 		s.err = controller.Flush()
@@ -135,7 +159,7 @@ func errorStatus(e *Error) int {
 	return 200
 }
 func write(w http.ResponseWriter, id any, result any, e *Error) error {
-	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(30 * time.Second))
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(writeDeadline))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(errorStatus(e))
 	return json.NewEncoder(w).Encode(Envelope{JSONRPC: "2.0", ID: id, Result: result, Error: e})
@@ -312,7 +336,7 @@ func Serve(ctx context.Context, s *http.Server) error {
 		if errors.Is(e, http.ErrServerClosed) {
 			return nil
 		}
-		return errors.New("RPC server failed")
+		return fmt.Errorf("RPC server failed: %w", e)
 	case <-ctx.Done():
 	}
 	shutdown, stop := context.WithTimeout(context.Background(), 10*time.Second)

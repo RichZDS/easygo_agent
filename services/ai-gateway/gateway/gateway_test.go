@@ -57,7 +57,7 @@ func newTestGateway(t *testing.T, protocol, url string, observer Observer) *Gate
 func requireCode(t *testing.T, err error, code string) {
 	t.Helper()
 	var e *Error
-	if !errors.As(err, &e) || e.Code != code {
+	if !errors.As(err, &e) || string(e.Code) != code {
 		t.Fatalf("error = %v, want code %s", err, code)
 	}
 }
@@ -473,6 +473,33 @@ func TestCustomMappingFailures(t *testing.T) {
 	}
 }
 
+type billingFunc func(context.Context, Reservation) (func(Observation) error, error)
+
+func (f billingFunc) Reserve(ctx context.Context, r Reservation) (func(Observation) error, error) {
+	return f(ctx, r)
+}
+
+func TestBilledCustomProtocolRejectedByNew(t *testing.T) {
+	custom := Model{Protocol: "custom", Endpoint: "http://localhost", Model: "u", Custom: customMapping()}
+	standard := Model{Protocol: "responses", Endpoint: "http://localhost", Model: "u"}
+	billing := billingFunc(func(context.Context, Reservation) (func(Observation) error, error) {
+		t.Error("New reserved credits")
+		return nil, errors.New("unused")
+	})
+	if _, e := New(Config{Models: map[string]Model{"custom": custom}}); e != nil {
+		t.Fatalf("unbilled custom rejected: %v", e)
+	}
+	if _, e := New(Config{Models: map[string]Model{"standard": standard}, Billing: billing}); e != nil {
+		t.Fatalf("billed standard protocol rejected: %v", e)
+	}
+	for name, models := range map[string]map[string]Model{"custom only": {"custom": custom}, "mixed": {"standard": standard, "custom": custom}} {
+		t.Run(name, func(t *testing.T) {
+			_, e := New(Config{Models: models, Billing: billing})
+			requireCode(t, e, "invalid_config")
+		})
+	}
+}
+
 func TestConcurrentComplete(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, responseFixture("responses")) }))
 	defer s.Close()
@@ -604,5 +631,83 @@ func TestMalformedProviderResponses(t *testing.T) {
 		o, _ := decodeObject([]byte(`{"input_tokens":-1,"output_tokens":2,"prompt_tokens":-1,"completion_tokens":2}`))
 		_, e := parseUsage(o, protocol)
 		requireCode(t, e, "invalid_response")
+	}
+}
+
+func TestCompleteResultAndStreamFlag(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprint(stream), func(t *testing.T) {
+			provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var o object
+				json.NewDecoder(r.Body).Decode(&o)
+				if o["stream"] != stream {
+					t.Errorf("stream=%v", o["stream"])
+				}
+				if stream {
+					sendEvents(w, streamFixture("responses"))
+				} else {
+					fmt.Fprint(w, responseFixture("responses"))
+				}
+			}))
+			defer provider.Close()
+			var observed atomic.Int32
+			g := newTestGateway(t, "responses", provider.URL, func(Observation) { observed.Add(1) })
+			seen := 0
+			var emit func(ai.Event) error
+			if stream {
+				emit = func(ev ai.Event) error { seen++; return nil }
+			}
+			out, e := g.Complete(context.Background(), canonicalRequest(), emit)
+			if e != nil {
+				t.Fatal(e)
+			}
+			if out.Model != "test" || len(out.Message.Content) != 2 || out.Usage.OutputTokens != 4 || !out.Cost.Known || observed.Load() != 1 {
+				t.Fatalf("out=%+v observed=%d", out, observed.Load())
+			}
+			if stream && seen == 0 {
+				t.Fatal("no delta")
+			}
+		})
+	}
+}
+func TestCompleteDoesNotReturnPartialFailure(t *testing.T) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"status":"incomplete","output":[{"type":"message","content":[{"type":"output_text","text":"private partial"}]}]}`)
+	}))
+	defer s.Close()
+	g := newTestGateway(t, "responses", s.URL, nil)
+	out, e := g.Complete(context.Background(), canonicalRequest(), nil)
+	if e == nil {
+		t.Fatal("incomplete response accepted")
+	}
+	if raw, _ := json.Marshal(out); strings.Contains(string(raw), "private partial") || strings.Contains(e.Error(), "private partial") {
+		t.Fatalf("partial output exposed: %s %v", raw, e)
+	}
+}
+func TestSettleObservationErrorCodes(t *testing.T) {
+	var got []Observation
+	g := &Gateway{observer: func(o Observation) { got = append(got, o) }}
+	settleFails := func(Observation) error { return errors.New("wallet down") }
+	for _, tc := range []struct {
+		err        error
+		settle     func(Observation) error
+		code       string
+		unrecorded bool
+	}{
+		{errors.New("not a gateway error"), nil, "internal_error", false},
+		{fmt.Errorf("wrapped: %w", fail(CodeTruncatedStream, "x")), nil, "truncated_stream", false},
+		{nil, nil, "", false},
+		{nil, settleFails, "billing_unavailable", true},
+		{fail(CodeCanceled, "x"), settleFails, "billing_unavailable", false},
+	} {
+		got = nil
+		obs := Observation{RequestID: "r"}
+		e := g.settleObservation(&obs, time.Now(), nil, nil, tc.settle, tc.err)
+		if (e != nil) != tc.unrecorded || len(got) != 1 || got[0].ErrorCode != tc.code {
+			t.Fatalf("err=%v: returned %v, observed %+v, want code %q", tc.err, e, got, tc.code)
+		}
+		if tc.unrecorded {
+			requireCode(t, e, "billing_unavailable")
+		}
 	}
 }

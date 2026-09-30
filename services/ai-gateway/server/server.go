@@ -2,7 +2,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -25,30 +24,14 @@ type Config struct {
 
 func LoadConfig(r io.Reader) (Config, error) {
 	var c Config
-	e := rpc.ReadConfig(r, &c)
-	if c.Listen == "" {
-		c.Listen = ":8441"
-	}
-	if e != nil {
-		return c, e
-	}
-	if c.BearerTokenEnv != "" {
-		return c, errors.New("RPC listener does not accept bearer configuration")
-	}
-	return c, nil
+	err := rpc.ReadConfig(r, &c)
+	return c, err
 }
 func New(c Config) (*http.Server, error) {
 	if c.Listen == "" {
 		c.Listen = ":8441"
 	}
-	if c.BearerTokenEnv != "" {
-		return nil, errors.New("RPC listener does not accept bearer configuration")
-	}
-	raw, e := json.Marshal(c.FileConfig)
-	if e != nil {
-		return nil, errors.New("invalid gateway configuration")
-	}
-	config, _, e := gateway.LoadConfig(bytes.NewReader(raw))
+	config, e := gateway.Resolve(c.FileConfig)
 	if e != nil {
 		return nil, e
 	}
@@ -66,25 +49,29 @@ func New(c Config) (*http.Server, error) {
 	}
 	return rpc.NewServer(c.ServerConfig, Methods(g), c.MaxRequestBytes)
 }
+
+type modelsParams struct {
+	Namespace string `json:"namespace"`
+}
+type nativeParams struct {
+	Namespace string          `json:"namespace"`
+	Model     string          `json:"model"`
+	Protocol  string          `json:"protocol"`
+	Body      json.RawMessage `json:"body"`
+}
+type generateParams struct {
+	Namespace string      `json:"namespace"`
+	Request   *ai.Request `json:"request"`
+	Stream    bool        `json:"stream,omitempty"`
+}
+
 func Methods(g *gateway.Gateway) map[string]rpc.Method {
 	return map[string]rpc.Method{
-		"gateway.models": func(ctx context.Context, raw json.RawMessage, s *rpc.Stream) (any, *rpc.Error) {
-			var p struct {
-				Namespace string `json:"namespace"`
-			}
-			if rpc.Decode(raw, &p) != nil {
-				return nil, rpc.InvalidParams()
-			}
+		"gateway.models": rpc.Typed(func(ctx context.Context, _ modelsParams, s *rpc.Stream) (any, *rpc.Error) {
 			return map[string]any{"models": g.Models()}, nil
-		},
-		"gateway.native": func(ctx context.Context, raw json.RawMessage, s *rpc.Stream) (any, *rpc.Error) {
-			var p struct {
-				Namespace string          `json:"namespace"`
-				Model     string          `json:"model"`
-				Protocol  string          `json:"protocol"`
-				Body      json.RawMessage `json:"body"`
-			}
-			if rpc.Decode(raw, &p) != nil || p.Model == "" || len(p.Body) == 0 {
+		}),
+		"gateway.native": rpc.Typed(func(ctx context.Context, p nativeParams, s *rpc.Stream) (any, *rpc.Error) {
+			if p.Model == "" || len(p.Body) == 0 {
 				return nil, rpc.InvalidParams()
 			}
 			result, err := g.Native(gateway.WithNamespace(ctx, p.Namespace), p.Model, p.Protocol, s.ID(), p.Body)
@@ -92,14 +79,9 @@ func Methods(g *gateway.Gateway) map[string]rpc.Method {
 				return nil, domainError(err)
 			}
 			return result, nil
-		},
-		"gateway.generate": func(ctx context.Context, raw json.RawMessage, s *rpc.Stream) (any, *rpc.Error) {
-			var p struct {
-				Namespace string      `json:"namespace"`
-				Request   *ai.Request `json:"request"`
-				Stream    bool        `json:"stream,omitempty"`
-			}
-			if rpc.Decode(raw, &p) != nil || p.Request == nil {
+		}),
+		"gateway.generate": rpc.Typed(func(ctx context.Context, p generateParams, s *rpc.Stream) (any, *rpc.Error) {
+			if p.Request == nil {
 				return nil, rpc.InvalidParams()
 			}
 			p.Request.RequestID = s.ID()
@@ -118,28 +100,14 @@ func Methods(g *gateway.Gateway) map[string]rpc.Method {
 				return nil, nil
 			}
 			return result, nil
-		},
+		}),
 	}
 }
 func domainError(err error) *rpc.Error {
+	code := gateway.CodeInternal
 	var e *gateway.Error
 	if errors.As(err, &e) {
-		switch e.Code {
-		case "insufficient_credits":
-			return rpc.Failure(-32002, e.Code)
-		case "duplicate_request":
-			return rpc.Failure(-32009, e.Code)
-		case "billing_identity_required":
-			return rpc.Failure(-32003, e.Code)
-		case "billing_unavailable":
-			return rpc.Failure(-32000, e.Code)
-		case "invalid_request", "invalid_parameters", "unsupported_capability", "request_too_large":
-			return rpc.Failure(-32602, e.Code)
-		case "unknown_model":
-			return rpc.Failure(-32004, e.Code)
-		case "upstream_http_error", "upstream_error", "invalid_response", "truncated_stream", "incomplete_response", "refused_response", "canceled", "response_too_large", "transport_error", "stream_read_error", "callback_error":
-			return rpc.Failure(-32000, e.Code)
-		}
+		code = e.Code
 	}
-	return rpc.Failure(-32603, "internal_error")
+	return rpc.Failure(gateway.RPCError(code))
 }

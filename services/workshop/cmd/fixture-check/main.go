@@ -73,7 +73,7 @@ func run(args []string) int {
 				success = false
 			}
 		}
-		_, relayErr := os.Stat("/run/easygo-relay/model.sock")
+		_, relayErr := os.Stat("/run/easygo-relay/model.sock") // workshop runtimeRelaySocket
 		success = success && os.IsNotExist(relayErr)
 		fmt.Printf("no credentials or relay: %t\n", success)
 		if !success {

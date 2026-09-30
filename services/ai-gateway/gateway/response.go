@@ -12,17 +12,17 @@ import (
 
 func decodeObject(raw []byte) (object, error) {
 	if rpc.ValidateJSON(raw) != nil {
-		return nil, fail("invalid_response", "invalid response JSON")
+		return nil, fail(CodeInvalidResponse, "invalid response JSON")
 	}
 	d := json.NewDecoder(bytes.NewReader(raw))
 	d.UseNumber()
 	var o object
 	if d.Decode(&o) != nil || o == nil {
-		return nil, fail("invalid_response", "response must be a JSON object")
+		return nil, fail(CodeInvalidResponse, "response must be a JSON object")
 	}
 	var extra any
 	if d.Decode(&extra) != io.EOF {
-		return nil, fail("invalid_response", "response contains trailing JSON")
+		return nil, fail(CodeInvalidResponse, "response contains trailing JSON")
 	}
 	return o, nil
 }
@@ -40,7 +40,7 @@ func number(v any) (int64, bool) {
 func index(v any) (int, error) {
 	n, ok := number(v)
 	if !ok || n > 100000 {
-		return 0, fail("invalid_response", "invalid stream block index")
+		return 0, fail(CodeInvalidResponse, "invalid stream block index")
 	}
 	return int(n), nil
 }
@@ -50,7 +50,7 @@ func baseResponse(alias string) ai.Response {
 }
 func providerError(o object) error {
 	if o["error"] != nil {
-		return fail("upstream_error", "upstream reported an error")
+		return fail(CodeUpstreamError, "upstream reported an error")
 	}
 	return nil
 }
@@ -73,7 +73,7 @@ func decodeResponse(m Model, alias string, raw []byte) (ai.Response, error) {
 	case "custom":
 		return decodeCustom(m, alias, o)
 	}
-	return ai.Response{}, fail("invalid_config", "unknown protocol")
+	return ai.Response{}, fail(CodeInvalidConfig, "unknown protocol")
 }
 func finish(raw string) (string, error) {
 	switch raw {
@@ -82,11 +82,11 @@ func finish(raw string) (string, error) {
 	case "tool_calls", "tool_use":
 		return "tool_calls", nil
 	case "length", "max_tokens", "incomplete", "model_context_window_exceeded":
-		return "", fail("incomplete_response", "upstream output was truncated")
+		return "", fail(CodeIncompleteResponse, "upstream output was truncated")
 	case "content_filter", "refusal":
-		return "", fail("refused_response", "upstream refused the response")
+		return "", fail(CodeRefusedResponse, "upstream refused the response")
 	default:
-		return "", fail("unsupported_capability", "unsupported or missing finish reason")
+		return "", fail(CodeUnsupportedCapability, "unsupported or missing finish reason")
 	}
 }
 func validateBlocks(blocks []ai.Block) error {
@@ -95,10 +95,10 @@ func validateBlocks(blocks []ai.Block) error {
 		case "text", "reasoning":
 		case "tool_call":
 			if b.ID == "" || b.Name == "" || !json.Valid(b.Arguments) {
-				return fail("invalid_response", "upstream returned an incomplete tool call")
+				return fail(CodeInvalidResponse, "upstream returned an incomplete tool call")
 			}
 		default:
-			return fail("unsupported_capability", "unsupported output block")
+			return fail(CodeUnsupportedCapability, "unsupported output block")
 		}
 	}
 	return nil
@@ -108,33 +108,33 @@ func decodeChat(alias string, o object) (ai.Response, error) {
 	r.ID = str(o["id"])
 	choices := arr(o["choices"])
 	if len(choices) != 1 {
-		return r, fail("invalid_response", "exactly one choice is required")
+		return r, fail(CodeInvalidResponse, "exactly one choice is required")
 	}
 	choice := obj(choices[0])
 	msg := obj(choice["message"])
 	if msg == nil {
-		return r, fail("invalid_response", "missing assistant message")
+		return r, fail(CodeInvalidResponse, "missing assistant message")
 	}
 	if msg["refusal"] != nil && str(msg["refusal"]) != "" {
-		return r, fail("refused_response", "upstream refused the response")
+		return r, fail(CodeRefusedResponse, "upstream refused the response")
 	}
 	if s, ok := msg["content"].(string); ok {
 		r.Message.Content = append(r.Message.Content, ai.Block{Type: "text", Text: s})
 	} else if msg["content"] != nil {
-		return r, fail("unsupported_capability", "unsupported chat output content")
+		return r, fail(CodeUnsupportedCapability, "unsupported chat output content")
 	}
 	if s, ok := msg["reasoning_content"].(string); ok {
 		r.Message.Content = append(r.Message.Content, ai.Block{Type: "reasoning", Text: s, ProviderState: state("chat_completions", s)})
 	}
 	if v := msg["tool_calls"]; v != nil {
 		if _, ok := v.([]any); !ok {
-			return r, fail("invalid_response", "invalid tool calls")
+			return r, fail(CodeInvalidResponse, "invalid tool calls")
 		}
 	}
 	for _, v := range arr(msg["tool_calls"]) {
 		t := obj(v)
 		if str(t["type"]) != "function" {
-			return r, fail("unsupported_capability", "unsupported chat tool type")
+			return r, fail(CodeUnsupportedCapability, "unsupported chat tool type")
 		}
 		f := obj(t["function"])
 		r.Message.Content = append(r.Message.Content, ai.Block{Type: "tool_call", ID: str(t["id"]), Name: str(f["name"]), Arguments: json.RawMessage(str(f["arguments"]))})
@@ -148,7 +148,7 @@ func decodeChat(alias string, o object) (ai.Response, error) {
 		return r, err
 	}
 	if r.FinishReason == "tool_calls" && !hasToolCall(r.Message.Content) {
-		return r, fail("invalid_response", "tool finish without a tool call")
+		return r, fail(CodeInvalidResponse, "tool finish without a tool call")
 	}
 	r.Usage, err = parseUsage(o["usage"], "chat_completions")
 	return r, err
@@ -157,11 +157,11 @@ func decodeResponses(alias string, o object) (ai.Response, error) {
 	r := baseResponse(alias)
 	r.ID = str(o["id"])
 	if str(o["status"]) != "completed" {
-		return r, fail("incomplete_response", "upstream response did not complete")
+		return r, fail(CodeIncompleteResponse, "upstream response did not complete")
 	}
 	output, ok := o["output"].([]any)
 	if !ok {
-		return r, fail("invalid_response", "missing response output")
+		return r, fail(CodeInvalidResponse, "missing response output")
 	}
 	r.FinishReason = "stop"
 	for _, v := range output {
@@ -170,20 +170,20 @@ func decodeResponses(alias string, o object) (ai.Response, error) {
 		case "message":
 			content, ok := item["content"].([]any)
 			if !ok {
-				return r, fail("invalid_response", "invalid responses message content")
+				return r, fail(CodeInvalidResponse, "invalid responses message content")
 			}
 			for _, c := range content {
 				b := obj(c)
 				switch str(b["type"]) {
 				case "output_text":
 					if _, ok := b["text"].(string); !ok {
-						return r, fail("invalid_response", "invalid output text")
+						return r, fail(CodeInvalidResponse, "invalid output text")
 					}
 					r.Message.Content = append(r.Message.Content, ai.Block{Type: "text", Text: str(b["text"])})
 				case "refusal":
-					return r, fail("refused_response", "upstream refused the response")
+					return r, fail(CodeRefusedResponse, "upstream refused the response")
 				default:
-					return r, fail("unsupported_capability", "unsupported responses content")
+					return r, fail(CodeUnsupportedCapability, "unsupported responses content")
 				}
 			}
 		case "function_call":
@@ -194,13 +194,13 @@ func decodeResponses(alias string, o object) (ai.Response, error) {
 			for _, v := range arr(item["summary"]) {
 				b := obj(v)
 				if str(b["type"]) != "summary_text" {
-					return r, fail("unsupported_capability", "unsupported reasoning summary")
+					return r, fail(CodeUnsupportedCapability, "unsupported reasoning summary")
 				}
 				text += str(b["text"])
 			}
 			r.Message.Content = append(r.Message.Content, ai.Block{Type: "reasoning", Text: text, ProviderState: state("responses", item)})
 		default:
-			return r, fail("unsupported_capability", "unsupported responses output item")
+			return r, fail(CodeUnsupportedCapability, "unsupported responses output item")
 		}
 	}
 	if err := validateBlocks(r.Message.Content); err != nil {
@@ -214,7 +214,7 @@ func anthropicBlock(o object) (ai.Block, error) {
 	switch str(o["type"]) {
 	case "text":
 		if _, ok := o["text"].(string); !ok {
-			return ai.Block{}, fail("invalid_response", "invalid anthropic text")
+			return ai.Block{}, fail(CodeInvalidResponse, "invalid anthropic text")
 		}
 		return ai.Block{Type: "text", Text: str(o["text"])}, nil
 	case "tool_use":
@@ -224,7 +224,7 @@ func anthropicBlock(o object) (ai.Block, error) {
 	case "redacted_thinking":
 		return ai.Block{Type: "reasoning", ProviderState: state("anthropic", o)}, nil
 	default:
-		return ai.Block{}, fail("unsupported_capability", "unsupported anthropic output block")
+		return ai.Block{}, fail(CodeUnsupportedCapability, "unsupported anthropic output block")
 	}
 }
 func decodeAnthropic(alias string, o object) (ai.Response, error) {
@@ -232,7 +232,7 @@ func decodeAnthropic(alias string, o object) (ai.Response, error) {
 	r.ID = str(o["id"])
 	content, ok := o["content"].([]any)
 	if !ok {
-		return r, fail("invalid_response", "missing message content")
+		return r, fail(CodeInvalidResponse, "missing message content")
 	}
 	for _, v := range content {
 		b, e := anthropicBlock(obj(v))
@@ -240,7 +240,7 @@ func decodeAnthropic(alias string, o object) (ai.Response, error) {
 			return r, e
 		}
 		if e = validateState(b, "anthropic"); e != nil {
-			return r, fail("invalid_response", "incomplete anthropic continuation state")
+			return r, fail(CodeInvalidResponse, "incomplete anthropic continuation state")
 		}
 		r.Message.Content = append(r.Message.Content, b)
 	}
@@ -253,7 +253,7 @@ func decodeAnthropic(alias string, o object) (ai.Response, error) {
 		return r, err
 	}
 	if r.FinishReason == "tool_calls" && !hasToolCall(r.Message.Content) {
-		return r, fail("invalid_response", "tool finish without a tool call")
+		return r, fail(CodeInvalidResponse, "tool finish without a tool call")
 	}
 	r.Usage, err = parseUsage(o["usage"], "anthropic")
 	return r, err
@@ -265,7 +265,7 @@ func parseUsage(v any, protocol string) (ai.Usage, error) {
 	}
 	o := obj(v)
 	if o == nil {
-		return u, fail("invalid_response", "invalid usage")
+		return u, fail(CodeInvalidResponse, "invalid usage")
 	}
 	input, output := "input_tokens", "output_tokens"
 	if protocol == "chat_completions" {
@@ -274,7 +274,7 @@ func parseUsage(v any, protocol string) (ai.Usage, error) {
 	i, iok := number(o[input])
 	n, nok := number(o[output])
 	if (o[input] != nil && !iok) || (o[output] != nil && !nok) {
-		return u, fail("invalid_response", "invalid usage counters")
+		return u, fail(CodeInvalidResponse, "invalid usage counters")
 	}
 	if !iok || !nok {
 		return u, nil
@@ -292,7 +292,7 @@ func parseUsage(v any, protocol string) (ai.Usage, error) {
 		if dst != nil {
 			val, ok := number(dst)
 			if !ok {
-				return ai.Usage{}, fail("invalid_response", "invalid cache usage")
+				return ai.Usage{}, fail(CodeInvalidResponse, "invalid cache usage")
 			}
 			*v = val
 		}
@@ -300,12 +300,12 @@ func parseUsage(v any, protocol string) (ai.Usage, error) {
 	if protocol == "anthropic" { // Anthropic input_tokens excludes cache reads and writes.
 		const maxInt64 = int64(^uint64(0) >> 1)
 		if u.CacheReadTokens > maxInt64-u.InputTokens || u.CacheWriteTokens > maxInt64-u.InputTokens-u.CacheReadTokens {
-			return ai.Usage{}, fail("invalid_response", "usage overflow")
+			return ai.Usage{}, fail(CodeInvalidResponse, "usage overflow")
 		}
 		u.InputTokens += u.CacheReadTokens + u.CacheWriteTokens
 	}
 	if !validUsage(u) {
-		return ai.Usage{}, fail("invalid_response", "inconsistent usage counters")
+		return ai.Usage{}, fail(CodeInvalidResponse, "inconsistent usage counters")
 	}
 	return u, nil
 }

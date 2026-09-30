@@ -8,7 +8,6 @@ import (
 	"io"
 	"path/filepath"
 	"sort"
-	"strings"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -38,20 +37,20 @@ type TaskSummary struct {
 }
 
 type RunSummary struct {
-	Outcome            string     `json:"outcome,omitempty"`
-	AcceptanceState    string     `json:"acceptance_state"`
-	FalseGreen         bool       `json:"false_green"`
-	EvidenceCount      int        `json:"evidence_count"`
-	ID                 string     `json:"id"`
-	Status             Status     `json:"status"`
-	Error              string     `json:"error,omitempty"`
-	ErrorTruncated     bool       `json:"error_truncated"`
-	Text               string     `json:"text,omitempty"`
-	TextBytes          int        `json:"text_bytes"`
-	TextTruncated      bool       `json:"text_truncated"`
-	ArtifactCount      int        `json:"artifact_count"`
-	Artifacts          []Artifact `json:"artifacts"`
-	ArtifactsTruncated bool       `json:"artifacts_truncated"`
+	Outcome            Outcome         `json:"outcome,omitempty"`
+	AcceptanceState    AcceptanceState `json:"acceptance_state"`
+	FalseGreen         bool            `json:"false_green"`
+	EvidenceCount      int             `json:"evidence_count"`
+	ID                 string          `json:"id"`
+	Status             Status          `json:"status"`
+	Error              string          `json:"error,omitempty"`
+	ErrorTruncated     bool            `json:"error_truncated"`
+	Text               string          `json:"text,omitempty"`
+	TextBytes          int             `json:"text_bytes"`
+	TextTruncated      bool            `json:"text_truncated"`
+	ArtifactCount      int             `json:"artifact_count"`
+	Artifacts          []Artifact      `json:"artifacts"`
+	ArtifactsTruncated bool            `json:"artifacts_truncated"`
 }
 
 // TaskMetadata has no result text, errors, or artifact arrays, so a list page
@@ -68,14 +67,14 @@ type TaskMetadata struct {
 }
 
 type RunMetadata struct {
-	Outcome         string `json:"outcome,omitempty"`
-	AcceptanceState string `json:"acceptance_state"`
-	FalseGreen      bool   `json:"false_green"`
-	EvidenceCount   int    `json:"evidence_count"`
-	ID              string `json:"id"`
-	Status          Status `json:"status"`
-	TextBytes       int    `json:"text_bytes"`
-	ArtifactCount   int    `json:"artifact_count"`
+	Outcome         Outcome         `json:"outcome,omitempty"`
+	AcceptanceState AcceptanceState `json:"acceptance_state"`
+	FalseGreen      bool            `json:"false_green"`
+	EvidenceCount   int             `json:"evidence_count"`
+	ID              string          `json:"id"`
+	Status          Status          `json:"status"`
+	TextBytes       int             `json:"text_bytes"`
+	ArtifactCount   int             `json:"artifact_count"`
 }
 
 type TaskPage struct {
@@ -113,8 +112,8 @@ func summarize(task *Task) TaskSummary {
 	if len(task.Runs) == 0 {
 		return out
 	}
-	run := task.Runs[len(task.Runs)-1]
-	r := RunSummary{Outcome: run.Outcome, AcceptanceState: "skipped", ID: run.ID, Status: run.Status, Error: prefix(run.Error, summaryErrorBytes), Text: prefix(run.Text, summaryTextBytes), TextBytes: len(run.Text), ArtifactCount: len(run.Artifacts), Artifacts: []Artifact{}}
+	run := *task.latest()
+	r := RunSummary{Outcome: run.Outcome, AcceptanceState: AcceptanceSkipped, ID: run.ID, Status: run.Status, Error: prefix(run.Error, summaryErrorBytes), Text: prefix(run.Text, summaryTextBytes), TextBytes: len(run.Text), ArtifactCount: len(run.Artifacts), Artifacts: []Artifact{}}
 	r.AcceptanceState, r.FalseGreen, r.EvidenceCount = acceptanceSummary(run)
 	r.ErrorTruncated = len(r.Error) < len(run.Error)
 	r.TextTruncated = len(r.Text) < len(run.Text)
@@ -169,7 +168,7 @@ func (s *Service) ListPage(namespace string, offset, limit int) (*TaskPage, erro
 	for _, task := range tasks[offset:end] {
 		item := TaskMetadata{Runtime: task.Workflow.Runtime, Engine: task.Workflow.Engine, Model: task.Workflow.Model, ID: task.ID, Namespace: task.Namespace, Status: task.Status, RunCount: len(task.Runs), Runs: []RunMetadata{}}
 		if len(task.Runs) > 0 {
-			run := task.Runs[len(task.Runs)-1]
+			run := *task.latest()
 			state, green, count := acceptanceSummary(run)
 			item.Runs = append(item.Runs, RunMetadata{Outcome: run.Outcome, AcceptanceState: state, FalseGreen: green, EvidenceCount: count, ID: run.ID, Status: run.Status, TextBytes: len(run.Text), ArtifactCount: len(run.Artifacts)})
 		}
@@ -188,17 +187,7 @@ func (s *Service) Result(namespace, id, runID string, offset, limit int) (*Resul
 	if err != nil {
 		return nil, err
 	}
-	var run *Run
-	if runID == "" && len(task.Runs) > 0 {
-		run = &task.Runs[len(task.Runs)-1]
-	} else {
-		for i := range task.Runs {
-			if task.Runs[i].ID == runID {
-				run = &task.Runs[i]
-				break
-			}
-		}
-	}
+	run := task.run(runID)
 	if run == nil {
 		return nil, ErrNotFound
 	}
@@ -227,7 +216,7 @@ type ArtifactDownload struct {
 // resume/start cannot mutate the workspace while a download is being assembled.
 // All filesystem/storage failures are translated into constant domain errors.
 func (s *Service) Artifact(namespace, id, runID, path string) (*ArtifactDownload, error) {
-	if namespace == "" || id == "" || !filepath.IsLocal(path) || path == "." || filepath.Clean(path) != path || strings.ContainsAny(path, "\\\x00") {
+	if namespace == "" || id == "" || !validArtifactPath(path) {
 		return nil, ErrInvalid
 	}
 	s.mu.Lock()
@@ -235,7 +224,7 @@ func (s *Service) Artifact(namespace, id, runID, path string) (*ArtifactDownload
 	if s.available() != nil {
 		return nil, ErrClosed
 	}
-	task, err := s.Get(namespace, id)
+	task, err := s.get(namespace, id)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return nil, ErrNotFound
@@ -245,17 +234,7 @@ func (s *Service) Artifact(namespace, id, runID, path string) (*ArtifactDownload
 	if !downloadTerminal(task.Status) {
 		return nil, ErrConflict
 	}
-	var run *Run
-	if runID == "" && len(task.Runs) > 0 {
-		run = &task.Runs[len(task.Runs)-1]
-	} else {
-		for i := range task.Runs {
-			if task.Runs[i].ID == runID {
-				run = &task.Runs[i]
-				break
-			}
-		}
-	}
+	run := task.run(runID)
 	if run == nil {
 		return nil, ErrNotFound
 	}

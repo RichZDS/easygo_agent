@@ -4,9 +4,8 @@ package workshop
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -78,31 +77,17 @@ func seedViewTasks(t *testing.T) (*Service, string) {
 	return s, text
 }
 
-func viewCall(t *testing.T, handler http.Handler, method, path, body string) *httptest.ResponseRecorder {
-	t.Helper()
-	r := httptest.NewRequest(method, path, strings.NewReader(body))
-	r.Header.Set("Authorization", "Bearer view-token")
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, r)
-	return w
-}
-
 func TestResultPagesReconstructUTF8AndHistoricalRun(t *testing.T) {
 	s, text := seedViewTasks(t)
-	handler := Handler(s, "view-token")
 	var joined strings.Builder
 	offset := 0
 	for {
-		w := viewCall(t, handler, "GET", fmt.Sprintf("/v1/tasks/task-0/result?namespace=owner&run_id=latest-0&offset=%d&limit=32767", offset), "")
-		if w.Code != 200 {
-			t.Fatalf("page: %d %s", w.Code, w.Body.String())
+		page, err := s.Result("owner", "task-0", "latest-0", offset, 32767)
+		if err != nil {
+			t.Fatalf("page: %v", err)
 		}
-		if w.Body.Len() >= 512*1024 {
+		if raw, _ := json.Marshal(page); len(raw) >= 512*1024 {
 			t.Fatal("result page too large")
-		}
-		var page ResultPage
-		if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
-			t.Fatal(err)
 		}
 		if page.Offset != offset || page.NextOffset != offset+len(page.Text) || page.TotalBytes != len(text) || !utf8.ValidString(page.Text) || page.TaskID != "task-0" || page.RunID != "latest-0" {
 			t.Fatalf("invalid page metadata: %+v", page)
@@ -120,80 +105,63 @@ func TestResultPagesReconstructUTF8AndHistoricalRun(t *testing.T) {
 	if joined.String() != text {
 		t.Fatal("UTF8 pages lost or duplicated bytes")
 	}
-	w := viewCall(t, handler, "GET", fmt.Sprintf("/v1/tasks/task-0/result?namespace=owner&offset=%d", offset), "")
-	var last ResultPage
-	if err := json.Unmarshal(w.Body.Bytes(), &last); err != nil {
-		t.Fatal(err)
+	last, err := s.Result("owner", "task-0", "", offset, defaultResultBytes)
+	if err != nil || !last.EOF || last.Text != "" || last.NextOffset != offset {
+		t.Fatalf("end cursor: %v %+v", err, last)
 	}
-	if w.Code != 200 || !last.EOF || last.Text != "" || last.NextOffset != offset {
-		t.Fatalf("end cursor: %d %+v", w.Code, last)
-	}
-	w = viewCall(t, handler, "GET", "/v1/tasks/task-0/result?namespace=owner&run_id=historical-0&limit=4", "")
-	var history ResultPage
-	if err := json.Unmarshal(w.Body.Bytes(), &history); err != nil {
-		t.Fatal(err)
-	}
-	if w.Code != 200 || history.Text != "历" || history.TotalBytes != len("历史🙂") || history.NextOffset != 3 || history.EOF {
-		t.Fatalf("historical run: %d %+v", w.Code, history)
+	history, err := s.Result("owner", "task-0", "historical-0", 0, 4)
+	if err != nil || history.Text != "历" || history.TotalBytes != len("历史🙂") || history.NextOffset != 3 || history.EOF {
+		t.Fatalf("historical run: %v %+v", err, history)
 	}
 	for _, tc := range []struct {
-		path string
-		code int
+		name                 string
+		namespace, id, runID string
+		offset, limit        int
+		want                 error
 	}{
-		{"/v1/tasks/task-0/result?namespace=other", 404},
-		{"/v1/tasks/missing/result?namespace=owner", 404},
-		{"/v1/tasks/task-0/result?namespace=owner&run_id=latest-1", 404},
-		{"/v1/tasks/task-0/result?namespace=owner&offset=2", 400},
-		{"/v1/tasks/task-0/result?namespace=owner&offset=99999999", 400},
-		{"/v1/tasks/task-0/result?namespace=owner&offset=-1", 400},
-		{"/v1/tasks/task-0/result?namespace=owner&limit=0", 400},
-		{"/v1/tasks/task-0/result?namespace=owner&limit=3", 400},
-		{"/v1/tasks/task-0/result?namespace=owner&limit=32769", 400},
-		{"/v1/tasks/task-0/result?namespace=owner&limit=bad", 400},
-		{"/v1/tasks/task-0/result?namespace=owner&offset=1.5", 400},
-		{"/v1/tasks/task-0/result?namespace=owner&limit=", 400},
-		{"/v1/tasks/task-0/result?namespace=owner&limit=4&limit=8", 400},
+		{"other namespace", "other", "task-0", "", 0, defaultResultBytes, ErrNotFound},
+		{"missing task", "owner", "missing", "", 0, defaultResultBytes, ErrNotFound},
+		{"run of another task", "owner", "task-0", "latest-1", 0, defaultResultBytes, ErrNotFound},
+		{"offset inside rune", "owner", "task-0", "", 2, defaultResultBytes, ErrInvalid},
+		{"offset past end", "owner", "task-0", "", 99999999, defaultResultBytes, ErrInvalid},
+		{"negative offset", "owner", "task-0", "", -1, defaultResultBytes, ErrInvalid},
+		{"zero limit", "owner", "task-0", "", 0, 0, ErrInvalid},
+		{"limit below one rune", "owner", "task-0", "", 0, 3, ErrInvalid},
+		{"limit above max", "owner", "task-0", "", 0, maxResultBytes + 1, ErrInvalid},
 	} {
-		w = viewCall(t, handler, "GET", tc.path, "")
-		if w.Code != tc.code {
-			t.Errorf("%s: want %d got %d", tc.path, tc.code, w.Code)
+		if _, err := s.Result(tc.namespace, tc.id, tc.runID, tc.offset, tc.limit); !errors.Is(err, tc.want) {
+			t.Errorf("%s: want %v got %v", tc.name, tc.want, err)
 		}
 	}
 }
 
-func TestSummaryHTTPAndMetadataListPagination(t *testing.T) {
+func TestSummaryAndMetadataListPagination(t *testing.T) {
 	s, text := seedViewTasks(t)
-	handler := Handler(s, "view-token")
-	w := viewCall(t, handler, "GET", "/v1/tasks/task-0?namespace=owner&view=summary", "")
-	var summary TaskSummary
-	if err := json.Unmarshal(w.Body.Bytes(), &summary); err != nil {
+	summary, err := s.Summary("owner", "task-0")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if w.Code != 200 || summary.RunCount != 2 || len(summary.Runs) != 1 || !summary.Runs[0].TextTruncated || summary.Runs[0].TextBytes != len(text) || w.Body.Len() >= 512*1024 {
+	if raw, _ := json.Marshal(summary); summary.RunCount != 2 || len(summary.Runs) != 1 || !summary.Runs[0].TextTruncated || summary.Runs[0].TextBytes != len(text) || len(raw) >= 512*1024 {
 		t.Fatal("invalid bounded task summary")
 	}
-	raw := viewCall(t, handler, "GET", "/v1/tasks/task-0?namespace=owner", "")
-	var task Task
-	if err := json.Unmarshal(raw.Body.Bytes(), &task); err != nil {
-		t.Fatal(err)
-	}
-	if raw.Code != 200 || len(task.Runs) != 2 || task.Runs[1].Text != text {
+	task, err := s.Get("owner", "task-0")
+	if err != nil || len(task.Runs) != 2 || task.Runs[1].Text != text {
 		t.Fatal("raw operator response changed")
 	}
 	ids := []string{}
 	for offset := 0; ; {
-		w = viewCall(t, handler, "GET", fmt.Sprintf("/v1/tasks?namespace=owner&view=summary&offset=%d&limit=2", offset), "")
-		if w.Code != 200 || w.Body.Len() > 4096 {
-			t.Fatalf("list not bounded: %d bytes=%d", w.Code, w.Body.Len())
+		page, err := s.ListPage("owner", offset, 2)
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		raw, _ := json.Marshal(page)
+		if len(raw) > 4096 {
+			t.Fatalf("list not bounded: bytes=%d", len(raw))
 		}
 		for _, field := range []string{`"text":`, `"error":`, `"artifacts":`} {
-			if strings.Contains(w.Body.String(), field) {
+			if strings.Contains(string(raw), field) {
 				t.Fatalf("list includes payload %s", field)
 			}
-		}
-		var page TaskPage
-		if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
-			t.Fatal(err)
 		}
 		if page.Offset != offset {
 			t.Fatal("list cursor changed")
@@ -215,54 +183,43 @@ func TestSummaryHTTPAndMetadataListPagination(t *testing.T) {
 	if strings.Join(ids, ",") != "task-0,task-1,task-2,task-3" {
 		t.Fatalf("list order/ownership: %v", ids)
 	}
-	for _, query := range []string{"limit=0", "limit=101", "limit=bad", "limit=", "offset=-1", "offset=999999999999999999999999999", "offset=5"} {
-		w = viewCall(t, handler, "GET", "/v1/tasks?namespace=owner&view=summary&"+query, "")
-		if w.Code != 400 {
-			t.Errorf("invalid list query %s: %d", query, w.Code)
+	for _, tc := range []struct{ offset, limit int }{{0, 0}, {0, 101}, {-1, 20}, {5, 20}} {
+		if _, err := s.ListPage("owner", tc.offset, tc.limit); !errors.Is(err, ErrInvalid) {
+			t.Errorf("invalid list page offset=%d limit=%d: %v", tc.offset, tc.limit, err)
 		}
 	}
-	w = viewCall(t, handler, "GET", "/v1/tasks?namespace=owner&view=summary&offset=4", "")
-	var end TaskPage
-	if err := json.Unmarshal(w.Body.Bytes(), &end); err != nil {
-		t.Fatal(err)
-	}
-	if w.Code != 200 || len(end.Tasks) != 0 || end.NextOffset != nil {
+	end, err := s.ListPage("owner", 4, 20)
+	if err != nil || len(end.Tasks) != 0 || end.NextOffset != nil {
 		t.Fatal("list end cursor rejected")
 	}
 }
 
+// Summaries of mutation results stay bounded: no workspace path and no payload
+// carried over from the previous attempt.
 func TestMutationSummaryView(t *testing.T) {
 	s := newFixtureService(t, fixtureConfig(t, "codex"))
-	handler := Handler(s, "view-token")
-	w := viewCall(t, handler, "POST", "/v1/tasks?view=invalid", `{"workflow":"note","input":"success"}`)
-	if w.Code != 400 {
-		t.Fatal("invalid view accepted")
-	}
-	list, err := s.List("operator")
-	if err != nil || len(list) != 0 {
-		t.Fatal("invalid view caused side effect")
-	}
-	w = viewCall(t, handler, "POST", "/v1/tasks?view=summary", `{"workflow":"note","input":"success"}`)
-	var summary TaskSummary
-	if err := json.Unmarshal(w.Body.Bytes(), &summary); err != nil {
+	task, err := s.Submit(SubmitRequest{Namespace: "operator", Workflow: "note", Input: "success"})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if w.Code != 202 || summary.RunCount != 1 || strings.Contains(w.Body.String(), "workspace") {
-		t.Fatalf("submit summary: %d %s", w.Code, w.Body.String())
-	}
-	waitTask(t, s, "operator", summary.ID, func(t *Task) bool { return terminal(t.Status) })
-	w = viewCall(t, handler, "POST", "/v1/tasks/"+summary.ID+"/resume?view=summary", `{"input":"hang"}`)
-	if err := json.Unmarshal(w.Body.Bytes(), &summary); err != nil {
+	summary, err := s.Summary("operator", task.ID)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if w.Code != 202 || summary.RunCount != 2 || len(summary.Runs) != 1 || summary.Runs[0].TextBytes != 0 {
-		t.Fatal("resume summary retained old payload")
+	if raw, _ := json.Marshal(summary); summary.RunCount != 1 || strings.Contains(string(raw), "workspace") {
+		t.Fatalf("submit summary: %s", raw)
 	}
-	w = viewCall(t, handler, "POST", "/v1/tasks/"+summary.ID+"/cancel?view=summary", "")
-	if err := json.Unmarshal(w.Body.Bytes(), &summary); err != nil {
+	waitTask(t, s, "operator", task.ID, func(t *Task) bool { return terminal(t.Status) })
+	if _, err = s.Resume("operator", task.ID, "hang"); err != nil {
 		t.Fatal(err)
 	}
-	if w.Code != 200 || summary.RunCount != 2 || len(summary.Runs) != 1 {
-		t.Fatal("cancel summary failed")
+	if summary, err = s.Summary("operator", task.ID); err != nil || summary.RunCount != 2 || len(summary.Runs) != 1 || summary.Runs[0].TextBytes != 0 {
+		t.Fatalf("resume summary retained old payload: %v %+v", err, summary)
+	}
+	if _, err = s.Cancel("operator", task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if summary, err = s.Summary("operator", task.ID); err != nil || summary.RunCount != 2 || len(summary.Runs) != 1 {
+		t.Fatalf("cancel summary failed: %v %+v", err, summary)
 	}
 }

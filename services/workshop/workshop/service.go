@@ -77,128 +77,49 @@ func (s *Service) Workflows() []WorkflowMetadata {
 // Passing nil runner constructs the native CLI runner from Config. No unfinished
 // task is automatically replayed, including tasks queued before a restart.
 func New(cfg Config, runner Runner) (*Service, error) {
-	if cfg.Root == "" || cfg.Concurrency < 1 || cfg.Concurrency > 128 || cfg.QueueCapacity < 0 || cfg.QueueCapacity > 10000 {
-		return nil, fmt.Errorf("%w: root and bounded concurrency/queue are required", ErrInvalid)
+	if err := validateConfig(cfg); err != nil {
+		return nil, err
+	}
+	if cfg.Sandbox.Mode == SandboxDocker && runner != nil {
+		return nil, fmt.Errorf("%w: Docker mode cannot accept a replacement runner", ErrInvalid)
+	}
+	s := &Service{workflows: map[string]Workflow{}, runtimes: map[string]RuntimeProfile{}, runner: runner, queue: make(chan string, cfg.Concurrency+cfg.QueueCapacity), slots: make(chan struct{}, cfg.Concurrency+cfg.QueueCapacity), stop: make(chan struct{}), active: map[string]context.CancelFunc{}, resumeScans: map[string]struct{}{}}
+	if err := s.buildCatalog(cfg); err != nil {
+		return nil, err
 	}
 	root, err := filepath.Abs(cfg.Root)
 	if err != nil {
 		return nil, err
 	}
-	if cfg.Sandbox.Mode == "docker" {
-		// Fail before creating directories, opening storage or contacting Docker.
-		if err := validateRelaySocketPath(root); err != nil {
-			return nil, err
-		}
+	if cfg.Sandbox.Mode == SandboxDocker {
 		err = mkdirNoSymlinks(root, 0700)
+		if err == nil {
+			err = noSymlinks(root)
+		}
 	} else {
 		err = os.MkdirAll(root, 0700)
 	}
 	if err != nil {
 		return nil, err
 	}
-	if cfg.Sandbox.Mode != "" && cfg.Sandbox.Mode != "host" && cfg.Sandbox.Mode != "docker" {
-		return nil, fmt.Errorf("%w: unknown sandbox mode", ErrInvalid)
-	}
-	if cfg.Sandbox.Mode == "docker" {
-		if err := noSymlinks(root); err != nil {
-			return nil, err
-		}
-		if runner != nil {
-			return nil, errors.New("Docker mode cannot accept a replacement runner")
-		}
-		for _, e := range cfg.Engines {
-			if len(e.EnvAllowlist) != 0 {
-				return nil, errors.New("Docker mode forbids environment allowlists")
-			}
-		}
-	}
-	root, err = filepath.EvalSymlinks(root)
-	if err != nil {
+	if root, err = filepath.EvalSymlinks(root); err != nil {
 		return nil, err
 	}
-	s := &Service{root: root, workflows: map[string]Workflow{}, runtimes: map[string]RuntimeProfile{}, runner: runner, queue: make(chan string, cfg.Concurrency+cfg.QueueCapacity), slots: make(chan struct{}, cfg.Concurrency+cfg.QueueCapacity), stop: make(chan struct{}), active: map[string]context.CancelFunc{}, resumeScans: map[string]struct{}{}}
-	s.workerInstructions, err = readWorkerInstructions(cfg.PackDir)
-	if err != nil {
+	s.root = root
+	if s.workerInstructions, err = readWorkerInstructions(cfg.PackDir); err != nil {
 		return nil, err
-	}
-	for id, p := range cfg.RuntimeProfiles {
-		if strings.TrimSpace(id) == "" || len(id) > 128 {
-			return nil, ErrInvalid
-		}
-		if err := p.validate(); err != nil {
-			return nil, err
-		}
-		if p.GatewayModel != "" && cfg.ModelGateway == nil {
-			return nil, fmt.Errorf("%w: model gateway required", ErrInvalid)
-		}
-		if cfg.Sandbox.Mode == "docker" && p.GatewayModel == "" {
-			return nil, errors.New("Docker mode requires gateway runtime profiles")
-		}
-		s.runtimes[id] = p
-	}
-	for _, w := range cfg.Workflows {
-		if w.Acceptance != nil && cfg.Sandbox.Mode != "docker" {
-			return nil, fmt.Errorf("%w: acceptance requires Docker mode", ErrInvalid)
-		}
-		w.Acceptance = cloneAcceptance(w.Acceptance)
-		if w.RuntimeSpec != nil {
-			return nil, fmt.Errorf("%w: runtime_spec is reserved for task snapshots", ErrInvalid)
-		}
-		for _, id := range append([]string{w.Runtime}, w.AllowedRuntimes...) {
-			if id != "" {
-				if _, ok := s.runtimes[id]; !ok {
-					return nil, fmt.Errorf("%w: unknown runtime profile", ErrInvalid)
-				}
-			}
-		}
-		var selectErr error
-		w, selectErr = s.selectRuntime(w, "")
-		if selectErr != nil {
-			return nil, selectErr
-		}
-		if err := validateWorkflow(w); err != nil {
-			return nil, err
-		}
-		if _, exists := s.workflows[w.Name]; exists {
-			return nil, fmt.Errorf("%w: duplicate workflow", ErrInvalid)
-		}
-		w.Artifacts = append([]string(nil), w.Artifacts...)
-		w.AllowedRuntimes = append([]string(nil), w.AllowedRuntimes...)
-		if cfg.Sandbox.Mode == "docker" && w.RuntimeSpec == nil {
-			return nil, errors.New("Docker mode requires workflow runtime profiles")
-		}
-		s.workflows[w.Name] = w
 	}
 	needsChecks := false
 	for _, w := range s.workflows {
 		needsChecks = needsChecks || w.Acceptance != nil
 	}
-	s.packChecks, err = snapshotChecks(root, cfg.PackDir, needsChecks)
-	if err != nil {
+	if s.packChecks, err = snapshotChecks(root, cfg.PackDir, needsChecks); err != nil {
 		return nil, err
 	}
-	if runner == nil {
-		if cfg.Sandbox.Mode == "docker" {
-			cfg.Root = root
-			s.runner, err = NewDockerRunner(cfg)
-		} else {
-			s.runner, err = NewCommandRunner(cfg.Engines, cfg.MaxOutputBytes)
-			if err == nil {
-				s.runner.(*CommandRunner).gateway = cfg.ModelGateway
-			}
-		}
-		if err != nil {
+	if s.runner == nil {
+		cfg.Root = root
+		if s.runner, err = s.newRunner(cfg); err != nil {
 			return nil, err
-		}
-		for _, p := range s.runtimes {
-			if _, ok := cfg.Engines[p.Engine]; !ok {
-				return nil, fmt.Errorf("%w: runtime engine is not configured", ErrInvalid)
-			}
-		}
-		for _, w := range s.workflows {
-			if _, ok := cfg.Engines[w.Engine]; !ok {
-				return nil, fmt.Errorf("%w: workflow engine is not configured", ErrInvalid)
-			}
 		}
 	}
 	s.db, err = bolt.Open(filepath.Join(root, "workshop.db"), 0600, &bolt.Options{Timeout: 200 * time.Millisecond})
@@ -220,37 +141,7 @@ func New(cfg Config, runner Runner) (*Service, error) {
 				return err
 			}
 		}
-		var recovered []*Task
-		if err := tx.Bucket(tasksBucket).ForEach(func(_, value []byte) error {
-			var task Task
-			if err := json.Unmarshal(value, &task); err != nil {
-				return err
-			}
-			if !terminal(task.Status) {
-				finish(&task, Interrupted, "service restarted; explicit resume required")
-				if err := finishCrewOutcome(tx, &task); err != nil {
-					return err
-				}
-				recovered = append(recovered, &task)
-			}
-			return nil
-		}); err != nil {
-			return err
-		}
-		for _, task := range recovered {
-			if err := putTask(tx, task); err != nil {
-				return err
-			}
-			if a := task.Runs[len(task.Runs)-1].Acceptance; a != nil && a.State == "interrupted" {
-				if err := appendEvent(tx, task, Event{Kind: "acceptance", Acceptance: &AcceptanceEvent{State: "interrupted", FalseGreen: a.FalseGreen}}); err != nil {
-					return err
-				}
-			}
-			if err := appendEvent(tx, task, Event{Kind: "state", Text: string(Interrupted)}); err != nil {
-				return err
-			}
-		}
-		return nil
+		return markInterrupted(tx, "service restarted; explicit resume required")
 	})
 	if err != nil {
 		_ = s.db.Close()
@@ -263,21 +154,144 @@ func New(cfg Config, runner Runner) (*Service, error) {
 	return s, nil
 }
 
+// validateConfig checks every operator rule that needs no filesystem, store or
+// Docker access, so New fails before its first side effect. All sandbox mode
+// rules live here; buildCatalog validates profiles and workflows themselves.
+func validateConfig(cfg Config) error {
+	if cfg.Root == "" || cfg.Concurrency < 1 || cfg.Concurrency > 128 || cfg.QueueCapacity < 0 || cfg.QueueCapacity > 10000 {
+		return fmt.Errorf("%w: root and bounded concurrency/queue are required", ErrInvalid)
+	}
+	docker := cfg.Sandbox.Mode == SandboxDocker
+	if cfg.Sandbox.Mode != "" && cfg.Sandbox.Mode != SandboxHost && !docker {
+		return fmt.Errorf("%w: unknown sandbox mode", ErrInvalid)
+	}
+	if docker {
+		root, err := filepath.Abs(cfg.Root)
+		if err != nil {
+			return err
+		}
+		if err := validateRelaySocketPath(root); err != nil {
+			return err
+		}
+		for _, e := range cfg.Engines {
+			if len(e.EnvAllowlist) != 0 {
+				return fmt.Errorf("%w: Docker mode forbids environment allowlists", ErrInvalid)
+			}
+		}
+	}
+	for _, p := range cfg.RuntimeProfiles {
+		if docker && p.GatewayModel == "" {
+			return fmt.Errorf("%w: Docker mode requires gateway runtime profiles", ErrInvalid)
+		}
+	}
+	for _, w := range cfg.Workflows {
+		if w.Acceptance != nil && !docker {
+			return fmt.Errorf("%w: acceptance requires Docker mode", ErrInvalid)
+		}
+		// buildCatalog resolves a non-empty Runtime into RuntimeSpec or fails.
+		if docker && w.Runtime == "" {
+			return fmt.Errorf("%w: Docker mode requires workflow runtime profiles", ErrInvalid)
+		}
+	}
+	return nil
+}
+
+// buildCatalog validates the runtime profiles and resolves every workflow
+// against them into s.runtimes and s.workflows, copying caller-owned slices.
+func (s *Service) buildCatalog(cfg Config) error {
+	for id, p := range cfg.RuntimeProfiles {
+		if strings.TrimSpace(id) == "" || len(id) > 128 {
+			return ErrInvalid
+		}
+		if err := p.validate(); err != nil {
+			return err
+		}
+		if p.GatewayModel != "" && cfg.ModelGateway == nil {
+			return fmt.Errorf("%w: model gateway required", ErrInvalid)
+		}
+		s.runtimes[id] = p
+	}
+	for _, w := range cfg.Workflows {
+		w.Acceptance = cloneAcceptance(w.Acceptance)
+		if w.RuntimeSpec != nil {
+			return fmt.Errorf("%w: runtime_spec is reserved for task snapshots", ErrInvalid)
+		}
+		for _, id := range append([]string{w.Runtime}, w.AllowedRuntimes...) {
+			if id != "" {
+				if _, ok := s.runtimes[id]; !ok {
+					return fmt.Errorf("%w: unknown runtime profile", ErrInvalid)
+				}
+			}
+		}
+		var err error
+		if w, err = s.selectRuntime(w, ""); err != nil {
+			return err
+		}
+		if err := validateWorkflow(w); err != nil {
+			return err
+		}
+		if _, exists := s.workflows[w.Name]; exists {
+			return fmt.Errorf("%w: duplicate workflow", ErrInvalid)
+		}
+		w.Artifacts = append([]string(nil), w.Artifacts...)
+		w.AllowedRuntimes = append([]string(nil), w.AllowedRuntimes...)
+		s.workflows[w.Name] = w
+	}
+	return nil
+}
+
+// newRunner builds the default runner for cfg.Sandbox.Mode (cfg.Root already
+// resolved) and checks that it has an engine for every catalog entry.
+func (s *Service) newRunner(cfg Config) (Runner, error) {
+	var runner Runner
+	if cfg.Sandbox.Mode == SandboxDocker {
+		docker, err := NewDockerRunner(cfg)
+		if err != nil {
+			return nil, err
+		}
+		runner = docker
+	} else {
+		command, err := NewCommandRunner(cfg.Engines, cfg.MaxOutputBytes)
+		if err != nil {
+			return nil, err
+		}
+		command.gateway = cfg.ModelGateway
+		runner = command
+	}
+	for _, p := range s.runtimes {
+		if _, ok := cfg.Engines[p.Engine]; !ok {
+			return nil, fmt.Errorf("%w: runtime engine is not configured", ErrInvalid)
+		}
+	}
+	for _, w := range s.workflows {
+		if _, ok := cfg.Engines[w.Engine]; !ok {
+			return nil, fmt.Errorf("%w: workflow engine is not configured", ErrInvalid)
+		}
+	}
+	return runner, nil
+}
+
 func validateWorkflow(w Workflow) error {
 	if err := validateAcceptance(w.Acceptance); err != nil {
 		return err
 	}
-	if w.Name == "" || w.Version == "" || w.Instructions == "" || w.Model == "" || !knownEngine(w.Engine) || (w.Policy != "read-only" && w.Policy != "workspace-write") || w.TimeoutSeconds < 1 || w.TimeoutSeconds > 86400 {
+	if w.Name == "" || w.Version == "" || w.Instructions == "" || w.Model == "" || !knownEngine(w.Engine) || (w.Policy != PolicyReadOnly && w.Policy != PolicyWorkspaceWrite) || w.TimeoutSeconds < 1 || w.TimeoutSeconds > 86400 {
 		return fmt.Errorf("%w: workflow needs name/version/instructions/model, known engine, explicit policy and timeout 1..86400", ErrInvalid)
 	}
 	seen := map[string]bool{}
 	for _, path := range w.Artifacts {
-		if !filepath.IsLocal(path) || path == "." || filepath.Clean(path) != path || strings.Contains(path, "\\") || seen[path] {
+		if !validArtifactPath(path) || seen[path] {
 			return fmt.Errorf("%w: artifact must be a unique clean relative file path", ErrInvalid)
 		}
 		seen[path] = true
 	}
 	return nil
+}
+
+// validArtifactPath accepts a clean, workspace-relative file path. It is the
+// single predicate for workflow configuration, downloads and the descriptor walk.
+func validArtifactPath(path string) bool {
+	return filepath.IsLocal(path) && path != "." && filepath.Clean(path) == path && !strings.ContainsAny(path, "\\\x00")
 }
 
 func validInput(namespace, input string) bool {
@@ -359,7 +373,7 @@ func (s *Service) Submit(req SubmitRequest) (*Task, error) {
 				return err
 			}
 		}
-		return appendEvent(tx, task, Event{Kind: "state", Text: string(Queued)})
+		return appendEvent(tx, task, Event{Kind: EventState, Text: string(Queued)})
 	})
 	if err != nil {
 		<-s.slots
@@ -399,7 +413,7 @@ func appendEvent(tx *bolt.Tx, task *Task, event Event) error {
 	if err != nil {
 		return err
 	}
-	event.Sequence, event.Time, event.RunID = seq, time.Now().UTC(), task.Runs[len(task.Runs)-1].ID
+	event.Sequence, event.Time, event.RunID = seq, time.Now().UTC(), task.latest().ID
 	v, err := json.Marshal(event)
 	if err != nil {
 		return err
@@ -409,13 +423,30 @@ func appendEvent(tx *bolt.Tx, task *Task, event Event) error {
 	return b.Put(key[:], v)
 }
 
+// Get, List and Events hold s.mu so a closed or failed store reports ErrClosed
+// or the store error instead of a bolt error from a closed database.
 func (s *Service) Get(namespace, id string) (*Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.available(); err != nil {
+		return nil, err
+	}
+	return s.get(namespace, id)
+}
+
+// get reads one owned task; the caller holds s.mu and has checked available().
+func (s *Service) get(namespace, id string) (*Task, error) {
 	var task *Task
 	err := s.db.View(func(tx *bolt.Tx) error { var err error; task, err = readTask(tx, namespace, id); return err })
 	return task, err
 }
 
 func (s *Service) List(namespace string) ([]Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.available(); err != nil {
+		return nil, err
+	}
 	list := []Task{}
 	err := s.db.View(func(tx *bolt.Tx) error {
 		return tx.Bucket(tasksBucket).ForEach(func(_, v []byte) error {
@@ -434,6 +465,11 @@ func (s *Service) List(namespace string) ([]Task, error) {
 
 // Events returns at most 1000 events after the exclusive sequence cursor.
 func (s *Service) Events(namespace, id string, after uint64) ([]Event, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.available(); err != nil {
+		return nil, err
+	}
 	events := []Event{}
 	err := s.db.View(func(tx *bolt.Tx) error {
 		if _, err := readTask(tx, namespace, id); err != nil {
@@ -472,19 +508,18 @@ func (s *Service) Cancel(namespace, id string) (*Task, error) {
 			return err
 		}
 		if task.Status == Queued {
-			finish(task, Cancelled, "cancelled before start")
-			if err := finishCrewOutcome(tx, task); err != nil {
+			if err := finishRun(tx, task, Cancelled, "cancelled before start"); err != nil {
 				return err
 			}
 		} else {
 			task.Status = Cancelling
-			task.Runs[len(task.Runs)-1].Status = Cancelling
+			task.latest().Status = Cancelling
 			task.UpdatedAt = time.Now().UTC()
 		}
 		if err := putTask(tx, task); err != nil {
 			return err
 		}
-		return appendEvent(tx, task, Event{Kind: "state", Text: string(task.Status)})
+		return appendEvent(tx, task, Event{Kind: EventState, Text: string(task.Status)})
 	})
 	if err == nil {
 		if cancel := s.active[id]; cancel != nil {
@@ -493,6 +528,9 @@ func (s *Service) Cancel(namespace, id string) (*Task, error) {
 	}
 	return task, err
 }
+
+// maxTaskRuns caps attempts per task; Resume refuses with ErrRunLimit beyond it.
+const maxTaskRuns = 256
 
 func (s *Service) Resume(namespace, id, input string) (*Task, error) {
 	if !validInput(namespace, input) {
@@ -503,11 +541,11 @@ func (s *Service) Resume(namespace, id, input string) (*Task, error) {
 	if err := s.available(); err != nil {
 		return nil, err
 	}
-	task, err := s.Get(namespace, id)
+	task, err := s.get(namespace, id)
 	if err != nil {
 		return nil, err
 	}
-	if len(task.Runs) >= 256 {
+	if len(task.Runs) >= maxTaskRuns {
 		return nil, ErrRunLimit
 	}
 	if !terminal(task.Status) || task.SessionID == "" {
@@ -538,14 +576,14 @@ func (s *Service) Resume(namespace, id, input string) (*Task, error) {
 		if err := s.available(); err != nil {
 			return nil, err
 		}
-		task, err = s.Get(namespace, id)
+		task, err = s.get(namespace, id)
 		if err != nil {
 			if errors.Is(err, ErrNotFound) {
 				return nil, ErrConflict
 			}
 			return nil, err
 		}
-		if len(task.Runs) >= 256 {
+		if len(task.Runs) >= maxTaskRuns {
 			return nil, ErrRunLimit
 		}
 		if !terminal(task.Status) || task.ID != scanID || task.Workspace != workspace || task.SessionID != sessionID || len(task.Runs) != runCount {
@@ -566,7 +604,7 @@ func (s *Service) Resume(namespace, id, input string) (*Task, error) {
 		if err := putTask(tx, task); err != nil {
 			return err
 		}
-		return appendEvent(tx, task, Event{Kind: "state", Text: string(Queued)})
+		return appendEvent(tx, task, Event{Kind: EventState, Text: string(Queued)})
 	})
 	if err != nil {
 		<-s.slots
@@ -635,13 +673,13 @@ func (s *Service) execute(id string) {
 	s.active[id] = cancel
 	now := time.Now().UTC()
 	task.Status, task.UpdatedAt = Running, now
-	run := &task.Runs[len(task.Runs)-1]
+	run := task.latest()
 	run.Status, run.StartedAt = Running, &now
 	err = s.db.Update(func(tx *bolt.Tx) error {
 		if err := putTask(tx, &task); err != nil {
 			return err
 		}
-		return appendEvent(tx, &task, Event{Kind: "state", Text: string(Running)})
+		return appendEvent(tx, &task, Event{Kind: EventState, Text: string(Running)})
 	})
 	if err != nil {
 		s.err = err
@@ -662,7 +700,7 @@ func (s *Service) execute(id string) {
 			}
 			if event.SessionID != "" {
 				current.SessionID = event.SessionID
-				current.Runs[len(current.Runs)-1].SessionID = event.SessionID
+				current.latest().SessionID = event.SessionID
 				if err := putTask(tx, current); err != nil {
 					return err
 				}
@@ -702,11 +740,10 @@ func (s *Service) execute(id string) {
 		case runErr != nil:
 			status, reason = Failed, runErr.Error()
 		}
-		finish(current, status, reason)
-		if err := finishCrewOutcome(tx, current); err != nil {
+		if err := finishRun(tx, current, status, reason); err != nil {
 			return err
 		}
-		r := &current.Runs[len(current.Runs)-1]
+		r := current.latest()
 		r.Text, r.Usage = result.Text, result.Usage
 		if status == Succeeded {
 			r.Artifacts = artifacts
@@ -717,7 +754,7 @@ func (s *Service) execute(id string) {
 		if err := putTask(tx, current); err != nil {
 			return err
 		}
-		return appendEvent(tx, current, Event{Kind: "state", Text: string(status)})
+		return appendEvent(tx, current, Event{Kind: EventState, Text: string(status)})
 	})
 	if err != nil {
 		s.err = err
@@ -727,37 +764,78 @@ func (s *Service) execute(id string) {
 func finish(task *Task, status Status, reason string) {
 	now := time.Now().UTC()
 	task.Status, task.UpdatedAt = status, now
-	run := &task.Runs[len(task.Runs)-1]
+	run := task.latest()
 	previousStatus := run.Status
 	run.Status, run.FinishedAt, run.Error = status, &now, reason
-	run.Outcome = "none"
+	run.Outcome = OutcomeNone
 	if run.Acceptance == nil {
 		run.Acceptance = skippedAcceptance()
 	}
 	if status == Interrupted && task.Workflow.Acceptance != nil && (previousStatus == Running || previousStatus == Cancelling) {
-		run.Acceptance.State = "interrupted"
+		run.Acceptance.State = AcceptanceInterrupted
 	}
-	if run.Acceptance.State == "running" {
+	if run.Acceptance.State == AcceptanceRunning {
 		switch status {
 		case Cancelled, TimedOut:
-			run.Acceptance.State = "cancelled"
+			run.Acceptance.State = AcceptanceCancelled
 		case Interrupted:
-			run.Acceptance.State = "interrupted"
+			run.Acceptance.State = AcceptanceInterrupted
 		}
 	}
 }
 
-func collectArtifacts(workspace string, paths []string) ([]Artifact, error) {
-	root, err := os.OpenRoot(workspace)
-	if err != nil {
-		return nil, err
+// finishRun is the only way a run becomes terminal inside a transaction: finish
+// may rewrite the acceptance state, so the crew outcome and false-green flag
+// are recomputed from the same events right after it.
+func finishRun(tx *bolt.Tx, task *Task, status Status, reason string) error {
+	finish(task, status, reason)
+	return finishCrewOutcome(tx, task)
+}
+
+// markInterrupted moves every non-terminal task to Interrupted with reason and
+// records its acceptance/state events. Restart (New) and stop (Close) share it;
+// tasks are rewritten after the scan because bbolt forbids mutation in ForEach.
+func markInterrupted(tx *bolt.Tx, reason string) error {
+	var tasks []*Task
+	if err := tx.Bucket(tasksBucket).ForEach(func(_, v []byte) error {
+		var task Task
+		if err := json.Unmarshal(v, &task); err != nil {
+			return err
+		}
+		if !terminal(task.Status) {
+			if err := finishRun(tx, &task, Interrupted, reason); err != nil {
+				return err
+			}
+			tasks = append(tasks, &task)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
-	defer root.Close()
+	for _, task := range tasks {
+		if err := putTask(tx, task); err != nil {
+			return err
+		}
+		if a := task.latest().Acceptance; a != nil && a.State == AcceptanceInterrupted {
+			if err := appendEvent(tx, task, Event{Kind: EventAcceptance, Acceptance: &AcceptanceEvent{State: AcceptanceInterrupted, FalseGreen: a.FalseGreen}}); err != nil {
+				return err
+			}
+		}
+		if err := appendEvent(tx, task, Event{Kind: EventState, Text: string(Interrupted)}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// collectArtifacts opens each path exactly as Artifact downloads do (no symlink
+// anywhere on the path), so a recorded artifact is always downloadable.
+func collectArtifacts(workspace string, paths []string) ([]Artifact, error) {
 	artifacts := make([]Artifact, 0, len(paths))
 	for _, path := range paths {
-		f, err := openArtifact(root, path) // Root resolves symlinks without permitting escape.
+		f, err := openArtifactDownload(workspace, path)
 		if err != nil {
-			return nil, fmt.Errorf("artifact %q is missing or escapes workspace", path)
+			return nil, fmt.Errorf("artifact %q is missing, a symlink or escapes workspace", path)
 		}
 		info, err := f.Stat()
 		if err != nil || !info.Mode().IsRegular() {
@@ -794,37 +872,7 @@ func (s *Service) Close() error {
 		s.mu.Unlock()
 		s.wg.Wait()
 		s.closeErr = s.db.Update(func(tx *bolt.Tx) error {
-			var tasks []*Task
-			if err := tx.Bucket(tasksBucket).ForEach(func(_, v []byte) error {
-				var task Task
-				if err := json.Unmarshal(v, &task); err != nil {
-					return err
-				}
-				if !terminal(task.Status) {
-					finish(&task, Interrupted, "service stopped; explicit resume required")
-					if err := finishCrewOutcome(tx, &task); err != nil {
-						return err
-					}
-					tasks = append(tasks, &task)
-				}
-				return nil
-			}); err != nil {
-				return err
-			}
-			for _, task := range tasks {
-				if err := putTask(tx, task); err != nil {
-					return err
-				}
-				if a := task.Runs[len(task.Runs)-1].Acceptance; a != nil && a.State == "interrupted" {
-					if err := appendEvent(tx, task, Event{Kind: "acceptance", Acceptance: &AcceptanceEvent{State: "interrupted", FalseGreen: a.FalseGreen}}); err != nil {
-						return err
-					}
-				}
-				if err := appendEvent(tx, task, Event{Kind: "state", Text: string(Interrupted)}); err != nil {
-					return err
-				}
-			}
-			return nil
+			return markInterrupted(tx, "service stopped; explicit resume required")
 		})
 		s.closeErr = errors.Join(s.closeErr, s.err, s.db.Close())
 	})

@@ -185,3 +185,86 @@ func TestStrictDecodeOpaqueStateAndBounds(t *testing.T) {
 		}
 	}
 }
+func TestReadConfigNamesUnknownField(t *testing.T) {
+	var c struct {
+		Listen string `json:"listen"`
+	}
+	e := rpc.ReadConfig(strings.NewReader(`{"listen":":1","lisen":":2"}`), &c)
+	if e == nil || !strings.Contains(e.Error(), `unknown field "lisen"`) {
+		t.Fatalf("unknown field not named: %v", e)
+	}
+}
+func TestTypedDecodesStrictlyBeforeCalling(t *testing.T) {
+	type params struct {
+		Namespace string          `json:"namespace"`
+		N         int             `json:"n,omitempty"`
+		State     json.RawMessage `json:"state,omitempty"`
+	}
+	type key struct{}
+	var calls atomic.Int64
+	var got params
+	failure := rpc.Failure(-32000, "fixture_error")
+	stream := &rpc.Stream{}
+	method := rpc.Typed(func(ctx context.Context, p params, s *rpc.Stream) (any, *rpc.Error) {
+		calls.Add(1)
+		got = p
+		if ctx.Value(key{}) != "ctx" || s != stream {
+			t.Error("context or stream not passed through")
+		}
+		if p.N < 0 {
+			return nil, failure
+		}
+		return "ok", nil
+	})
+	ctx := context.WithValue(context.Background(), key{}, "ctx")
+	result, e := method(ctx, json.RawMessage(`{"namespace":"tenant-a","n":2,"state":{"x":[1]}}`), stream)
+	if e != nil || result != "ok" || got.Namespace != "tenant-a" || got.N != 2 || string(got.State) != `{"x":[1]}` {
+		t.Fatalf("valid params: %v %+v %+v", result, e, got)
+	}
+	if result, e = method(ctx, json.RawMessage(`{"namespace":"tenant-a","n":-1}`), stream); result != nil || e != failure {
+		t.Fatalf("handler error not returned as-is: %v %+v", result, e)
+	}
+	for _, bad := range []string{`{`, `[]`, `null`, `"x"`, `{"namespace":"a","x":0}`, `{"Namespace":"a"}`, `{"namespace":"a","n":null}`, `{"namespace":"a","n":1.2}`, `{"namespace":"a","namespace":"b"}`, "{\"namespace\":\"\xff\"}"} {
+		result, e = method(ctx, json.RawMessage(bad), stream)
+		if result != nil || e == nil || e.Code != -32602 || e.Data.Code != "invalid_params" {
+			t.Errorf("%q => %v %+v want invalid_params", bad, result, e)
+		}
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("handler ran %d times, want 2", calls.Load())
+	}
+}
+func TestTypedWithDefaults(t *testing.T) {
+	type params struct {
+		Namespace string `json:"namespace"`
+		Limit     int    `json:"limit,omitempty"`
+	}
+	var calls atomic.Int64
+	method := rpc.TypedWith(params{Limit: 50}, func(_ context.Context, p params, _ *rpc.Stream) (any, *rpc.Error) {
+		calls.Add(1)
+		if p.Limit < 1 {
+			return nil, rpc.InvalidParams()
+		}
+		return p.Limit, nil
+	})
+	for _, tc := range []struct {
+		raw   string
+		limit any
+	}{
+		{`{"namespace":"a"}`, 50},
+		{`{"namespace":"a","limit":7}`, 7},
+		{`{"namespace":"a"}`, 50},
+		{`{"namespace":"a","limit":0}`, nil},
+		{`{"namespace":"a","limit":-1}`, nil},
+		{`{"namespace":"a","limit":null}`, nil},
+		{`{"namespace":"a","limit":1.5}`, nil},
+	} {
+		result, e := method(context.Background(), json.RawMessage(tc.raw), nil)
+		if result != tc.limit || (tc.limit == nil) != (e != nil) || e != nil && e.Data.Code != "invalid_params" {
+			t.Errorf("%s => %v %+v, want %v", tc.raw, result, e, tc.limit)
+		}
+	}
+	if calls.Load() != 5 {
+		t.Fatalf("handler ran %d times, want 5 (decode failures must not run it)", calls.Load())
+	}
+}

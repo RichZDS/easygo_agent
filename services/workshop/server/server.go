@@ -3,7 +3,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -21,25 +20,14 @@ type Config struct {
 func LoadConfig(r io.Reader) (Config, error) {
 	var c Config
 	e := rpc.ReadConfig(r, &c)
-	if c.Listen == "" {
-		c.Listen = ":8443"
-	}
-	if e != nil {
-		return c, e
-	}
-	if c.Workshop.BearerTokenEnv != "" {
-		return c, errors.New("RPC listener does not accept bearer configuration")
-	}
-	return c, nil
+	return c, e
 }
 
 // New returns ownership of the durable service; close it after the HTTP server stops.
+// An empty Listen defaults to :8443.
 func New(c Config) (*http.Server, *workshop.Service, error) {
 	if c.Listen == "" {
 		c.Listen = ":8443"
-	}
-	if c.Workshop.BearerTokenEnv != "" {
-		return nil, nil, errors.New("RPC listener does not accept bearer configuration")
 	}
 	// Validate TLS before opening or recovering the durable database.
 	methods := map[string]rpc.Method{}
@@ -68,6 +56,42 @@ type taskParams struct {
 	Namespace string `json:"namespace"`
 	TaskID    string `json:"task_id"`
 }
+type messageParams struct {
+	taskParams
+	Text           string `json:"text"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+type resumeParams struct {
+	taskParams
+	Input string `json:"input"`
+}
+type artifactParams struct {
+	taskParams
+	RunID string `json:"run_id,omitempty"`
+	Path  string `json:"path"`
+}
+type eventsParams struct {
+	taskParams
+	After uint64 `json:"after,omitempty"`
+}
+type evidenceParams struct {
+	taskParams
+	RunID      string `json:"run_id,omitempty"`
+	EvidenceID string `json:"evidence_id,omitempty"`
+	Offset     int    `json:"offset,omitempty"`
+	Limit      int    `json:"limit,omitempty"`
+}
+type listParams struct {
+	Namespace string `json:"namespace"`
+	Offset    int    `json:"offset,omitempty"`
+	Limit     int    `json:"limit,omitempty"`
+}
+type resultParams struct {
+	taskParams
+	RunID  string `json:"run_id,omitempty"`
+	Offset int    `json:"offset,omitempty"`
+	Limit  int    `json:"limit,omitempty"`
+}
 
 func Methods(service *workshop.Service) map[string]rpc.Method {
 	summary := func(task *workshop.Task, err error) (any, *rpc.Error) {
@@ -78,119 +102,66 @@ func Methods(service *workshop.Service) map[string]rpc.Method {
 		return result, domainError(err)
 	}
 	return map[string]rpc.Method{
-		"workshop.workflows": func(ctx context.Context, raw json.RawMessage, s *rpc.Stream) (any, *rpc.Error) {
-			var p namespaceParams
-			if rpc.Decode(raw, &p) != nil {
-				return nil, rpc.InvalidParams()
-			}
+		"workshop.workflows": rpc.Typed(func(ctx context.Context, _ namespaceParams, s *rpc.Stream) (any, *rpc.Error) {
 			return service.Workflows(), nil
-		},
-		"workshop.submit": func(ctx context.Context, raw json.RawMessage, s *rpc.Stream) (any, *rpc.Error) {
-			var p workshop.SubmitRequest
-			if rpc.Decode(raw, &p) != nil || strings.TrimSpace(p.IdempotencyKey) == "" {
+		}),
+		"workshop.submit": rpc.Typed(func(ctx context.Context, p workshop.SubmitRequest, s *rpc.Stream) (any, *rpc.Error) {
+			if strings.TrimSpace(p.IdempotencyKey) == "" {
 				return nil, rpc.InvalidParams()
 			}
 			return summary(service.Submit(p))
-		},
-		"workshop.get": func(ctx context.Context, raw json.RawMessage, s *rpc.Stream) (any, *rpc.Error) {
-			var p taskParams
-			if rpc.Decode(raw, &p) != nil || p.TaskID == "" {
+		}),
+		"workshop.get": rpc.Typed(func(ctx context.Context, p taskParams, s *rpc.Stream) (any, *rpc.Error) {
+			if p.TaskID == "" {
 				return nil, rpc.InvalidParams()
 			}
 			out, e := service.Summary(p.Namespace, p.TaskID)
 			return out, domainError(e)
-		},
-		"workshop.cancel": func(ctx context.Context, raw json.RawMessage, s *rpc.Stream) (any, *rpc.Error) {
-			var p taskParams
-			if rpc.Decode(raw, &p) != nil || p.TaskID == "" {
+		}),
+		"workshop.cancel": rpc.Typed(func(ctx context.Context, p taskParams, s *rpc.Stream) (any, *rpc.Error) {
+			if p.TaskID == "" {
 				return nil, rpc.InvalidParams()
 			}
 			return summary(service.Cancel(p.Namespace, p.TaskID))
-		},
-		"workshop.evidence": func(ctx context.Context, raw json.RawMessage, stream *rpc.Stream) (any, *rpc.Error) {
-			var p struct {
-				taskParams
-				RunID      string `json:"run_id,omitempty"`
-				EvidenceID string `json:"evidence_id,omitempty"`
-				Offset     int    `json:"offset,omitempty"`
-				Limit      int    `json:"limit,omitempty"`
-			}
-			p.Limit = 8192
-			if rpc.Decode(raw, &p) != nil || p.TaskID == "" {
+		}),
+		// Paged methods default an absent limit; an explicit 0 or null still fails.
+		"workshop.evidence": rpc.TypedWith(evidenceParams{Limit: 8192}, func(ctx context.Context, p evidenceParams, stream *rpc.Stream) (any, *rpc.Error) {
+			if p.TaskID == "" {
 				return nil, rpc.InvalidParams()
 			}
 			out, err := service.Evidence(p.Namespace, p.TaskID, p.RunID, p.EvidenceID, p.Offset, p.Limit)
 			return out, domainError(err)
-		},
-		"workshop.message": func(ctx context.Context, raw json.RawMessage, stream *rpc.Stream) (any, *rpc.Error) {
-			var p struct {
-				taskParams
-				Text           string `json:"text"`
-				IdempotencyKey string `json:"idempotency_key"`
-			}
-			if rpc.Decode(raw, &p) != nil {
-				return nil, rpc.InvalidParams()
-			}
+		}),
+		"workshop.message": rpc.Typed(func(ctx context.Context, p messageParams, stream *rpc.Stream) (any, *rpc.Error) {
 			out, err := service.Message(p.Namespace, p.TaskID, p.Text, p.IdempotencyKey)
 			return out, domainError(err)
-		},
-		"workshop.resume": func(ctx context.Context, raw json.RawMessage, s *rpc.Stream) (any, *rpc.Error) {
-			var p struct {
-				taskParams
-				Input string `json:"input"`
-			}
-			if rpc.Decode(raw, &p) != nil || p.TaskID == "" {
+		}),
+		"workshop.resume": rpc.Typed(func(ctx context.Context, p resumeParams, s *rpc.Stream) (any, *rpc.Error) {
+			if p.TaskID == "" {
 				return nil, rpc.InvalidParams()
 			}
 			return summary(service.Resume(p.Namespace, p.TaskID, p.Input))
-		},
-		"workshop.list": func(ctx context.Context, raw json.RawMessage, s *rpc.Stream) (any, *rpc.Error) {
-			var p struct {
-				Namespace string `json:"namespace"`
-				Offset    int    `json:"offset,omitempty"`
-				Limit     int    `json:"limit,omitempty"`
-			}
-			p.Limit = 20
-			if rpc.Decode(raw, &p) != nil {
+		}),
+		"workshop.list": rpc.TypedWith(listParams{Limit: 20}, func(ctx context.Context, p listParams, s *rpc.Stream) (any, *rpc.Error) {
+			out, e := service.ListPage(p.Namespace, p.Offset, p.Limit)
+			return out, domainError(e)
+		}),
+		"workshop.result": rpc.TypedWith(resultParams{Limit: 8192}, func(ctx context.Context, p resultParams, s *rpc.Stream) (any, *rpc.Error) {
+			if p.TaskID == "" {
 				return nil, rpc.InvalidParams()
 			}
-			limit := p.Limit
-			out, e := service.ListPage(p.Namespace, p.Offset, limit)
+			out, e := service.Result(p.Namespace, p.TaskID, p.RunID, p.Offset, p.Limit)
 			return out, domainError(e)
-		},
-		"workshop.result": func(ctx context.Context, raw json.RawMessage, s *rpc.Stream) (any, *rpc.Error) {
-			var p struct {
-				taskParams
-				RunID  string `json:"run_id,omitempty"`
-				Offset int    `json:"offset,omitempty"`
-				Limit  int    `json:"limit,omitempty"`
-			}
-			p.Limit = 8192
-			if rpc.Decode(raw, &p) != nil || p.TaskID == "" {
-				return nil, rpc.InvalidParams()
-			}
-			limit := p.Limit
-			out, e := service.Result(p.Namespace, p.TaskID, p.RunID, p.Offset, limit)
-			return out, domainError(e)
-		},
-		"workshop.artifact": func(ctx context.Context, raw json.RawMessage, stream *rpc.Stream) (any, *rpc.Error) {
-			var p struct {
-				taskParams
-				RunID string `json:"run_id,omitempty"`
-				Path  string `json:"path"`
-			}
-			if rpc.Decode(raw, &p) != nil || p.TaskID == "" || p.Path == "" {
+		}),
+		"workshop.artifact": rpc.Typed(func(ctx context.Context, p artifactParams, stream *rpc.Stream) (any, *rpc.Error) {
+			if p.TaskID == "" || p.Path == "" {
 				return nil, rpc.InvalidParams()
 			}
 			out, e := service.Artifact(p.Namespace, p.TaskID, p.RunID, p.Path)
 			return out, domainError(e)
-		},
-		"workshop.events": func(ctx context.Context, raw json.RawMessage, s *rpc.Stream) (any, *rpc.Error) {
-			var p struct {
-				taskParams
-				After uint64 `json:"after,omitempty"`
-			}
-			if rpc.Decode(raw, &p) != nil || p.TaskID == "" {
+		}),
+		"workshop.events": rpc.Typed(func(ctx context.Context, p eventsParams, s *rpc.Stream) (any, *rpc.Error) {
+			if p.TaskID == "" {
 				return nil, rpc.InvalidParams()
 			}
 			out, e := service.Events(p.Namespace, p.TaskID, p.After)
@@ -198,7 +169,7 @@ func Methods(service *workshop.Service) map[string]rpc.Method {
 				out = []workshop.Event{}
 			}
 			return out, domainError(e)
-		},
+		}),
 	}
 }
 func domainError(e error) *rpc.Error {

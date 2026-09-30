@@ -15,7 +15,7 @@ func (p *streamParser) parsePi(event nativeEvent) {
 			return
 		}
 		p.result.SessionID = event.ID
-		p.send(Event{Kind: "session", SessionID: event.ID})
+		p.send(Event{Kind: EventSession, SessionID: event.ID})
 	case "message_start":
 		if event.Message.Role == "assistant" {
 			p.piReady = false
@@ -40,7 +40,7 @@ func (p *streamParser) parsePi(event nativeEvent) {
 		p.result.Usage.OutputTokens += event.Message.Usage.Output
 		p.result.Usage.CachedInputTokens += event.Message.Usage.CacheRead
 		if text != "" {
-			p.send(Event{Kind: "text", Text: text})
+			p.send(Event{Kind: EventText, Text: text})
 		}
 	case "agent_settled":
 		if !p.piReady {
@@ -52,7 +52,7 @@ func (p *streamParser) parsePi(event nativeEvent) {
 			return
 		}
 		p.success = true
-		p.send(Event{Kind: "result", Text: p.result.Text, Usage: &p.result.Usage})
+		p.send(Event{Kind: EventResult, Text: p.result.Text, Usage: &p.result.Usage})
 	}
 }
 func (p *streamParser) parseOpenClaw(raw []byte) {
@@ -105,8 +105,8 @@ func (p *streamParser) parseOpenClaw(raw []byte) {
 	usage := out.Meta.AgentMeta.Usage
 	p.result.Usage = Usage{InputTokens: usage.Input + usage.CacheRead, OutputTokens: usage.Output, CachedInputTokens: usage.CacheRead}
 	p.success = true
-	p.send(Event{Kind: "session", SessionID: id})
-	p.send(Event{Kind: "result", Text: p.result.Text, Usage: &p.result.Usage})
+	p.send(Event{Kind: EventSession, SessionID: id})
+	p.send(Event{Kind: EventResult, Text: p.result.Text, Usage: &p.result.Usage})
 }
 
 func (p *streamParser) parsePiRaw(raw []byte) {

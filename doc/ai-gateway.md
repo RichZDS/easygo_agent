@@ -62,6 +62,8 @@ Errors have a stable `gateway.Error.Code`, a sanitized static message and option
 
 ## HTTP server and remote client
 
+> 已移除：本节的 `gateway.NewHandler` / `gateway.NewHTTPClient` 与 `/v1/models`、`POST /v1/generate` 路由，以及下一节的 `cmd/ai-gateway` 独立进程，已随 2026-09-30 的清理移除；现行网关只提供 mTLS RPC（见 [RPC 契约](../contracts/rpc-v1.md)），配置里再写 `bearer_token_env` 会被拒绝。
+
 ```go
 handler := gateway.NewHandler(g, gateway.HandlerConfig{
     BearerToken: os.Getenv("AI_GATEWAY_BEARER_TOKEN"),

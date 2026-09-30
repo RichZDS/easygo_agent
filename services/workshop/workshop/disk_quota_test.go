@@ -42,7 +42,7 @@ func TestDiskQuotaConfigBounds(t *testing.T) {
 		}
 	}
 	r, _, _ := dockerFixture(t)
-	if option(r.containerOptions("a", "/tmp/workspace", "", false), "--ulimit") != "fsize=2147483648:2147483648" {
+	if option(r.containerOptions("a", "/tmp/workspace", "", taskShimEntrypoint, false), "--ulimit") != "fsize=2147483648:2147483648" {
 		t.Fatal("fsize must use byte-valued soft/hard limits")
 	}
 }

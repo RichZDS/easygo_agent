@@ -109,7 +109,7 @@ func TestAcceptanceDockerIntegration(t *testing.T) {
 			task = waitTask(t, s, task.Namespace, task.ID, func(task *Task) bool { return terminal(task.Status) })
 			run := task.Runs[0]
 			wantStatus := Succeeded
-			wantState := map[string]string{"pass": "passed", "bad": "failed", "timeout": "failed", "cancel": "cancelled", "output": "passed", "infrastructure": "error", "skip": "skipped"}[name]
+			wantState := map[string]AcceptanceState{"pass": "passed", "bad": "failed", "timeout": "failed", "cancel": "cancelled", "output": "passed", "infrastructure": "error", "skip": "skipped"}[name]
 			if name == "cancel" {
 				wantStatus = Cancelled
 			}

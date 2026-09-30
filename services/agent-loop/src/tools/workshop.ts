@@ -1,4 +1,4 @@
-import { validateHarnessReceipt, validateRunSummary } from './receipts.js';
+import { runIds, statuses, validateHarnessReceipt, validateRunSummary } from './receipts.js';
 import type { ToolEntry } from './registry.js';
 import type { Block, Run, Tool } from '../types.js';
 import { RpcClient } from '../rpc.js';
@@ -12,46 +12,86 @@ function definition(name: string, description: string, properties: Record<string
 }
 const definitions: Tool[] = [
   definition('workshop_catalog', 'List configured workflows.', {}, []),
-  definition('workshop_submit', 'Submit a workflow; acceptance is not completion. Read task status afterwards.', { workflow: short, input, runtime: short }, ['workflow', 'input']),
+  definition(
+    'workshop_submit',
+    'Submit a workflow; acceptance is not completion. Read task status afterwards.',
+    { workflow: short, input, runtime: short },
+    ['workflow', 'input']
+  ),
   definition('workshop_get', 'Read a bounded task summary.', { task_id: short }, ['task_id']),
-  definition('workshop_list', 'List tasks in the current namespace.', { offset, limit: { type: 'integer', minimum: 1, maximum: 100 } }, []),
+  definition(
+    'workshop_list',
+    'List tasks in the current namespace.',
+    { offset, limit: { type: 'integer', minimum: 1, maximum: 100 } },
+    []
+  ),
   definition('workshop_cancel', 'Cancel a task.', { task_id: short }, ['task_id']),
   definition('workshop_resume', 'Resume a task with input.', { task_id: short, input }, ['task_id', 'input']),
-  definition('workshop_result', 'Read a bounded result page.', { task_id: short, run_id: short, offset, limit: { type: 'integer', minimum: 4, maximum: 32768 } }, ['task_id'])
+  definition(
+    'workshop_result',
+    'Read a bounded result page.',
+    { task_id: short, run_id: short, offset, limit: { type: 'integer', minimum: 4, maximum: 32768 } },
+    ['task_id']
+  ),
 ];
 export function workshopTools(client: RpcClient): ToolEntry[] {
-  return definitions.map(definition => {
+  return definitions.map((definition) => {
     const mutating = ['workshop_submit', 'workshop_resume', 'workshop_cancel'].includes(definition.name);
     return {
-      definition, roles: ['assistant'], mutating, recoverable: recoverableToolError,
-      execute: (call, run, signal) => executeWorkshop(call, run, client, signal, mutating)
+      definition,
+      roles: ['assistant'],
+      mutating,
+      recoverable: recoverableToolError,
+      execute: (call, run, signal) => executeWorkshop(call, run, client, signal, mutating),
     };
   });
 }
-async function executeWorkshop(call: Block, run: Run, client: RpcClient, signal: AbortSignal, mutating: boolean): Promise<unknown> {
+async function executeWorkshop(
+  call: Block,
+  run: Run,
+  client: RpcClient,
+  signal: AbortSignal,
+  mutating: boolean
+): Promise<unknown> {
   const args = object(call.arguments);
   const p: Record<string, unknown> = { namespace: run.namespace };
   switch (call.name) {
-    case 'workshop_catalog': return callWorkshop(client, 'workshop.workflows', p, signal, mutating);
+    case 'workshop_catalog':
+      return callWorkshop(client, 'workshop.workflows', p, signal, mutating);
     case 'workshop_submit':
-      p.workflow = string(args.workflow); p.input = string(args.input, 32768);
+      p.workflow = string(args.workflow);
+      p.input = string(args.input, 32768);
       if (run.workshop_runtime) p.runtime = run.workshop_runtime;
       else if (args.runtime !== undefined) p.runtime = string(args.runtime);
       // Trusted, deterministic identity. Tool-call IDs are validated unique per run.
       p.idempotency_key = `${run.id}:${string(call.id, 128)}`;
       break;
-    case 'workshop_resume': p.task_id = string(args.task_id); p.input = string(args.input, 32768); break;
+    case 'workshop_resume':
+      p.task_id = string(args.task_id);
+      p.input = string(args.input, 32768);
+      break;
     case 'workshop_result':
-      p.task_id = string(args.task_id); if (args.run_id !== undefined) p.run_id = string(args.run_id);
-      p.offset = integer(args.offset, 0, 2147483647); p.limit = integer(args.limit, 8192, 32768, 4); break;
-    case 'workshop_list': p.offset = integer(args.offset, 0, 2147483647); p.limit = integer(args.limit, 20, 100, 1); break;
-    default: p.task_id = string(args.task_id);
+      p.task_id = string(args.task_id);
+      if (args.run_id !== undefined) p.run_id = string(args.run_id);
+      p.offset = integer(args.offset, 0, 2147483647);
+      p.limit = integer(args.limit, 8192, 32768, 4);
+      break;
+    case 'workshop_list':
+      p.offset = integer(args.offset, 0, 2147483647);
+      p.limit = integer(args.limit, 20, 100, 1);
+      break;
+    default:
+      p.task_id = string(args.task_id);
   }
   return callWorkshop(client, `workshop.${call.name!.slice('workshop_'.length)}`, p, signal, mutating);
 }
 
 class ToolRpcFailure extends RpcError {
-  constructor(reason: string, readonly recoverable: boolean, upstream?: unknown) {
+  constructor(
+    reason: string,
+    readonly recoverable: boolean,
+    upstream?: unknown
+  ) {
     super(-32000, reason, 'Workshop RPC failed', upstream);
   }
 }
@@ -61,19 +101,26 @@ export function recoverableToolError(error: unknown): boolean {
   // masquerade as a safe local validation rejection of a mutating operation.
   return error instanceof ToolRpcFailure ? error.recoverable : error instanceof RpcError && error.code === -32602;
 }
-export async function callWorkshop(client: RpcClient, method: string, params: Record<string, unknown>, signal: AbortSignal, mutating: boolean, validate?: (value: unknown) => void): Promise<unknown> {
+export async function callWorkshop(
+  client: RpcClient,
+  method: string,
+  params: Record<string, unknown>,
+  signal: AbortSignal,
+  mutating: boolean,
+  validate?: (value: unknown) => void
+): Promise<unknown> {
   try {
     const result = await client.call(method, params, signal);
     validateReceipt(method, params, result);
     validateHarnessReceipt(method, params, result);
     validate?.(result);
     return result;
-  }
-  catch (error) {
+  } catch (error) {
     signal.throwIfAborted();
     // A request deadline terminates the run, including otherwise retry-safe reads.
     if (error instanceof Error && ['TimeoutError', 'AbortError'].includes(error.name)) throw error;
-    const upstream = error instanceof RpcError && error.reason === 'upstream_error' ? error.details as { code: number } : undefined;
+    const upstream =
+      error instanceof RpcError && error.reason === 'upstream_error' ? (error.details as { code: number }) : undefined;
     // Only explicit pre-acceptance rejections allow the model another attempt.
     // Internal/execution/protocol/transport failures can follow acceptance; never
     // hand those mutating outcomes back to a model that could submit again.
@@ -89,15 +136,14 @@ function validateReceipt(method: string, params: Record<string, unknown>, value:
   const task = (value: unknown, requestedID?: unknown) => {
     const receipt = object(value);
     const id = string(receipt.id);
-    if (receipt.namespace !== params.namespace || (requestedID !== undefined && id !== requestedID) ||
-        !['queued', 'running', 'cancelling', 'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'].includes(string(receipt.status))) {
+    if (
+      receipt.namespace !== params.namespace ||
+      (requestedID !== undefined && id !== requestedID) ||
+      !statuses.includes(string(receipt.status))
+    ) {
       throw new Error('Invalid workshop receipt');
     }
-    if (receipt.run_ids !== undefined) {
-      if (!Array.isArray(receipt.run_ids) || receipt.run_ids.length > 256) throw new Error('Invalid workshop runs');
-      const ids = receipt.run_ids.map(id => string(id));
-      if (new Set(ids).size !== ids.length) throw new Error('Invalid workshop runs');
-    }
+    if (receipt.run_ids !== undefined) runIds(receipt.run_ids);
     if (receipt.runs !== undefined) {
       if (!Array.isArray(receipt.runs)) throw new Error('Invalid workshop runs');
       for (const run of receipt.runs) validateRunSummary(run);
@@ -107,11 +153,13 @@ function validateReceipt(method: string, params: Record<string, unknown>, value:
     task(value, params.task_id);
   } else if (method === 'workshop.list') {
     const page = object(value);
-    if (!Array.isArray(page.tasks) || page.tasks.length > Number(params.limit)) throw new Error('Invalid workshop receipt');
+    if (!Array.isArray(page.tasks) || page.tasks.length > Number(params.limit))
+      throw new Error('Invalid workshop receipt');
     for (const entry of page.tasks) task(entry);
   } else if (method === 'workshop.result') {
     const page = object(value);
-    if (page.task_id !== params.task_id || (params.run_id !== undefined && page.run_id !== params.run_id)) throw new Error('Invalid workshop receipt');
+    if (page.task_id !== params.task_id || (params.run_id !== undefined && page.run_id !== params.run_id))
+      throw new Error('Invalid workshop receipt');
     string(page.run_id);
   }
 }

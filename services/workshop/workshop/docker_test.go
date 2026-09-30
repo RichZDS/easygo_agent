@@ -210,7 +210,7 @@ func TestDockerOptionsAndPathMapping(t *testing.T) {
 	if e != nil || mapped != "/daemon/workshop/workspaces/"+filepath.Base(in.Workspace) {
 		t.Fatalf("mapping %s %v", mapped, e)
 	}
-	args := r.containerOptions("run", mapped, "/daemon/workshop/relays/run", false)
+	args := r.containerOptions("run", mapped, "/daemon/workshop/relays/run", taskShimEntrypoint, false)
 	for k, v := range map[string]string{"--user": "1000:1000", "--network": "none", "--cap-drop": "ALL", "--security-opt": "no-new-privileges=true", "--pids-limit": "128", "--memory": "1073741824", "--memory-swap": "1073741824", "--cpus": "1.000000000", "--pull": "never", "--log-driver": "none"} {
 		if option(args, k) != v {
 			t.Errorf("%s=%s", k, option(args, k))
@@ -390,6 +390,18 @@ func TestDockerRejectsDirectCredentialsAndReplacementRunner(t *testing.T) {
 	}
 }
 
+// validateConfig runs before New's first side effect: a rejected configuration
+// leaves no root directory behind.
+func TestUnknownSandboxModeCreatesNoRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "root")
+	if _, e := New(Config{Root: root, Concurrency: 1, Sandbox: SandboxConfig{Mode: "typo"}}, nil); !errors.Is(e, ErrInvalid) {
+		t.Fatalf("unknown sandbox mode: %v", e)
+	}
+	if _, e := os.Lstat(root); !errors.Is(e, os.ErrNotExist) {
+		t.Fatalf("root created before validation: %v", e)
+	}
+}
+
 func TestDockerRuntimeConfigPathsAllEngines(t *testing.T) {
 	for _, engine := range []string{"codex", "claude", "pi", "openclaw"} {
 		t.Run(engine, func(t *testing.T) {
@@ -511,8 +523,8 @@ func TestCodexInnerPolicyChangesOnlyAfterDockerInitialization(t *testing.T) {
 	for _, policy := range []string{"read-only", "workspace-write"} {
 		t.Run(policy, func(t *testing.T) {
 			r, f, in := dockerFixture(t)
-			in.Workflow.Policy = policy
-			hostArgs, err := engineArgs(in)
+			in.Workflow.Policy = Policy(policy)
+			hostArgs, err := engineArgs(in, policy)
 			if err != nil {
 				t.Fatal(err)
 			}

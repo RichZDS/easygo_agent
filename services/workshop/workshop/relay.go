@@ -18,6 +18,10 @@ import (
 	"time"
 )
 
+// maxRelayBodyBytes bounds a relayed request and the gateway's response; the
+// in-container proxy (cmd/task-shim) applies the same request limit.
+const maxRelayBodyBytes = 16 << 20
+
 // A task-local capability exposes only the selected model generation operation.
 // The child never receives the gateway identity or vendor credential.
 func startModelRelay(ctx context.Context, cfg *ModelGateway, namespace string, profile RuntimeProfile, crew ...CrewChannel) (string, string, func(), error) {
@@ -78,7 +82,7 @@ func startModelRelayOn(ctx context.Context, cfg *ModelGateway, namespace string,
 			http.Error(w, "unsupported model operation", 404)
 			return
 		}
-		raw, e := io.ReadAll(http.MaxBytesReader(w, r.Body, 16<<20))
+		raw, e := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRelayBodyBytes))
 		var object map[string]json.RawMessage
 		if e != nil || rpc.Decode(raw, &object) != nil || object == nil {
 			http.Error(w, "invalid request", 400)
@@ -107,7 +111,7 @@ func startModelRelayOn(ctx context.Context, cfg *ModelGateway, namespace string,
 			return
 		}
 		defer response.Body.Close()
-		body, e := io.ReadAll(io.LimitReader(response.Body, (16<<20)+1))
+		body, e := io.ReadAll(io.LimitReader(response.Body, maxRelayBodyBytes+1))
 		var envelope struct {
 			JSONRPC string `json:"jsonrpc"`
 			ID      string `json:"id"`
@@ -117,7 +121,7 @@ func startModelRelayOn(ctx context.Context, cfg *ModelGateway, namespace string,
 			} `json:"result"`
 			Error json.RawMessage `json:"error"`
 		}
-		if e != nil || len(body) > 16<<20 || response.StatusCode != 200 || rpc.Decode(body, &envelope) != nil || envelope.JSONRPC != "2.0" || envelope.ID != id || envelope.Result == nil || len(envelope.Error) != 0 {
+		if e != nil || len(body) > maxRelayBodyBytes || response.StatusCode != 200 || rpc.Decode(body, &envelope) != nil || envelope.JSONRPC != "2.0" || envelope.ID != id || envelope.Result == nil || len(envelope.Error) != 0 {
 			http.Error(w, "model gateway rejected request", 502)
 			return
 		}

@@ -29,7 +29,7 @@ func run(args []string) error {
 	}
 	file, err := os.Open(*path)
 	if err != nil {
-		return errors.New("cannot open configuration file")
+		return fmt.Errorf("cannot open configuration file: %w", err)
 	}
 	config, err := server.LoadConfig(file)
 	file.Close()

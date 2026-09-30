@@ -27,6 +27,27 @@ const runtimeRelay = "/run/easygo-relay"
 const relayDirectory = "relays"
 const relayRunPrefix = "run-"
 const relaySocketName = "model.sock"
+
+// runtimeRelaySocket is the in-container relay socket; cmd/task-shim and
+// cmd/fixture-check repeat the literal because they run inside the image.
+const runtimeRelaySocket = runtimeRelay + "/" + relaySocketName
+
+// runtimeProxyAddr is where cmd/task-shim serves the model/crew proxy.
+const runtimeProxyAddr = "127.0.0.1:18080"
+
+// dockerCleanupTimeout bounds one remove, confirm or sweep round.
+const dockerCleanupTimeout = 20 * time.Second
+
+// taskShimEntrypoint is the image entrypoint for task and probe containers;
+// acceptance checks pass their own command instead.
+const taskShimEntrypoint = "/usr/local/bin/task-shim"
+
+// codexContainerSandbox is Codex's sandbox_mode inside the task container.
+// Codex's nested bwrap cannot create user namespaces under this container's
+// security policy, so only this initialized Docker path delegates isolation to
+// the mandatory outer container and its workflow-specific workspace mounts.
+// Host CommandRunner keeps the workflow policy; approval_policy=never is shared.
+const codexContainerSandbox = "danger-full-access"
 const relaySocketPathLimit = 107
 
 // Go 1.25 os.MkdirTemp appends nextRandom's decimal uint32: at most 10 digits.
@@ -54,23 +75,31 @@ func validateRelaySocketPath(root string) error {
 	return nil
 }
 
+// SandboxMode selects task isolation; empty keeps the legacy host behavior.
+type SandboxMode string
+
+const (
+	SandboxHost   SandboxMode = "host"
+	SandboxDocker SandboxMode = "docker"
+)
+
 // SandboxConfig is operator configuration, never accepted from task callers.
 // HostRoot is the daemon-visible path of Config.Root, not a parent directory.
 // Empty Mode preserves the legacy unmanaged host API; managed deployments set docker.
 type SandboxConfig struct {
-	Mode           string `json:"mode"`
-	DockerBinary   string `json:"docker_binary,omitempty"`
-	Endpoint       string `json:"endpoint,omitempty"`
-	Image          string `json:"image,omitempty"`
-	Owner          string `json:"owner,omitempty"`
-	HostRoot       string `json:"host_root,omitempty"`
-	MemoryBytes    int64  `json:"memory_bytes,omitempty"`
-	NanoCPUs       int64  `json:"nano_cpus,omitempty"`
-	PIDsLimit      int64  `json:"pids_limit,omitempty"`
-	TmpfsBytes     int64  `json:"tmpfs_bytes,omitempty"`
-	DiskQuotaBytes int64  `json:"disk_quota_bytes,omitempty"`
-	DiskQuotaFiles int64  `json:"disk_quota_files,omitempty"`
-	DiskPollMS     int    `json:"disk_poll_ms,omitempty"`
+	Mode           SandboxMode `json:"mode"`
+	DockerBinary   string      `json:"docker_binary,omitempty"`
+	Endpoint       string      `json:"endpoint,omitempty"`
+	Image          string      `json:"image,omitempty"`
+	Owner          string      `json:"owner,omitempty"`
+	HostRoot       string      `json:"host_root,omitempty"`
+	MemoryBytes    int64       `json:"memory_bytes,omitempty"`
+	NanoCPUs       int64       `json:"nano_cpus,omitempty"`
+	PIDsLimit      int64       `json:"pids_limit,omitempty"`
+	TmpfsBytes     int64       `json:"tmpfs_bytes,omitempty"`
+	DiskQuotaBytes int64       `json:"disk_quota_bytes,omitempty"`
+	DiskQuotaFiles int64       `json:"disk_quota_files,omitempty"`
+	DiskPollMS     int         `json:"disk_poll_ms,omitempty"`
 }
 
 type dockerCommand func(context.Context, io.Reader, io.Writer, io.Writer, ...string) error
@@ -91,6 +120,7 @@ type DockerRunner struct {
 }
 
 var ownerPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$`)
+var imageIDPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 
 func cleanAbsolute(path string) bool {
 	return filepath.IsAbs(path) && filepath.Clean(path) == path && path != "/" && !strings.ContainsAny(path, ",\n\r\x00")
@@ -140,7 +170,7 @@ func mkdirNoSymlinks(path string, mode os.FileMode) error {
 }
 
 func normalizeSandbox(c SandboxConfig) (SandboxConfig, error) {
-	if c.Mode != "docker" || !cleanAbsolute(c.HostRoot) || !ownerPattern.MatchString(c.Owner) || c.Image == "" || strings.HasPrefix(c.Image, "-") || strings.ContainsAny(c.Image, " \t\r\n\x00") {
+	if c.Mode != SandboxDocker || !cleanAbsolute(c.HostRoot) || !ownerPattern.MatchString(c.Owner) || c.Image == "" || strings.HasPrefix(c.Image, "-") || strings.ContainsAny(c.Image, " \t\r\n\x00") {
 		return c, fmt.Errorf("%w: docker requires image, owner and absolute host_root", ErrInvalid)
 	}
 	if !strings.HasPrefix(c.Endpoint, "unix://") || !cleanAbsolute(strings.TrimPrefix(c.Endpoint, "unix://")) {
@@ -187,11 +217,11 @@ func NewDockerRunner(cfg Config) (*DockerRunner, error) {
 	if err = noSymlinks(cfg.Root); err != nil {
 		return nil, err
 	}
-	max := cfg.MaxOutputBytes
-	if max == 0 {
-		max = defaultOutputLimit
+	outputLimit := cfg.MaxOutputBytes
+	if outputLimit == 0 {
+		outputLimit = defaultOutputLimit
 	}
-	if max < 1024 || max > 64<<20 {
+	if outputLimit < 1024 || outputLimit > 64<<20 {
 		return nil, ErrInvalid
 	}
 	binary := c.DockerBinary
@@ -206,7 +236,7 @@ func NewDockerRunner(cfg Config) (*DockerRunner, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &DockerRunner{cfg: c, root: cfg.Root, gateway: cfg.ModelGateway, maxOutput: max}
+	r := &DockerRunner{cfg: c, root: cfg.Root, gateway: cfg.ModelGateway, maxOutput: outputLimit}
 	r.command = func(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
 		cmd := exec.CommandContext(ctx, binary, append([]string{"--host", c.Endpoint}, args...)...)
 		// Never inherit DOCKER_HOST, contexts, auth, plugin paths or service secrets.
@@ -256,8 +286,8 @@ func (r *DockerRunner) hostPath(local string) (string, error) {
 // at construction time; nothing downstream searches the argument list for a
 // substring to append ",readonly" onto, so a change to field order or an
 // added field elsewhere in this string can never silently drop it.
-func (r *DockerRunner) containerOptions(name, workspace, relay string, workspaceReadOnly bool) []string {
-	args := []string{"create", "--name", name, "--pull", "never", "--interactive", "--user", "1000:1000", "--workdir", runtimeWorkspace, "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges=true", "--pids-limit", strconv.FormatInt(r.cfg.PIDsLimit, 10), "--memory", strconv.FormatInt(r.cfg.MemoryBytes, 10), "--memory-swap", strconv.FormatInt(r.cfg.MemoryBytes, 10), "--cpus", strconv.FormatFloat(float64(r.cfg.NanoCPUs)/1e9, 'f', 9, 64), "--ipc", "private", "--shm-size", "8388608", "--log-driver", "none", "--tmpfs", fmt.Sprintf("/tmp:rw,nosuid,nodev,noexec,size=%d,mode=1777", r.cfg.TmpfsBytes), "--entrypoint", "/usr/local/bin/task-shim"}
+func (r *DockerRunner) containerOptions(name, workspace, relay, entrypoint string, workspaceReadOnly bool) []string {
+	args := []string{"create", "--name", name, "--pull", "never", "--interactive", "--user", "1000:1000", "--workdir", runtimeWorkspace, "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges=true", "--pids-limit", strconv.FormatInt(r.cfg.PIDsLimit, 10), "--memory", strconv.FormatInt(r.cfg.MemoryBytes, 10), "--memory-swap", strconv.FormatInt(r.cfg.MemoryBytes, 10), "--cpus", strconv.FormatFloat(float64(r.cfg.NanoCPUs)/1e9, 'f', 9, 64), "--ipc", "private", "--shm-size", "8388608", "--log-driver", "none", "--tmpfs", fmt.Sprintf("/tmp:rw,nosuid,nodev,noexec,size=%d,mode=1777", r.cfg.TmpfsBytes), "--entrypoint", entrypoint}
 	args = append(args, "--ulimit", fmt.Sprintf("fsize=%d:%d", r.cfg.DiskQuotaBytes, r.cfg.DiskQuotaBytes))
 	labels := r.labels()
 	keys := []string{managedLabel, ownerLabel, rootLabel}
@@ -277,12 +307,44 @@ func (r *DockerRunner) containerOptions(name, workspace, relay string, workspace
 
 // A read-only workflow has an OS-enforced read-only workspace. Native state
 // remains writable only under its explicit task-private HOME submount.
-func (r *DockerRunner) taskContainerOptions(name, workspace, relay, home, policy string) []string {
-	args := r.containerOptions(name, workspace, relay, policy == "read-only")
-	if policy == "read-only" {
+func (r *DockerRunner) taskContainerOptions(name, workspace, relay, home string, policy Policy) []string {
+	args := r.containerOptions(name, workspace, relay, taskShimEntrypoint, policy == PolicyReadOnly)
+	if policy == PolicyReadOnly {
 		args = append(args, "--mount", "type=bind,src="+home+",dst="+runtimeWorkspace+"/.workshop-home,bind-propagation=rprivate")
 	}
 	return args
+}
+
+// containerInfo is the part of `docker inspect` the runner acts on.
+type containerInfo struct {
+	ID    string
+	Name  string
+	State struct {
+		Status     string
+		Running    bool
+		Paused     bool
+		Restarting bool
+	}
+	Config struct{ Labels map[string]string }
+}
+
+// inspectOwned inspects exactly one container by name or ID and refuses it
+// unless every ownership label matches this runner.
+func (r *DockerRunner) inspectOwned(ctx context.Context, ref string) (containerInfo, error) {
+	raw, err := r.output(ctx, "inspect", ref)
+	if err != nil {
+		return containerInfo{}, err
+	}
+	var objects []containerInfo
+	if json.Unmarshal([]byte(raw), &objects) != nil || len(objects) != 1 {
+		return containerInfo{}, errors.New("invalid Docker inspect")
+	}
+	for k, v := range r.labels() {
+		if objects[0].Config.Labels[k] != v {
+			return containerInfo{}, errors.New("refusing unrelated container: ownership labels differ")
+		}
+	}
+	return objects[0], nil
 }
 
 // remove inspects ownership even for names generated by this process. Missing is
@@ -295,23 +357,11 @@ func (r *DockerRunner) remove(ctx context.Context, name string) error {
 	if raw == "" {
 		return nil
 	}
-	var objects []struct {
-		ID     string
-		Config struct{ Labels map[string]string }
-	}
-	raw, err = r.output(ctx, "inspect", name)
+	info, err := r.inspectOwned(ctx, name)
 	if err != nil {
 		return err
 	}
-	if json.Unmarshal([]byte(raw), &objects) != nil || len(objects) != 1 {
-		return errors.New("invalid Docker inspect")
-	}
-	for k, v := range r.labels() {
-		if objects[0].Config.Labels[k] != v {
-			return errors.New("refusing to remove unrelated container")
-		}
-	}
-	_, err = r.output(ctx, "rm", "--force", objects[0].ID)
+	_, err = r.output(ctx, "rm", "--force", info.ID)
 	return err
 }
 
@@ -348,28 +398,11 @@ func (r *DockerRunner) confirmCleanup(ctx context.Context, name string) (gone bo
 	if raw == "" {
 		return true, nil
 	}
-	raw, err = r.output(ctx, "inspect", name)
+	info, err := r.inspectOwned(ctx, name)
 	if err != nil {
 		return false, err
 	}
-	var objects []struct {
-		State struct {
-			Status     string
-			Running    bool
-			Paused     bool
-			Restarting bool
-		}
-		Config struct{ Labels map[string]string }
-	}
-	if json.Unmarshal([]byte(raw), &objects) != nil || len(objects) != 1 {
-		return false, errors.New("invalid Docker inspect")
-	}
-	for k, v := range r.labels() {
-		if objects[0].Config.Labels[k] != v {
-			return false, errors.New("refusing to defer cleanup of unrelated container")
-		}
-	}
-	st := objects[0].State
+	st := info.State
 	if st.Running || st.Paused || st.Restarting || !stoppedStatus(st.Status) {
 		return false, errors.New("container still active")
 	}
@@ -416,7 +449,7 @@ func (r *DockerRunner) cleanup(name string) error {
 		if attempt > 0 {
 			time.Sleep(backoff[attempt-1])
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), dockerCleanupTimeout)
 		err = r.remove(ctx, name)
 		cancel()
 		if err == nil {
@@ -424,7 +457,7 @@ func (r *DockerRunner) cleanup(name string) error {
 			return nil
 		}
 	}
-	confirmCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	confirmCtx, cancel := context.WithTimeout(context.Background(), dockerCleanupTimeout)
 	gone, confirmErr := r.confirmCleanup(confirmCtx, name)
 	cancel()
 	if confirmErr != nil {
@@ -468,7 +501,7 @@ func (r *DockerRunner) sweepPendingCleanup() {
 		r.sweeping = false
 		r.mu.Unlock()
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), dockerCleanupTimeout)
 	defer cancel()
 	for _, name := range names {
 		if err := r.remove(ctx, name); err == nil {
@@ -493,23 +526,11 @@ func (r *DockerRunner) Initialize(ctx context.Context) (err error) {
 	}
 	for _, id := range strings.Fields(ids) {
 		// IDs need no name filter; inspect exact ID, compare labels, then remove.
-		raw, e := r.output(ctx, "inspect", id)
+		info, e := r.inspectOwned(ctx, id)
 		if e != nil {
 			return e
 		}
-		var objects []struct {
-			Name   string
-			Config struct{ Labels map[string]string }
-		}
-		if json.Unmarshal([]byte(raw), &objects) != nil || len(objects) != 1 {
-			return errors.New("invalid orphan inspection")
-		}
-		for k, v := range r.labels() {
-			if objects[0].Config.Labels[k] != v {
-				return errors.New("orphan ownership mismatch")
-			}
-		}
-		if e = r.remove(ctx, strings.TrimPrefix(objects[0].Name, "/")); e != nil {
+		if e = r.remove(ctx, strings.TrimPrefix(info.Name, "/")); e != nil {
 			return e
 		}
 	}
@@ -518,7 +539,7 @@ func (r *DockerRunner) Initialize(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-	if !regexp.MustCompile(`^sha256:[a-f0-9]{64}$`).MatchString(image) {
+	if !imageIDPattern.MatchString(image) {
 		return errors.New("invalid runtime image ID")
 	}
 	r.cfg.Image = image
@@ -546,7 +567,7 @@ func (r *DockerRunner) Initialize(ctx context.Context) (err error) {
 			r.mu.Unlock()
 		}
 	}()
-	args := r.containerOptions(name, host, "", false)
+	args := r.containerOptions(name, host, "", taskShimEntrypoint, false)
 	args = append(args, r.cfg.Image, "--verify-root", marker)
 	if _, err = r.output(ctx, args...); err != nil {
 		return err
@@ -577,7 +598,7 @@ func (r *DockerRunner) Run(ctx context.Context, in Invocation, emit func(Event) 
 	if p == nil || p.GatewayModel == "" || p.validate() != nil || p.Engine != in.Workflow.Engine || p.model() != in.Workflow.Model {
 		return result, errors.New("Docker requires a matching gateway runtime profile")
 	}
-	args, err := engineArgs(in)
+	args, err := engineArgs(in, codexContainerSandbox)
 	if err != nil {
 		return result, err
 	}
@@ -634,12 +655,12 @@ func (r *DockerRunner) Run(ctx context.Context, in Invocation, emit func(Event) 
 	if err = os.Chmod(socket, 0600); err != nil {
 		return result, err
 	}
-	env := map[string]string{"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/workspace/.workshop-home", "CODEX_HOME": "/workspace/.workshop-home/codex", "CLAUDE_CONFIG_DIR": "/workspace/.workshop-home/claude", "TMPDIR": "/tmp", "EASYGO_RELAY_SOCKET": runtimeRelay + "/" + relaySocketName}
-	env["EASYGO_CREW_URL"] = "http://127.0.0.1:18080/crew"
+	env := map[string]string{"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/workspace/.workshop-home", "CODEX_HOME": "/workspace/.workshop-home/codex", "CLAUDE_CONFIG_DIR": "/workspace/.workshop-home/claude", "TMPDIR": "/tmp", "EASYGO_RELAY_SOCKET": runtimeRelaySocket}
+	env["EASYGO_CREW_URL"] = "http://" + runtimeProxyAddr + "/crew"
 	env["EASYGO_CREW_TOKEN"] = key
 	childIn := in
 	childIn.Workspace = runtimeWorkspace
-	args, err = configureRuntimeEndpoint(childIn, args, env, "http://127.0.0.1:18080/v1", key, func(path string, v any) error {
+	args, err = configureRuntimeEndpoint(childIn, args, env, "http://"+runtimeProxyAddr+"/v1", key, func(path string, v any) error {
 		rel, e := filepath.Rel(runtimeWorkspace, path)
 		if e != nil || !filepath.IsLocal(rel) {
 			return errors.New("runtime config escaped workspace")
@@ -664,23 +685,6 @@ func (r *DockerRunner) Run(ctx context.Context, in Invocation, emit func(Event) 
 		}
 	}()
 	options := r.taskContainerOptions(name, host, relayHost, filepath.Join(host, ".workshop-home"), in.Workflow.Policy)
-	// Codex's nested bwrap cannot create user namespaces under this container's
-	// security policy. Only this initialized Docker path delegates isolation to
-	// the mandatory outer container and its workflow-specific workspace mounts.
-	// Host CommandRunner and approval_policy=never remain unchanged.
-	if in.Workflow.Engine == "codex" {
-		replaced := false
-		for i := 0; i+1 < len(args); i++ {
-			if args[i] == "-c" && args[i+1] == `sandbox_mode="`+in.Workflow.Policy+`"` {
-				args[i+1] = `sandbox_mode="danger-full-access"`
-				replaced = true
-			}
-		}
-		if !replaced {
-			return result, errors.New("missing native Codex sandbox override")
-		}
-	}
-
 	keys := make([]string, 0, len(env))
 	for k := range env {
 		keys = append(keys, k)
@@ -729,7 +733,7 @@ func (r *DockerRunner) Run(ctx context.Context, in Invocation, emit func(Event) 
 	}
 	// A short-lived process can finish between polls. Cancellation must not
 	// bypass the final quota check, but the scan still has a bounded lifetime.
-	budget := 30 * time.Second
+	budget := resumeQuotaScanTimeout
 	if r.finalQuotaTimeout != 0 {
 		budget = r.finalQuotaTimeout
 	}

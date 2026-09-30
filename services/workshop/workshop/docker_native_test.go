@@ -98,7 +98,7 @@ func TestDockerNativeRuntimes(t *testing.T) {
 			}
 			// Probe the installed version inside the same constrained runtime image.
 			name := "easygo-" + uuid.NewString()
-			opts := r.containerOptions(name, workspace, "", false)
+			opts := r.containerOptions(name, workspace, "", taskShimEntrypoint, false)
 			opts = append(opts, "--env", "EASYGO_RELAY_SOCKET="+runtimeRelay+"/model.sock", "--env", "HOME=/workspace", "--env", "CODEX_HOME=/workspace/codex", "--env", "CLAUDE_CONFIG_DIR=/workspace/claude", "--env", "PI_CODING_AGENT_DIR=/workspace/pi", "--env", "OPENCLAW_STATE_DIR=/workspace/openclaw", r.cfg.Image, tc.engine, "--version")
 			if _, err = r.output(ctx, opts...); err != nil {
 				t.Fatal(err)

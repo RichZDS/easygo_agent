@@ -1,0 +1,5 @@
+# services/agent-loop has its own prettier setup.
+services/agent-loop/**
+dist
+node_modules
+doc/eval/*.html

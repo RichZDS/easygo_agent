@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -75,7 +76,7 @@ func New(c Config, tlsIdentity rpc.TLSConfig) (*Manager, error) {
 	}
 	db, e := bolt.Open(c.Database, 0600, &bolt.Options{Timeout: time.Second})
 	if e != nil {
-		return nil, errors.New("meter database unavailable")
+		return nil, fmt.Errorf("meter database unavailable: %w", e)
 	}
 	transport := &http.Transport{TLSClientConfig: tlsConfig, MaxIdleConnsPerHost: 4}
 	m := &Manager{db: db, url: c.URL, transport: transport, client: &http.Client{Transport: transport, Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, stopped: make(chan struct{})}

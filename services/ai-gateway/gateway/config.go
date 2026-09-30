@@ -24,9 +24,7 @@ type FileModel struct {
 	HeaderEnv map[string]string `json:"header_env,omitempty"`
 }
 
-// LoadConfig strictly decodes JSON and resolves environment variable references.
-// A named but missing/empty environment variable fails closed. It does not read
-// dotenv files or log environment values. New validates the resolved models.
+// LoadConfig strictly decodes JSON and then applies Resolve.
 func LoadConfig(r io.Reader) (Config, HandlerConfig, error) {
 	var file FileConfig
 	raw, err := readBounded(r, defaultBodyLimit)
@@ -35,13 +33,22 @@ func LoadConfig(r io.Reader) (Config, HandlerConfig, error) {
 	}
 	d := json.NewDecoder(bytes.NewReader(raw))
 	d.DisallowUnknownFields()
-	if d.Decode(&file) != nil {
-		return Config{}, HandlerConfig{}, fail("invalid_config", "invalid gateway configuration JSON")
+	if err = d.Decode(&file); err != nil {
+		return Config{}, HandlerConfig{}, caused("invalid_config", "invalid gateway configuration JSON: "+err.Error(), err)
 	}
 	var extra any
 	if d.Decode(&extra) != io.EOF {
 		return Config{}, HandlerConfig{}, fail("invalid_config", "trailing configuration data")
 	}
+	return Resolve(file)
+}
+
+// Resolve resolves environment variable references in a decoded FileConfig.
+// A named but missing/empty environment variable fails closed. It does not read
+// dotenv files or log environment values, and it never modifies file's maps.
+// New validates the resolved models.
+func Resolve(file FileConfig) (Config, HandlerConfig, error) {
+	var err error
 	c := Config{Models: make(map[string]Model), MaxResponseBytes: file.MaxResponseBytes, MaxStreamBytes: file.MaxStreamBytes, MaxEventBytes: file.MaxEventBytes}
 	h := HandlerConfig{MaxRequestBytes: file.MaxRequestBytes}
 	resolve := func(name string) (string, error) {
@@ -63,9 +70,11 @@ func LoadConfig(r io.Reader) (Config, HandlerConfig, error) {
 		if err != nil {
 			return Config{}, HandlerConfig{}, err
 		}
-		if f.Headers == nil {
-			f.Headers = map[string]string{}
+		headers := make(map[string]string, len(f.Headers)+len(f.HeaderEnv))
+		for k, v := range f.Headers {
+			headers[k] = v
 		}
+		f.Headers = headers
 		for k, v := range f.Headers {
 			if strings.Contains(strings.ToLower(k), "key") || strings.Contains(strings.ToLower(k), "token") || strings.Contains(strings.ToLower(k), "auth") || strings.Contains(strings.ToLower(k), "secret") || strings.EqualFold(k, "Cookie") {
 				return Config{}, HandlerConfig{}, fail("invalid_config", "credential headers require header_env")

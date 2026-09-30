@@ -14,6 +14,10 @@ import (
 	"easygo-agent/services/ai-gateway/ai"
 )
 
+// A unary RPC carries base64 bytes; cap at 8MiB even if other gateway limits
+// are larger, leaving room for the envelope in a 16MiB RPC response.
+const nativeBodyLimit int64 = 8 << 20
+
 // NativeResponse retains a framework's wire format. SSE is bounded and buffered;
 // it is released only after the provider response has been read completely.
 type NativeResponse struct {
@@ -72,7 +76,6 @@ func (g *Gateway) Native(ctx context.Context, alias, protocol, requestID string,
 	if int64(len(raw)) > g.bodyLimit || rpc.Decode(raw, &body) != nil || body == nil {
 		return out, fail("invalid_request", "invalid native request")
 	}
-	body["model"], _ = json.Marshal(m.Model)
 	// Operator parameters remain authoritative. Native framework tool definitions
 	// are intentionally retained instead of translated into the neutral tool API.
 	defaults, e := parameters(m, ai.Request{})
@@ -102,7 +105,7 @@ func (g *Gateway) Native(ctx context.Context, alias, protocol, requestID string,
 	}
 	if protocol == "anthropic" {
 		if req.Header.Get("Anthropic-Version") == "" {
-			req.Header.Set("Anthropic-Version", "2023-06-01")
+			req.Header.Set("Anthropic-Version", anthropicVersion)
 		}
 		if m.APIKey != "" {
 			req.Header.Set("X-Api-Key", m.APIKey)
@@ -117,19 +120,17 @@ func (g *Gateway) Native(ctx context.Context, alias, protocol, requestID string,
 	defer res.Body.Close()
 	obs.HTTPStatus = res.StatusCode
 	accountingLimit := g.bodyLimit
-	if accountingLimit > 8<<20 {
-		accountingLimit = 8 << 20
+	if accountingLimit > nativeBodyLimit {
+		accountingLimit = nativeBodyLimit
 	}
 	accounting = newAccountingReader(res.Body, protocol, res.Header.Get("Content-Type"), accountingLimit, g.eventLimit)
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		_, _ = io.Copy(io.Discard, accounting)
 		return out, &Error{Code: "upstream_http_error", Message: "upstream rejected request", Status: res.StatusCode}
 	}
-	// A unary RPC carries base64 bytes; cap at 8MiB even if other gateway limits
-	// are larger, leaving room for the envelope in a 16MiB RPC response.
 	limit := g.bodyLimit
-	if limit > 8<<20 {
-		limit = 8 << 20
+	if limit > nativeBodyLimit {
+		limit = nativeBodyLimit
 	}
 	raw, e = readBounded(accounting, limit)
 	if e != nil {
@@ -139,25 +140,21 @@ func (g *Gateway) Native(ctx context.Context, alias, protocol, requestID string,
 	if e = validateNative(raw, contentType, protocol, g.eventLimit); e != nil {
 		return out, e
 	}
-	var parsed ai.Response
 	if contentType == "text/event-stream" {
-		parsed, e = decodeStream(bytes.NewReader(raw), m, alias, limit, g.eventLimit, func(ai.Event) error { return nil })
+		_, e = decodeStream(bytes.NewReader(raw), m, alias, limit, g.eventLimit, func(ai.Event) error { return nil })
 	} else if contentType == "application/json" {
-		parsed, e = decodeResponse(m, alias, raw)
+		_, e = decodeResponse(m, alias, raw)
 	} else {
 		return out, fail("invalid_response", "unsupported native response content type")
 	}
-	// Native framework-specific tools may exceed the neutral parser's vocabulary.
-	// Forward the original bytes, but only report usage/cost when parsing proves it.
+	// Usage and cost come from the accounting reader; parsing here only validates.
+	// Native framework-specific tools may exceed the neutral parser's vocabulary,
+	// so unsupported_capability still forwards the original bytes.
 	if e != nil {
 		var problem *Error
 		if !errors.As(e, &problem) || problem.Code != "unsupported_capability" {
 			return out, e
 		}
-	}
-	if e == nil {
-		obs.Usage = parsed.Usage
-		obs.Cost = calculateCost(parsed.Usage, m.Price)
 	}
 	if ctx.Err() != nil {
 		return out, caused("canceled", "request canceled", ctx.Err())

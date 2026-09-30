@@ -8,7 +8,7 @@ import { Store } from './store.js';
 import { Loop } from './loop.js';
 import { Knowledge } from './knowledge/index.js';
 import { createPlatform } from './platform/server.js';
-import { parseJSON } from './strict-json.mjs';
+import { closeOnce, listen, parseListen, readJsonBody, RPC_BODY_ERRORS } from './http.js';
 import { METHODS, type Config } from './types.js';
 import { fields, integer, namespace, object, rpcFailure, RpcError, string } from './validation.js';
 
@@ -73,30 +73,9 @@ export function parseConfig(value: unknown): Config {
   }
   return c as unknown as Config;
 }
-async function readBody(req: IncomingMessage): Promise<unknown> {
-  if (req.headers['content-type']?.split(';')[0] !== 'application/json')
-    throw new RpcError(-32600, 'invalid_content_type');
-  let bytes = 0;
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) {
-    bytes += chunk.length;
-    if (bytes > 256 * 1024) throw new RpcError(-32600, 'request_too_large');
-    chunks.push(chunk);
-  }
-  try {
-    return parseJSON(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(Buffer.concat(chunks)));
-  } catch {
-    throw new RpcError(-32700, 'parse_error');
-  }
-}
-function listenAddress(value: string): { host: string; port: number } {
-  const match = /^(?:\[([^\]]+)\]|([^:]*)):(\d+)$/.exec(value);
-  if (!match || Number(match[3]) > 65535) throw new Error('listen must be host:port');
-  return { host: match[1] || match[2] || '0.0.0.0', port: Number(match[3]) };
-}
 export async function startServer(input: Config) {
   const config = parseConfig(input);
-  const address = listenAddress(config.listen ?? ':8442');
+  const address = parseListen(config.listen ?? ':8442', '0.0.0.0');
   const authorization = new Authorizer(config.authorization);
   const options = tlsOptions(config.tls);
   const store = new Store(config.database ?? '/data/agent.sqlite');
@@ -196,7 +175,7 @@ export async function startServer(input: Config) {
         res.end();
         return;
       }
-      const value = await readBody(req);
+      const value = await readJsonBody(req, { maxBytes: 256 * 1024, errors: RPC_BODY_ERRORS });
       let envelope: Record<string, unknown>;
       try {
         envelope = fields(value, ['jsonrpc', 'id', 'method', 'params']);
@@ -217,6 +196,8 @@ export async function startServer(input: Config) {
       const failure = rpcFailure(error);
       errorCode = failure.reason;
       if (!res.destroyed) {
+        // JSON-RPC: application errors ride in a 200 body; only authorization and
+        // malformed requests get HTTP statuses. /api/* maps codes to REST statuses instead.
         res.writeHead(failure.code === -32003 ? 403 : [-32600, -32602, -32700].includes(failure.code) ? 400 : 200, {
           'content-type': 'application/json',
         });
@@ -261,13 +242,7 @@ export async function startServer(input: Config) {
   server.headersTimeout = 15_000;
   server.timeout = 30_000;
   try {
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(address.port, address.host, () => {
-        server.removeListener('error', reject);
-        resolve();
-      });
-    });
+    await listen(server, address);
   } catch (error) {
     await platform?.close();
     await knowledge?.close();
@@ -278,23 +253,17 @@ export async function startServer(input: Config) {
   ready = true;
   loop.startKnowledge();
   loop.kick();
-  let closePromise: Promise<void> | undefined;
   return {
     server,
     address: server.address(),
     platform_address: platform?.address,
-    close(): Promise<void> {
-      closePromise ??= (async () => {
-        closing = true;
-        const closed = new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
-        server.closeAllConnections();
-        await loop.close();
-        await platform?.close();
-        store.close();
-        await closed;
-      })();
-      return closePromise;
-    },
+    close: closeOnce(server, async (listenerClosed) => {
+      closing = true;
+      await loop.close();
+      await platform?.close();
+      store.close();
+      await listenerClosed;
+    }),
   };
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

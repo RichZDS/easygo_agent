@@ -24,19 +24,14 @@ type Config struct {
 
 func LoadConfig(r io.Reader) (Config, error) {
 	var c Config
-	if e := rpc.ReadConfig(r, &c); e != nil {
-		return c, e
-	}
-	if c.BearerTokenEnv != "" {
-		return c, errors.New("RPC listener does not accept bearer configuration")
-	}
-	return c, nil
+	err := rpc.ReadConfig(r, &c)
+	return c, err
 }
 func New(c Config) (*http.Server, error) {
 	if c.Listen == "" {
 		c.Listen = ":8441"
 	}
-	config, _, e := gateway.Resolve(c.FileConfig)
+	config, e := gateway.Resolve(c.FileConfig)
 	if e != nil {
 		return nil, e
 	}

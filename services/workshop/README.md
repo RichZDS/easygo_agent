@@ -18,7 +18,7 @@ docker build -f services/workshop/Dockerfile -t easygo-workshop-controller:local
 docker build -f deploy/runtime/Dockerfile -t easygo-task-runtime:local .
 ```
 
-控制器镜像只包含 Go 服务和 Docker 客户端；Docker socket 与服务证书只挂载给控制器。独立任务镜像安装 Node 26、Python、git，以及固定版本 Codex 0.157.1、Claude Code 2.1.281、Pi 0.87.1 和 OpenClaw 2026.9.6。构建参数为 `CODEX_VERSION`、`CLAUDE_CODE_VERSION`、`PI_VERSION`、`OPENCLAW_VERSION`；更改版本后需验证 CLI 参数和事件兼容性。每次调用创建一个 UID 1000、无外部网络、只读根文件系统且有资源上限的容器，只挂本任务工作区和一次性模型 relay socket。
+控制器镜像只包含 Go 服务和 Docker 客户端；Docker socket 与服务证书只挂载给控制器。独立任务镜像安装 Node 26、Python、git，以及固定版本的 Codex、Claude Code、Pi 和 OpenClaw，版本以 `deploy/runtime/Dockerfile` 的 ARG（`CODEX_VERSION`、`CLAUDE_CODE_VERSION`、`PI_VERSION`、`OPENCLAW_VERSION`）为准；更改版本后需验证 CLI 参数和事件兼容性。每次调用创建一个 UID 1000、无外部网络、只读根文件系统且有资源上限的容器，只挂本任务工作区和一次性模型 relay socket。
 
 旧的非托管本机示例通过 allowlist 接收 `CODEX_API_KEY`；Docker 模式禁止该路径，所有 runtime 必须使用 gateway profile。CLI 默认家目录位于每个任务工作区的 `.workshop-home`，随数据卷持久化；不使用宿主登录目录。进程退出码为 0 仍不足以认定成功，必须收到引擎终态并核验配置的产物。
 

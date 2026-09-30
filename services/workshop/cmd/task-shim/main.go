@@ -37,7 +37,7 @@ func run(args []string) int {
 		return 1
 	}
 	socket := os.Getenv("EASYGO_RELAY_SOCKET")
-	if socket != "/run/easygo-relay/model.sock" {
+	if socket != "/run/easygo-relay/model.sock" { // workshop runtimeRelaySocket
 		return 1
 	}
 	transport := &http.Transport{DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -50,10 +50,10 @@ func run(args []string) int {
 		r.Out.Host = "relay"
 	}, Transport: transport, ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) { http.Error(w, "model relay unavailable", 502) }}
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.Body = http.MaxBytesReader(w, r.Body, 16<<20)
+		r.Body = http.MaxBytesReader(w, r.Body, 16<<20) // workshop maxRelayBodyBytes
 		proxy.ServeHTTP(w, r)
 	}), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 15 * time.Second}
-	listener, err := net.Listen("tcp", "127.0.0.1:18080")
+	listener, err := net.Listen("tcp", "127.0.0.1:18080") // workshop runtimeProxyAddr
 	if err != nil {
 		return 1
 	}

@@ -16,10 +16,24 @@ type AcceptanceCheck struct {
 	Command        []string `json:"command"`
 	TimeoutSeconds int      `json:"timeout_seconds"`
 }
+
+// AcceptanceState is the persisted acceptance lifecycle and per-check result.
+type AcceptanceState string
+
+const (
+	AcceptanceSkipped     AcceptanceState = "skipped"
+	AcceptanceRunning     AcceptanceState = "running"
+	AcceptancePassed      AcceptanceState = "passed"
+	AcceptanceFailed      AcceptanceState = "failed"
+	AcceptanceError       AcceptanceState = "error"
+	AcceptanceCancelled   AcceptanceState = "cancelled"
+	AcceptanceInterrupted AcceptanceState = "interrupted"
+)
+
 type Acceptance struct {
-	State      string     `json:"state"`
-	FalseGreen bool       `json:"false_green"`
-	Evidence   []Evidence `json:"evidence"`
+	State      AcceptanceState `json:"state"`
+	FalseGreen bool            `json:"false_green"`
+	Evidence   []Evidence      `json:"evidence"`
 }
 type Evidence struct {
 	ID              string    `json:"id"`
@@ -34,11 +48,11 @@ type Evidence struct {
 	Time            time.Time `json:"time"`
 }
 type AcceptanceEvent struct {
-	State      string `json:"state"`
-	Check      string `json:"check,omitempty"`
-	ExitCode   *int   `json:"exit_code,omitempty"`
-	EvidenceID string `json:"evidence_id,omitempty"`
-	FalseGreen bool   `json:"false_green,omitempty"`
+	State      AcceptanceState `json:"state"`
+	Check      string          `json:"check,omitempty"`
+	ExitCode   *int            `json:"exit_code,omitempty"`
+	EvidenceID string          `json:"evidence_id,omitempty"`
+	FalseGreen bool            `json:"false_green,omitempty"`
 }
 
 var checkName = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
@@ -74,10 +88,12 @@ func cloneAcceptance(config *AcceptanceConfig) *AcceptanceConfig {
 	}
 	return out
 }
-func skippedAcceptance() *Acceptance { return &Acceptance{State: "skipped", Evidence: []Evidence{}} }
-func acceptanceSummary(run Run) (state string, falseGreen bool, count int) {
+func skippedAcceptance() *Acceptance {
+	return &Acceptance{State: AcceptanceSkipped, Evidence: []Evidence{}}
+}
+func acceptanceSummary(run Run) (state AcceptanceState, falseGreen bool, count int) {
 	if run.Acceptance == nil {
-		return "skipped", false, 0
+		return AcceptanceSkipped, false, 0
 	}
 	return run.Acceptance.State, run.Acceptance.FalseGreen, len(run.Acceptance.Evidence)
 }

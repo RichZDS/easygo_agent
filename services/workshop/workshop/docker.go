@@ -27,6 +27,16 @@ const runtimeRelay = "/run/easygo-relay"
 const relayDirectory = "relays"
 const relayRunPrefix = "run-"
 const relaySocketName = "model.sock"
+
+// runtimeRelaySocket is the in-container relay socket; cmd/task-shim and
+// cmd/fixture-check repeat the literal because they run inside the image.
+const runtimeRelaySocket = runtimeRelay + "/" + relaySocketName
+
+// runtimeProxyAddr is where cmd/task-shim serves the model/crew proxy.
+const runtimeProxyAddr = "127.0.0.1:18080"
+
+// dockerCleanupTimeout bounds one remove, confirm or sweep round.
+const dockerCleanupTimeout = 20 * time.Second
 const relaySocketPathLimit = 107
 
 // Go 1.25 os.MkdirTemp appends nextRandom's decimal uint32: at most 10 digits.
@@ -54,23 +64,31 @@ func validateRelaySocketPath(root string) error {
 	return nil
 }
 
+// SandboxMode selects task isolation; empty keeps the legacy host behavior.
+type SandboxMode string
+
+const (
+	SandboxHost   SandboxMode = "host"
+	SandboxDocker SandboxMode = "docker"
+)
+
 // SandboxConfig is operator configuration, never accepted from task callers.
 // HostRoot is the daemon-visible path of Config.Root, not a parent directory.
 // Empty Mode preserves the legacy unmanaged host API; managed deployments set docker.
 type SandboxConfig struct {
-	Mode           string `json:"mode"`
-	DockerBinary   string `json:"docker_binary,omitempty"`
-	Endpoint       string `json:"endpoint,omitempty"`
-	Image          string `json:"image,omitempty"`
-	Owner          string `json:"owner,omitempty"`
-	HostRoot       string `json:"host_root,omitempty"`
-	MemoryBytes    int64  `json:"memory_bytes,omitempty"`
-	NanoCPUs       int64  `json:"nano_cpus,omitempty"`
-	PIDsLimit      int64  `json:"pids_limit,omitempty"`
-	TmpfsBytes     int64  `json:"tmpfs_bytes,omitempty"`
-	DiskQuotaBytes int64  `json:"disk_quota_bytes,omitempty"`
-	DiskQuotaFiles int64  `json:"disk_quota_files,omitempty"`
-	DiskPollMS     int    `json:"disk_poll_ms,omitempty"`
+	Mode           SandboxMode `json:"mode"`
+	DockerBinary   string      `json:"docker_binary,omitempty"`
+	Endpoint       string      `json:"endpoint,omitempty"`
+	Image          string      `json:"image,omitempty"`
+	Owner          string      `json:"owner,omitempty"`
+	HostRoot       string      `json:"host_root,omitempty"`
+	MemoryBytes    int64       `json:"memory_bytes,omitempty"`
+	NanoCPUs       int64       `json:"nano_cpus,omitempty"`
+	PIDsLimit      int64       `json:"pids_limit,omitempty"`
+	TmpfsBytes     int64       `json:"tmpfs_bytes,omitempty"`
+	DiskQuotaBytes int64       `json:"disk_quota_bytes,omitempty"`
+	DiskQuotaFiles int64       `json:"disk_quota_files,omitempty"`
+	DiskPollMS     int         `json:"disk_poll_ms,omitempty"`
 }
 
 type dockerCommand func(context.Context, io.Reader, io.Writer, io.Writer, ...string) error
@@ -141,7 +159,7 @@ func mkdirNoSymlinks(path string, mode os.FileMode) error {
 }
 
 func normalizeSandbox(c SandboxConfig) (SandboxConfig, error) {
-	if c.Mode != "docker" || !cleanAbsolute(c.HostRoot) || !ownerPattern.MatchString(c.Owner) || c.Image == "" || strings.HasPrefix(c.Image, "-") || strings.ContainsAny(c.Image, " \t\r\n\x00") {
+	if c.Mode != SandboxDocker || !cleanAbsolute(c.HostRoot) || !ownerPattern.MatchString(c.Owner) || c.Image == "" || strings.HasPrefix(c.Image, "-") || strings.ContainsAny(c.Image, " \t\r\n\x00") {
 		return c, fmt.Errorf("%w: docker requires image, owner and absolute host_root", ErrInvalid)
 	}
 	if !strings.HasPrefix(c.Endpoint, "unix://") || !cleanAbsolute(strings.TrimPrefix(c.Endpoint, "unix://")) {
@@ -188,11 +206,11 @@ func NewDockerRunner(cfg Config) (*DockerRunner, error) {
 	if err = noSymlinks(cfg.Root); err != nil {
 		return nil, err
 	}
-	max := cfg.MaxOutputBytes
-	if max == 0 {
-		max = defaultOutputLimit
+	outputLimit := cfg.MaxOutputBytes
+	if outputLimit == 0 {
+		outputLimit = defaultOutputLimit
 	}
-	if max < 1024 || max > 64<<20 {
+	if outputLimit < 1024 || outputLimit > 64<<20 {
 		return nil, ErrInvalid
 	}
 	binary := c.DockerBinary
@@ -207,7 +225,7 @@ func NewDockerRunner(cfg Config) (*DockerRunner, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &DockerRunner{cfg: c, root: cfg.Root, gateway: cfg.ModelGateway, maxOutput: max}
+	r := &DockerRunner{cfg: c, root: cfg.Root, gateway: cfg.ModelGateway, maxOutput: outputLimit}
 	r.command = func(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
 		cmd := exec.CommandContext(ctx, binary, append([]string{"--host", c.Endpoint}, args...)...)
 		// Never inherit DOCKER_HOST, contexts, auth, plugin paths or service secrets.
@@ -278,9 +296,9 @@ func (r *DockerRunner) containerOptions(name, workspace, relay string, workspace
 
 // A read-only workflow has an OS-enforced read-only workspace. Native state
 // remains writable only under its explicit task-private HOME submount.
-func (r *DockerRunner) taskContainerOptions(name, workspace, relay, home, policy string) []string {
-	args := r.containerOptions(name, workspace, relay, policy == "read-only")
-	if policy == "read-only" {
+func (r *DockerRunner) taskContainerOptions(name, workspace, relay, home string, policy Policy) []string {
+	args := r.containerOptions(name, workspace, relay, policy == PolicyReadOnly)
+	if policy == PolicyReadOnly {
 		args = append(args, "--mount", "type=bind,src="+home+",dst="+runtimeWorkspace+"/.workshop-home,bind-propagation=rprivate")
 	}
 	return args
@@ -420,7 +438,7 @@ func (r *DockerRunner) cleanup(name string) error {
 		if attempt > 0 {
 			time.Sleep(backoff[attempt-1])
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), dockerCleanupTimeout)
 		err = r.remove(ctx, name)
 		cancel()
 		if err == nil {
@@ -428,7 +446,7 @@ func (r *DockerRunner) cleanup(name string) error {
 			return nil
 		}
 	}
-	confirmCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	confirmCtx, cancel := context.WithTimeout(context.Background(), dockerCleanupTimeout)
 	gone, confirmErr := r.confirmCleanup(confirmCtx, name)
 	cancel()
 	if confirmErr != nil {
@@ -472,7 +490,7 @@ func (r *DockerRunner) sweepPendingCleanup() {
 		r.sweeping = false
 		r.mu.Unlock()
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), dockerCleanupTimeout)
 	defer cancel()
 	for _, name := range names {
 		if err := r.remove(ctx, name); err == nil {
@@ -626,12 +644,12 @@ func (r *DockerRunner) Run(ctx context.Context, in Invocation, emit func(Event) 
 	if err = os.Chmod(socket, 0600); err != nil {
 		return result, err
 	}
-	env := map[string]string{"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/workspace/.workshop-home", "CODEX_HOME": "/workspace/.workshop-home/codex", "CLAUDE_CONFIG_DIR": "/workspace/.workshop-home/claude", "TMPDIR": "/tmp", "EASYGO_RELAY_SOCKET": runtimeRelay + "/" + relaySocketName}
-	env["EASYGO_CREW_URL"] = "http://127.0.0.1:18080/crew"
+	env := map[string]string{"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/workspace/.workshop-home", "CODEX_HOME": "/workspace/.workshop-home/codex", "CLAUDE_CONFIG_DIR": "/workspace/.workshop-home/claude", "TMPDIR": "/tmp", "EASYGO_RELAY_SOCKET": runtimeRelaySocket}
+	env["EASYGO_CREW_URL"] = "http://" + runtimeProxyAddr + "/crew"
 	env["EASYGO_CREW_TOKEN"] = key
 	childIn := in
 	childIn.Workspace = runtimeWorkspace
-	args, err = configureRuntimeEndpoint(childIn, args, env, "http://127.0.0.1:18080/v1", key, func(path string, v any) error {
+	args, err = configureRuntimeEndpoint(childIn, args, env, "http://"+runtimeProxyAddr+"/v1", key, func(path string, v any) error {
 		rel, e := filepath.Rel(runtimeWorkspace, path)
 		if e != nil || !filepath.IsLocal(rel) {
 			return errors.New("runtime config escaped workspace")
@@ -663,7 +681,7 @@ func (r *DockerRunner) Run(ctx context.Context, in Invocation, emit func(Event) 
 	if in.Workflow.Engine == "codex" {
 		replaced := false
 		for i := 0; i+1 < len(args); i++ {
-			if args[i] == "-c" && args[i+1] == `sandbox_mode="`+in.Workflow.Policy+`"` {
+			if args[i] == "-c" && args[i+1] == `sandbox_mode="`+string(in.Workflow.Policy)+`"` {
 				args[i+1] = `sandbox_mode="danger-full-access"`
 				replaced = true
 			}
@@ -721,7 +739,7 @@ func (r *DockerRunner) Run(ctx context.Context, in Invocation, emit func(Event) 
 	}
 	// A short-lived process can finish between polls. Cancellation must not
 	// bypass the final quota check, but the scan still has a bounded lifetime.
-	budget := 30 * time.Second
+	budget := resumeQuotaScanTimeout
 	if r.finalQuotaTimeout != 0 {
 		budget = r.finalQuotaTimeout
 	}

@@ -29,7 +29,7 @@ type Workflow struct {
 	Instructions    string            `json:"instructions"`
 	Engine          string            `json:"engine"` // claude or codex
 	Model           string            `json:"model"`
-	Policy          string            `json:"policy"` // read-only or workspace-write; required
+	Policy          Policy            `json:"policy"` // read-only or workspace-write; required
 	TimeoutSeconds  int               `json:"timeout_seconds"`
 	Artifacts       []string          `json:"artifacts,omitempty"` // explicit relative regular-file paths
 }
@@ -43,7 +43,7 @@ type WorkflowMetadata struct {
 	Version        string          `json:"version"`
 	Engine         string          `json:"engine"`
 	Model          string          `json:"model"`
-	Policy         string          `json:"policy"`
+	Policy         Policy          `json:"policy"`
 	TimeoutSeconds int             `json:"timeout_seconds"`
 	Artifacts      []string        `json:"artifacts"`
 }
@@ -64,7 +64,6 @@ type Config struct {
 	Workflows       []Workflow                `json:"workflows"`
 	Engines         map[string]EngineConfig   `json:"engines"`
 	MaxOutputBytes  int                       `json:"max_output_bytes,omitempty"`
-	BearerTokenEnv  string                    `json:"bearer_token_env,omitempty"`
 }
 
 type SubmitRequest struct {
@@ -88,6 +87,38 @@ const (
 	Interrupted Status = "interrupted"
 )
 
+// Policy is a workflow's filesystem permission; it is required.
+type Policy string
+
+const (
+	PolicyReadOnly       Policy = "read-only"
+	PolicyWorkspaceWrite Policy = "workspace-write"
+)
+
+// Outcome is the worker's last crew report for a run.
+type Outcome string
+
+const (
+	OutcomeNone      Outcome = "none"
+	OutcomeSubmitted Outcome = "submitted"
+	OutcomeBlocked   Outcome = "blocked"
+	OutcomeAsked     Outcome = "asked"
+)
+
+// EventKind classifies a durable task event.
+type EventKind string
+
+const (
+	EventState       EventKind = "state"
+	EventAcceptance  EventKind = "acceptance"
+	EventSession     EventKind = "session"
+	EventText        EventKind = "text"
+	EventResult      EventKind = "result"
+	EventDiagnostic  EventKind = "diagnostic"
+	EventCrewMessage EventKind = "crew.message"
+	EventCrewRead    EventKind = "crew.read"
+)
+
 func terminal(s Status) bool { return s != Queued && s != Running && s != Cancelling }
 
 type Usage struct {
@@ -104,7 +135,7 @@ type Artifact struct {
 
 type Run struct {
 	Acceptance      *Acceptance `json:"acceptance,omitempty"`
-	Outcome         string      `json:"outcome,omitempty"`
+	Outcome         Outcome     `json:"outcome,omitempty"`
 	ID              string      `json:"id"`
 	Input           string      `json:"input"`
 	ResumeSessionID string      `json:"resume_session_id,omitempty"`
@@ -159,7 +190,7 @@ type Event struct {
 	Sequence   uint64           `json:"sequence"`
 	RunID      string           `json:"run_id"`
 	Time       time.Time        `json:"time"`
-	Kind       string           `json:"kind"`
+	Kind       EventKind        `json:"kind"`
 	Text       string           `json:"text,omitempty"`
 	SessionID  string           `json:"session_id,omitempty"`
 	Usage      *Usage           `json:"usage,omitempty"`

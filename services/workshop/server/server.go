@@ -21,25 +21,14 @@ type Config struct {
 func LoadConfig(r io.Reader) (Config, error) {
 	var c Config
 	e := rpc.ReadConfig(r, &c)
-	if c.Listen == "" {
-		c.Listen = ":8443"
-	}
-	if e != nil {
-		return c, e
-	}
-	if c.Workshop.BearerTokenEnv != "" {
-		return c, errors.New("RPC listener does not accept bearer configuration")
-	}
-	return c, nil
+	return c, e
 }
 
 // New returns ownership of the durable service; close it after the HTTP server stops.
+// An empty Listen defaults to :8443.
 func New(c Config) (*http.Server, *workshop.Service, error) {
 	if c.Listen == "" {
 		c.Listen = ":8443"
-	}
-	if c.Workshop.BearerTokenEnv != "" {
-		return nil, nil, errors.New("RPC listener does not accept bearer configuration")
 	}
 	// Validate TLS before opening or recovering the durable database.
 	methods := map[string]rpc.Method{}

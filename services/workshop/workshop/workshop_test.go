@@ -8,8 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -582,76 +580,44 @@ func TestArtifactSymlinkInsideWorkspaceFailsCollection(t *testing.T) {
 	}
 }
 
-func TestHTTP(t *testing.T) {
+// Service-level successor of the removed HTTP transport test: unknown workflow,
+// missing tasks, then a submit/list/get/events/resume/cancel cycle.
+func TestServiceOperatorLifecycle(t *testing.T) {
 	s := newFixtureService(t, fixtureConfig(t, "codex"))
-	server := httptest.NewServer(Handler(s, "operator-token"))
-	defer server.Close()
-	call := func(method, path, body, token string) (int, []byte) {
-		t.Helper()
-		req, err := http.NewRequest(method, server.URL+path, strings.NewReader(body))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if token != "" {
-			req.Header.Set("Authorization", "Bearer "+token)
-		}
-		res, err := server.Client().Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer res.Body.Close()
-		data, err := io.ReadAll(res.Body)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return res.StatusCode, data
+	if _, err := s.Submit(SubmitRequest{Namespace: "operator", Workflow: "unknown", Input: "x"}); !errors.Is(err, ErrWorkflow) {
+		t.Fatalf("unknown workflow: %v", err)
 	}
-	for _, tc := range []struct {
-		method, path, body, token string
-		status                    int
-	}{
-		{"GET", "/v1/tasks", "", "", 401}, {"GET", "/v1/tasks", "", "wrong", 401},
-		{"POST", "/v1/tasks", "{", "operator-token", 400},
-		{"POST", "/v1/tasks", "null", "operator-token", 400},
-		{"POST", "/v1/tasks", `{"workflow":"unknown","input":"x"}`, "operator-token", 400},
-		{"POST", "/v1/tasks", `{"workflow":"note","cwd":"/tmp"}`, "operator-token", 400},
-		{"POST", "/v1/tasks", `{"workflow":"note","namespace":"other"}`, "operator-token", 400},
-		{"POST", "/v1/tasks", `{"workflow":"note"} {}`, "operator-token", 400},
-		{"GET", "/v1/tasks/missing", "", "operator-token", 404},
-		{"POST", "/v1/tasks/missing/cancel", "", "operator-token", 404},
-		{"POST", "/v1/tasks/missing/resume", `{"input":"x"}`, "operator-token", 404},
-		{"GET", "/v1/tasks/missing/events?after=bad", "", "operator-token", 400},
-	} {
-		status, data := call(tc.method, tc.path, tc.body, tc.token)
-		if status != tc.status {
-			t.Fatalf("%+v => %d %s", tc, status, data)
-		}
+	if _, err := s.Get("operator", "missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("get missing: %v", err)
 	}
-	status, data := call("POST", "/v1/tasks", `{"workflow":"note","input":"success","idempotency_key":"http"}`, "operator-token")
-	if status != 202 {
-		t.Fatalf("create %d %s", status, data)
+	if _, err := s.Cancel("operator", "missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cancel missing: %v", err)
 	}
-	var task Task
-	if err := json.Unmarshal(data, &task); err != nil {
+	if _, err := s.Resume("operator", "missing", "x"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("resume missing: %v", err)
+	}
+	task, err := s.Submit(SubmitRequest{Namespace: "operator", Workflow: "note", Input: "success", IdempotencyKey: "http"})
+	if err != nil {
 		t.Fatal(err)
 	}
 	if task.Namespace != "operator" {
 		t.Fatal(task.Namespace)
 	}
 	waitTask(t, s, "operator", task.ID, func(t *Task) bool { return terminal(t.Status) })
-	for _, path := range []string{"/v1/tasks", "/v1/tasks/" + task.ID, "/v1/tasks/" + task.ID + "/events"} {
-		status, data = call("GET", path, "", "operator-token")
-		if status != 200 {
-			t.Fatalf("get %s: %d %s", path, status, data)
-		}
+	if tasks, err := s.List("operator"); err != nil || len(tasks) != 1 {
+		t.Fatalf("list: %d %v", len(tasks), err)
 	}
-	status, data = call("POST", "/v1/tasks/"+task.ID+"/resume", `{"input":"followup"}`, "operator-token")
-	if status != 202 {
-		t.Fatalf("resume %d %s", status, data)
+	if _, err := s.Get("operator", task.ID); err != nil {
+		t.Fatalf("get: %v", err)
 	}
-	status, data = call("POST", "/v1/tasks/"+task.ID+"/cancel", "", "operator-token")
-	if status != 200 {
-		t.Fatalf("cancel %d %s", status, data)
+	if _, err := s.Events("operator", task.ID, 0); err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	if _, err := s.Resume("operator", task.ID, "followup"); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if _, err := s.Cancel("operator", task.ID); err != nil {
+		t.Fatalf("cancel: %v", err)
 	}
 }
 
@@ -671,34 +637,20 @@ func TestWorkflowCatalog(t *testing.T) {
 	if current := s.Workflows(); current[1].Name != "note" || current[1].Artifacts[0] != "note.md" {
 		t.Fatalf("catalog mutation affected service: %+v", current)
 	}
-	handler := Handler(s, "catalog-token")
-	for _, token := range []string{"", "wrong", "catalog-token"} {
-		r := httptest.NewRequest("GET", "/v1/workflows?namespace=trusted-session", nil)
-		if token != "" {
-			r.Header.Set("Authorization", "Bearer "+token)
-		}
-		w := httptest.NewRecorder()
-		handler.ServeHTTP(w, r)
-		if token != "catalog-token" {
-			if w.Code != http.StatusUnauthorized {
-				t.Fatalf("unauthenticated catalog: %d", w.Code)
-			}
-			continue
-		}
-		if w.Code != http.StatusOK {
-			t.Fatalf("catalog: %d %s", w.Code, w.Body.String())
-		}
-		var records []map[string]any
-		if err := json.Unmarshal(w.Body.Bytes(), &records); err != nil {
-			t.Fatal(err)
-		}
-		expected := []map[string]any{
-			{"name": "another-note", "version": "v1", "engine": "codex", "model": "fixture-model", "policy": "workspace-write", "timeout_seconds": float64(5), "artifacts": []any{}},
-			{"name": "note", "version": "v1", "engine": "codex", "model": "fixture-model", "policy": "workspace-write", "timeout_seconds": float64(5), "artifacts": []any{"note.md"}},
-		}
-		if !reflect.DeepEqual(records, expected) {
-			t.Fatalf("unexpected or private catalog fields: %s", w.Body.String())
-		}
+	raw, err := json.Marshal(s.Workflows())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var records []map[string]any
+	if err := json.Unmarshal(raw, &records); err != nil {
+		t.Fatal(err)
+	}
+	expected := []map[string]any{
+		{"name": "another-note", "version": "v1", "engine": "codex", "model": "fixture-model", "policy": "workspace-write", "timeout_seconds": float64(5), "artifacts": []any{}},
+		{"name": "note", "version": "v1", "engine": "codex", "model": "fixture-model", "policy": "workspace-write", "timeout_seconds": float64(5), "artifacts": []any{"note.md"}},
+	}
+	if !reflect.DeepEqual(records, expected) {
+		t.Fatalf("unexpected or private catalog fields: %s", raw)
 	}
 	// Discovery must not change execution or the immutable workflow snapshot.
 	task := submit(t, s, "success")
@@ -727,46 +679,31 @@ func TestReadOnlyArguments(t *testing.T) {
 	}
 }
 
-func TestHTTPOperatorNamespaceSelection(t *testing.T) {
+// A task is reachable only through the namespace it was submitted in.
+func TestServiceNamespaceIsolation(t *testing.T) {
 	s := newFixtureService(t, fixtureConfig(t, "codex"))
-	handler := Handler(s, "operator-token")
-	request := func(method, path, body string) *httptest.ResponseRecorder {
-		t.Helper()
-		r := httptest.NewRequest(method, path, strings.NewReader(body))
-		r.Header.Set("Authorization", "Bearer operator-token")
-		w := httptest.NewRecorder()
-		handler.ServeHTTP(w, r)
-		return w
-	}
-	w := request("POST", "/v1/tasks?namespace=private-session", `{"workflow":"note","input":"success","idempotency_key":"key"}`)
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("create: %d %s", w.Code, w.Body.String())
-	}
-	var task Task
-	if err := json.Unmarshal(w.Body.Bytes(), &task); err != nil {
+	task, err := s.Submit(SubmitRequest{Namespace: "private-session", Workflow: "note", Input: "success", IdempotencyKey: "key"})
+	if err != nil {
 		t.Fatal(err)
 	}
 	if task.Namespace != "private-session" {
 		t.Fatal(task.Namespace)
 	}
-	for _, suffix := range []string{"", "/events", "/cancel", "/resume"} {
-		method, body := "GET", ""
-		if suffix == "/cancel" || suffix == "/resume" {
-			method, body = "POST", `{"input":"followup"}`
-		}
-		w = request(method, "/v1/tasks/"+task.ID+suffix, body)
-		if w.Code != 404 {
-			t.Fatalf("wrong namespace access: %d %s", w.Code, w.Body.String())
+	for _, c := range []struct {
+		name string
+		call func() error
+	}{
+		{"get", func() error { _, err := s.Get("operator", task.ID); return err }},
+		{"events", func() error { _, err := s.Events("operator", task.ID, 0); return err }},
+		{"cancel", func() error { _, err := s.Cancel("operator", task.ID); return err }},
+		{"resume", func() error { _, err := s.Resume("operator", task.ID, "followup"); return err }},
+	} {
+		if err := c.call(); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("wrong namespace %s: %v", c.name, err)
 		}
 	}
-	w = request("GET", "/v1/tasks/"+task.ID+"?namespace=private-session", "")
-	if w.Code != 200 {
-		t.Fatalf("scoped get: %d %s", w.Code, w.Body.String())
-	}
-	unauth := httptest.NewRecorder()
-	Handler(s, "").ServeHTTP(unauth, httptest.NewRequest("GET", "/v1/tasks?namespace=private-session", nil))
-	if unauth.Code != 401 {
-		t.Fatalf("unprotected namespace selection: %d", unauth.Code)
+	if _, err := s.Get("private-session", task.ID); err != nil {
+		t.Fatalf("scoped get: %v", err)
 	}
 }
 

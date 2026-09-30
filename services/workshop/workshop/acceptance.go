@@ -65,10 +65,10 @@ func (s *Service) acceptanceUpdate(namespace, id string, update func(*bolt.Tx, *
 	}
 	return err
 }
-func falseGreen(outcome, tests, state string) bool {
-	return outcome == "submitted" && tests == "pass" && state == "failed"
+func falseGreen(outcome Outcome, tests string, state AcceptanceState) bool {
+	return outcome == OutcomeSubmitted && tests == "pass" && state == AcceptanceFailed
 }
-func acceptanceFalseGreen(tx *bolt.Tx, task *Task, state string) (bool, error) {
+func acceptanceFalseGreen(tx *bolt.Tx, task *Task, state AcceptanceState) (bool, error) {
 	events, err := taskEvents(tx, task.ID)
 	if err != nil {
 		return false, err
@@ -76,11 +76,11 @@ func acceptanceFalseGreen(tx *bolt.Tx, task *Task, state string) (bool, error) {
 	outcome, tests := crewOutcome(events, task.latest().ID)
 	return falseGreen(outcome, tests, state), nil
 }
-func (s *Service) acceptanceState(tx *bolt.Tx, task *Task, a *Acceptance, state string) error {
+func (s *Service) acceptanceState(tx *bolt.Tx, task *Task, a *Acceptance, state AcceptanceState) error {
 	if task.Status == Cancelling {
-		state = "cancelled"
+		state = AcceptanceCancelled
 	} else if s.closed {
-		state = "interrupted"
+		state = AcceptanceInterrupted
 	}
 	a.State = state
 	green, err := acceptanceFalseGreen(tx, task, state)
@@ -88,7 +88,7 @@ func (s *Service) acceptanceState(tx *bolt.Tx, task *Task, a *Acceptance, state 
 		return err
 	}
 	a.FalseGreen = green
-	return appendEvent(tx, task, Event{Kind: "acceptance", Acceptance: &AcceptanceEvent{State: state, FalseGreen: green}})
+	return appendEvent(tx, task, Event{Kind: EventAcceptance, Acceptance: &AcceptanceEvent{State: state, FalseGreen: green}})
 }
 func (s *Service) runAcceptance(ctx context.Context, task Task) error {
 	if task.Workflow.Acceptance == nil {
@@ -99,9 +99,9 @@ func (s *Service) runAcceptance(ctx context.Context, task Task) error {
 		if current.Status != Running || s.closed || ctx.Err() != nil {
 			return nil
 		}
-		a.State = "running"
+		a.State = AcceptanceRunning
 		started = true
-		return appendEvent(tx, current, Event{Kind: "acceptance", Acceptance: &AcceptanceEvent{State: "running"}})
+		return appendEvent(tx, current, Event{Kind: EventAcceptance, Acceptance: &AcceptanceEvent{State: AcceptanceRunning}})
 	}); err != nil {
 		return err
 	}
@@ -115,17 +115,17 @@ func (s *Service) runAcceptance(ctx context.Context, task Task) error {
 	hash, hashErr := workspaceTreeHash(ctx, task.Workspace)
 	if hashErr != nil {
 		return s.acceptanceUpdate(task.Namespace, task.ID, func(tx *bolt.Tx, current *Task, a *Acceptance) error {
-			state := "error"
+			state := AcceptanceError
 			if ctx.Err() != nil {
-				state = "cancelled"
+				state = AcceptanceCancelled
 			}
 			return s.acceptanceState(tx, current, a, state)
 		})
 	}
-	state := "passed"
+	state := AcceptancePassed
 	for _, check := range task.Workflow.Acceptance.Checks {
 		if ctx.Err() != nil {
-			state = "cancelled"
+			state = AcceptanceCancelled
 			break
 		}
 		evidence := Evidence{ID: uuid.NewString(), Check: check.Name, Command: append([]string{}, check.Command...), ExitCode: -1, WorkspaceSHA256: hash, Time: time.Now().UTC()}
@@ -136,11 +136,11 @@ func (s *Service) runAcceptance(ctx context.Context, task Task) error {
 			file, fileErr = os.OpenFile(filepath.Join(dir, evidence.ID+".log"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 		}
 		if fileErr != nil {
-			state = "error"
+			state = AcceptanceError
 			break
 		}
 		if err := s.acceptanceUpdate(task.Namespace, task.ID, func(tx *bolt.Tx, current *Task, a *Acceptance) error {
-			return appendEvent(tx, current, Event{Kind: "acceptance", Acceptance: &AcceptanceEvent{State: "running", Check: check.Name, EvidenceID: evidence.ID}})
+			return appendEvent(tx, current, Event{Kind: EventAcceptance, Acceptance: &AcceptanceEvent{State: AcceptanceRunning, Check: check.Name, EvidenceID: evidence.ID}})
 		}); err != nil {
 			file.Close()
 			return err
@@ -161,27 +161,27 @@ func (s *Service) runAcceptance(ctx context.Context, task Task) error {
 		closeErr := file.Close()
 		evidence.OutputBytes = output.total
 		evidence.OutputTruncated = output.total > evidenceLimit
-		checkState := "passed"
+		checkState := AcceptancePassed
 		switch {
 		case ctx.Err() != nil:
-			checkState = "cancelled"
+			checkState = AcceptanceCancelled
 		case checkErr != nil || output.err != nil || syncErr != nil || closeErr != nil:
-			checkState = "error"
+			checkState = AcceptanceError
 		case timedOut || exit != 0:
-			checkState = "failed"
+			checkState = AcceptanceFailed
 		}
-		if checkState == "cancelled" || checkState == "error" {
+		if checkState == AcceptanceCancelled || checkState == AcceptanceError {
 			state = checkState
-		} else if checkState == "failed" && state == "passed" {
-			state = "failed"
+		} else if checkState == AcceptanceFailed && state == AcceptancePassed {
+			state = AcceptanceFailed
 		}
 		if err := s.acceptanceUpdate(task.Namespace, task.ID, func(tx *bolt.Tx, current *Task, a *Acceptance) error {
 			a.Evidence = append(a.Evidence, evidence)
-			return appendEvent(tx, current, Event{Kind: "acceptance", Acceptance: &AcceptanceEvent{State: checkState, Check: check.Name, ExitCode: &evidence.ExitCode, EvidenceID: evidence.ID}})
+			return appendEvent(tx, current, Event{Kind: EventAcceptance, Acceptance: &AcceptanceEvent{State: checkState, Check: check.Name, ExitCode: &evidence.ExitCode, EvidenceID: evidence.ID}})
 		}); err != nil {
 			return err
 		}
-		if checkState == "cancelled" || checkState == "error" {
+		if checkState == AcceptanceCancelled || checkState == AcceptanceError {
 			break
 		}
 	}

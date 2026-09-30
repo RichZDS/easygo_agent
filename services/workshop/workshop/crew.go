@@ -29,9 +29,18 @@ type CrewPost struct {
 	Text     string      `json:"text"`
 	Claims   *CrewClaims `json:"claims,omitempty"`
 }
+
+// Direction records which side of the crew channel wrote a message.
+type Direction string
+
+const (
+	DirectionFromWorker Direction = "from_worker"
+	DirectionToWorker   Direction = "to_worker"
+)
+
 type CrewMessage struct {
 	ID        string      `json:"id"`
-	Direction string      `json:"direction"`
+	Direction Direction   `json:"direction"`
 	Kind      string      `json:"kind"`
 	Text      string      `json:"text"`
 	Claims    *CrewClaims `json:"claims,omitempty"`
@@ -101,7 +110,7 @@ func taskEvents(tx *bolt.Tx, id string) ([]Event, error) {
 	return events, err
 }
 func appendCrewMessage(tx *bolt.Tx, task *Task, message CrewMessage) (CrewReceipt, error) {
-	if err := appendEvent(tx, task, Event{Kind: "crew.message", Message: &message}); err != nil {
+	if err := appendEvent(tx, task, Event{Kind: EventCrewMessage, Message: &message}); err != nil {
 		return CrewReceipt{}, err
 	}
 	return CrewReceipt{ID: message.ID, Sequence: tx.Bucket(eventsBucket).Bucket([]byte(task.ID)).Sequence()}, nil
@@ -147,7 +156,7 @@ func (c runCrew) Post(ctx context.Context, p CrewPost) (receipt CrewReceipt, err
 		count := 0
 		for _, event := range events {
 			m := event.Message
-			if event.RunID != c.runID || m == nil || m.Direction != "from_worker" {
+			if event.RunID != c.runID || m == nil || m.Direction != DirectionFromWorker {
 				continue
 			}
 			count++
@@ -164,7 +173,7 @@ func (c runCrew) Post(ctx context.Context, p CrewPost) (receipt CrewReceipt, err
 		if count >= 200 {
 			return ErrFull
 		}
-		receipt, e = appendCrewMessage(tx, task, CrewMessage{ID: uuid.NewString(), Direction: "from_worker", Kind: p.Kind, Text: p.Text, Claims: p.Claims, ClientID: p.ClientID})
+		receipt, e = appendCrewMessage(tx, task, CrewMessage{ID: uuid.NewString(), Direction: DirectionFromWorker, Kind: p.Kind, Text: p.Text, Claims: p.Claims, ClientID: p.ClientID})
 		return e
 	})
 	return
@@ -192,7 +201,7 @@ func (c runCrew) Inbox(ctx context.Context, after uint64) (inbox CrewInbox, err 
 		ids := []string{}
 		for _, event := range events {
 			m := event.Message
-			if event.Sequence <= after || m == nil || m.Direction != "to_worker" {
+			if event.Sequence <= after || m == nil || m.Direction != DirectionToWorker {
 				continue
 			}
 			inbox.Messages = append(inbox.Messages, InboxMessage{ID: m.ID, Sequence: event.Sequence, Text: m.Text, Time: event.Time})
@@ -203,7 +212,7 @@ func (c runCrew) Inbox(ctx context.Context, after uint64) (inbox CrewInbox, err 
 			}
 		}
 		if len(ids) > 0 {
-			return appendEvent(tx, task, Event{Kind: "crew.read", Read: &CrewRead{MessageIDs: ids}})
+			return appendEvent(tx, task, Event{Kind: EventCrewRead, Read: &CrewRead{MessageIDs: ids}})
 		}
 		return nil
 	})
@@ -212,7 +221,7 @@ func (c runCrew) Inbox(ctx context.Context, after uint64) (inbox CrewInbox, err 
 
 // Message durably queues a foreman's note even when the worker has stopped.
 func (s *Service) Message(namespace, id, text, key string) (out MessageReceipt, err error) {
-	if namespace == "" || id == "" || !validCrewText(text) || len(key) < 1 || len(key) > 128 || !utf8.ValidString(key) {
+	if !validInput(namespace, text) || id == "" || !validCrewText(text) || len(key) < 1 || len(key) > 128 || !utf8.ValidString(key) {
 		return out, ErrInvalid
 	}
 	s.mu.Lock()
@@ -246,7 +255,7 @@ func (s *Service) Message(namespace, id, text, key string) (out MessageReceipt, 
 			}
 		} else {
 			record.Text = text
-			record.Receipt, e = appendCrewMessage(tx, task, CrewMessage{ID: uuid.NewString(), Direction: "to_worker", Kind: "note", Text: text})
+			record.Receipt, e = appendCrewMessage(tx, task, CrewMessage{ID: uuid.NewString(), Direction: DirectionToWorker, Kind: "note", Text: text})
 			if e != nil {
 				return e
 			}
@@ -279,7 +288,7 @@ func unreadCrewMessages(tx *bolt.Tx, task *Task) ([]InboxMessage, error) {
 	unread := []InboxMessage{}
 	for _, event := range events {
 		m := event.Message
-		if m != nil && m.Direction == "to_worker" && !read[m.ID] {
+		if m != nil && m.Direction == DirectionToWorker && !read[m.ID] {
 			unread = append(unread, InboxMessage{ID: m.ID, Sequence: event.Sequence, Text: m.Text, Time: event.Time})
 		}
 	}
@@ -300,28 +309,28 @@ func resumeCrewInput(tx *bolt.Tx, task *Task) error {
 		run.Input += fmt.Sprintf("\n- [%s] %s", m.ID, m.Text)
 		ids = append(ids, m.ID)
 	}
-	return appendEvent(tx, task, Event{Kind: "crew.read", Read: &CrewRead{MessageIDs: ids}})
+	return appendEvent(tx, task, Event{Kind: EventCrewRead, Read: &CrewRead{MessageIDs: ids}})
 }
 
 // crewOutcome folds one run's worker messages into its outcome and, for a
 // final submit, the claimed test result. The last submit/blocked/ask wins.
-func crewOutcome(events []Event, runID string) (outcome, tests string) {
-	outcome = "none"
+func crewOutcome(events []Event, runID string) (outcome Outcome, tests string) {
+	outcome = OutcomeNone
 	for _, event := range events {
 		m := event.Message
-		if event.RunID != runID || m == nil || m.Direction != "from_worker" {
+		if event.RunID != runID || m == nil || m.Direction != DirectionFromWorker {
 			continue
 		}
 		switch m.Kind {
 		case "submit":
-			outcome, tests = "submitted", ""
+			outcome, tests = OutcomeSubmitted, ""
 			if m.Claims != nil {
 				tests = m.Claims.Tests
 			}
 		case "blocked":
-			outcome, tests = "blocked", ""
+			outcome, tests = OutcomeBlocked, ""
 		case "ask":
-			outcome, tests = "asked", ""
+			outcome, tests = OutcomeAsked, ""
 		}
 	}
 	return outcome, tests

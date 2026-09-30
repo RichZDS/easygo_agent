@@ -126,9 +126,9 @@ func TestEvidenceTruncationAndFalseGreen(t *testing.T) {
 	if n, err := writer.Write(input); err != nil || n != len(input) || raw.Len() != evidenceLimit || writer.total != int64(len(input)) {
 		t.Fatal("evidence not bounded")
 	}
-	for _, outcome := range []string{"submitted", "asked", "blocked", "none"} {
+	for _, outcome := range []Outcome{"submitted", "asked", "blocked", "none"} {
 		for _, tests := range []string{"pass", "fail", "not_run", ""} {
-			for _, state := range []string{"passed", "failed", "error", "cancelled", "interrupted", "skipped"} {
+			for _, state := range []AcceptanceState{"passed", "failed", "error", "cancelled", "interrupted", "skipped"} {
 				want := outcome == "submitted" && tests == "pass" && state == "failed"
 				if falseGreen(outcome, tests, state) != want {
 					t.Fatal(outcome, tests, state)

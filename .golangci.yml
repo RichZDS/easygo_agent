@@ -8,6 +8,15 @@ linters:
     - ineffassign
     - staticcheck
     - unused
+  exclusions:
+    # Unchecked Close, Flush, os.Remove(All), *print*, os.(Un)Setenv and os.Stdout/Stderr results.
+    presets:
+      - std-error-handling
+    rules:
+      # Cleanup in tests is not worth checking call by call.
+      - path: _test\.go
+        linters:
+          - errcheck
 
 formatters:
   enable:

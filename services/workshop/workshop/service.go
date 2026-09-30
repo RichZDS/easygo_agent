@@ -77,128 +77,49 @@ func (s *Service) Workflows() []WorkflowMetadata {
 // Passing nil runner constructs the native CLI runner from Config. No unfinished
 // task is automatically replayed, including tasks queued before a restart.
 func New(cfg Config, runner Runner) (*Service, error) {
-	if cfg.Root == "" || cfg.Concurrency < 1 || cfg.Concurrency > 128 || cfg.QueueCapacity < 0 || cfg.QueueCapacity > 10000 {
-		return nil, fmt.Errorf("%w: root and bounded concurrency/queue are required", ErrInvalid)
+	if err := validateConfig(cfg); err != nil {
+		return nil, err
+	}
+	if cfg.Sandbox.Mode == SandboxDocker && runner != nil {
+		return nil, fmt.Errorf("%w: Docker mode cannot accept a replacement runner", ErrInvalid)
+	}
+	s := &Service{workflows: map[string]Workflow{}, runtimes: map[string]RuntimeProfile{}, runner: runner, queue: make(chan string, cfg.Concurrency+cfg.QueueCapacity), slots: make(chan struct{}, cfg.Concurrency+cfg.QueueCapacity), stop: make(chan struct{}), active: map[string]context.CancelFunc{}, resumeScans: map[string]struct{}{}}
+	if err := s.buildCatalog(cfg); err != nil {
+		return nil, err
 	}
 	root, err := filepath.Abs(cfg.Root)
 	if err != nil {
 		return nil, err
 	}
 	if cfg.Sandbox.Mode == SandboxDocker {
-		// Fail before creating directories, opening storage or contacting Docker.
-		if err := validateRelaySocketPath(root); err != nil {
-			return nil, err
-		}
 		err = mkdirNoSymlinks(root, 0700)
+		if err == nil {
+			err = noSymlinks(root)
+		}
 	} else {
 		err = os.MkdirAll(root, 0700)
 	}
 	if err != nil {
 		return nil, err
 	}
-	if cfg.Sandbox.Mode != "" && cfg.Sandbox.Mode != SandboxHost && cfg.Sandbox.Mode != SandboxDocker {
-		return nil, fmt.Errorf("%w: unknown sandbox mode", ErrInvalid)
-	}
-	if cfg.Sandbox.Mode == SandboxDocker {
-		if err := noSymlinks(root); err != nil {
-			return nil, err
-		}
-		if runner != nil {
-			return nil, fmt.Errorf("%w: Docker mode cannot accept a replacement runner", ErrInvalid)
-		}
-		for _, e := range cfg.Engines {
-			if len(e.EnvAllowlist) != 0 {
-				return nil, fmt.Errorf("%w: Docker mode forbids environment allowlists", ErrInvalid)
-			}
-		}
-	}
-	root, err = filepath.EvalSymlinks(root)
-	if err != nil {
+	if root, err = filepath.EvalSymlinks(root); err != nil {
 		return nil, err
 	}
-	s := &Service{root: root, workflows: map[string]Workflow{}, runtimes: map[string]RuntimeProfile{}, runner: runner, queue: make(chan string, cfg.Concurrency+cfg.QueueCapacity), slots: make(chan struct{}, cfg.Concurrency+cfg.QueueCapacity), stop: make(chan struct{}), active: map[string]context.CancelFunc{}, resumeScans: map[string]struct{}{}}
-	s.workerInstructions, err = readWorkerInstructions(cfg.PackDir)
-	if err != nil {
+	s.root = root
+	if s.workerInstructions, err = readWorkerInstructions(cfg.PackDir); err != nil {
 		return nil, err
-	}
-	for id, p := range cfg.RuntimeProfiles {
-		if strings.TrimSpace(id) == "" || len(id) > 128 {
-			return nil, ErrInvalid
-		}
-		if err := p.validate(); err != nil {
-			return nil, err
-		}
-		if p.GatewayModel != "" && cfg.ModelGateway == nil {
-			return nil, fmt.Errorf("%w: model gateway required", ErrInvalid)
-		}
-		if cfg.Sandbox.Mode == SandboxDocker && p.GatewayModel == "" {
-			return nil, fmt.Errorf("%w: Docker mode requires gateway runtime profiles", ErrInvalid)
-		}
-		s.runtimes[id] = p
-	}
-	for _, w := range cfg.Workflows {
-		if w.Acceptance != nil && cfg.Sandbox.Mode != SandboxDocker {
-			return nil, fmt.Errorf("%w: acceptance requires Docker mode", ErrInvalid)
-		}
-		w.Acceptance = cloneAcceptance(w.Acceptance)
-		if w.RuntimeSpec != nil {
-			return nil, fmt.Errorf("%w: runtime_spec is reserved for task snapshots", ErrInvalid)
-		}
-		for _, id := range append([]string{w.Runtime}, w.AllowedRuntimes...) {
-			if id != "" {
-				if _, ok := s.runtimes[id]; !ok {
-					return nil, fmt.Errorf("%w: unknown runtime profile", ErrInvalid)
-				}
-			}
-		}
-		var selectErr error
-		w, selectErr = s.selectRuntime(w, "")
-		if selectErr != nil {
-			return nil, selectErr
-		}
-		if err := validateWorkflow(w); err != nil {
-			return nil, err
-		}
-		if _, exists := s.workflows[w.Name]; exists {
-			return nil, fmt.Errorf("%w: duplicate workflow", ErrInvalid)
-		}
-		w.Artifacts = append([]string(nil), w.Artifacts...)
-		w.AllowedRuntimes = append([]string(nil), w.AllowedRuntimes...)
-		if cfg.Sandbox.Mode == SandboxDocker && w.RuntimeSpec == nil {
-			return nil, fmt.Errorf("%w: Docker mode requires workflow runtime profiles", ErrInvalid)
-		}
-		s.workflows[w.Name] = w
 	}
 	needsChecks := false
 	for _, w := range s.workflows {
 		needsChecks = needsChecks || w.Acceptance != nil
 	}
-	s.packChecks, err = snapshotChecks(root, cfg.PackDir, needsChecks)
-	if err != nil {
+	if s.packChecks, err = snapshotChecks(root, cfg.PackDir, needsChecks); err != nil {
 		return nil, err
 	}
-	if runner == nil {
-		if cfg.Sandbox.Mode == SandboxDocker {
-			cfg.Root = root
-			s.runner, err = NewDockerRunner(cfg)
-		} else {
-			s.runner, err = NewCommandRunner(cfg.Engines, cfg.MaxOutputBytes)
-			if err == nil {
-				s.runner.(*CommandRunner).gateway = cfg.ModelGateway
-			}
-		}
-		if err != nil {
+	if s.runner == nil {
+		cfg.Root = root
+		if s.runner, err = s.newRunner(cfg); err != nil {
 			return nil, err
-		}
-		for _, p := range s.runtimes {
-			if _, ok := cfg.Engines[p.Engine]; !ok {
-				return nil, fmt.Errorf("%w: runtime engine is not configured", ErrInvalid)
-			}
-		}
-		for _, w := range s.workflows {
-			if _, ok := cfg.Engines[w.Engine]; !ok {
-				return nil, fmt.Errorf("%w: workflow engine is not configured", ErrInvalid)
-			}
 		}
 	}
 	s.db, err = bolt.Open(filepath.Join(root, "workshop.db"), 0600, &bolt.Options{Timeout: 200 * time.Millisecond})
@@ -231,6 +152,123 @@ func New(cfg Config, runner Runner) (*Service, error) {
 		go s.worker()
 	}
 	return s, nil
+}
+
+// validateConfig checks every operator rule that needs no filesystem, store or
+// Docker access, so New fails before its first side effect. All sandbox mode
+// rules live here; buildCatalog validates profiles and workflows themselves.
+func validateConfig(cfg Config) error {
+	if cfg.Root == "" || cfg.Concurrency < 1 || cfg.Concurrency > 128 || cfg.QueueCapacity < 0 || cfg.QueueCapacity > 10000 {
+		return fmt.Errorf("%w: root and bounded concurrency/queue are required", ErrInvalid)
+	}
+	docker := cfg.Sandbox.Mode == SandboxDocker
+	if cfg.Sandbox.Mode != "" && cfg.Sandbox.Mode != SandboxHost && !docker {
+		return fmt.Errorf("%w: unknown sandbox mode", ErrInvalid)
+	}
+	if docker {
+		root, err := filepath.Abs(cfg.Root)
+		if err != nil {
+			return err
+		}
+		if err := validateRelaySocketPath(root); err != nil {
+			return err
+		}
+		for _, e := range cfg.Engines {
+			if len(e.EnvAllowlist) != 0 {
+				return fmt.Errorf("%w: Docker mode forbids environment allowlists", ErrInvalid)
+			}
+		}
+	}
+	for _, p := range cfg.RuntimeProfiles {
+		if docker && p.GatewayModel == "" {
+			return fmt.Errorf("%w: Docker mode requires gateway runtime profiles", ErrInvalid)
+		}
+	}
+	for _, w := range cfg.Workflows {
+		if w.Acceptance != nil && !docker {
+			return fmt.Errorf("%w: acceptance requires Docker mode", ErrInvalid)
+		}
+		// buildCatalog resolves a non-empty Runtime into RuntimeSpec or fails.
+		if docker && w.Runtime == "" {
+			return fmt.Errorf("%w: Docker mode requires workflow runtime profiles", ErrInvalid)
+		}
+	}
+	return nil
+}
+
+// buildCatalog validates the runtime profiles and resolves every workflow
+// against them into s.runtimes and s.workflows, copying caller-owned slices.
+func (s *Service) buildCatalog(cfg Config) error {
+	for id, p := range cfg.RuntimeProfiles {
+		if strings.TrimSpace(id) == "" || len(id) > 128 {
+			return ErrInvalid
+		}
+		if err := p.validate(); err != nil {
+			return err
+		}
+		if p.GatewayModel != "" && cfg.ModelGateway == nil {
+			return fmt.Errorf("%w: model gateway required", ErrInvalid)
+		}
+		s.runtimes[id] = p
+	}
+	for _, w := range cfg.Workflows {
+		w.Acceptance = cloneAcceptance(w.Acceptance)
+		if w.RuntimeSpec != nil {
+			return fmt.Errorf("%w: runtime_spec is reserved for task snapshots", ErrInvalid)
+		}
+		for _, id := range append([]string{w.Runtime}, w.AllowedRuntimes...) {
+			if id != "" {
+				if _, ok := s.runtimes[id]; !ok {
+					return fmt.Errorf("%w: unknown runtime profile", ErrInvalid)
+				}
+			}
+		}
+		var err error
+		if w, err = s.selectRuntime(w, ""); err != nil {
+			return err
+		}
+		if err := validateWorkflow(w); err != nil {
+			return err
+		}
+		if _, exists := s.workflows[w.Name]; exists {
+			return fmt.Errorf("%w: duplicate workflow", ErrInvalid)
+		}
+		w.Artifacts = append([]string(nil), w.Artifacts...)
+		w.AllowedRuntimes = append([]string(nil), w.AllowedRuntimes...)
+		s.workflows[w.Name] = w
+	}
+	return nil
+}
+
+// newRunner builds the default runner for cfg.Sandbox.Mode (cfg.Root already
+// resolved) and checks that it has an engine for every catalog entry.
+func (s *Service) newRunner(cfg Config) (Runner, error) {
+	var runner Runner
+	if cfg.Sandbox.Mode == SandboxDocker {
+		docker, err := NewDockerRunner(cfg)
+		if err != nil {
+			return nil, err
+		}
+		runner = docker
+	} else {
+		command, err := NewCommandRunner(cfg.Engines, cfg.MaxOutputBytes)
+		if err != nil {
+			return nil, err
+		}
+		command.gateway = cfg.ModelGateway
+		runner = command
+	}
+	for _, p := range s.runtimes {
+		if _, ok := cfg.Engines[p.Engine]; !ok {
+			return nil, fmt.Errorf("%w: runtime engine is not configured", ErrInvalid)
+		}
+	}
+	for _, w := range s.workflows {
+		if _, ok := cfg.Engines[w.Engine]; !ok {
+			return nil, fmt.Errorf("%w: workflow engine is not configured", ErrInvalid)
+		}
+	}
+	return runner, nil
 }
 
 func validateWorkflow(w Workflow) error {

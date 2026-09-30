@@ -12,12 +12,7 @@ import (
 )
 
 func (r *DockerRunner) checkContainerOptions(name, workspace, checks string, check AcceptanceCheck) []string {
-	args := r.containerOptions(name, workspace, "", true)
-	for i, arg := range args {
-		if arg == "--entrypoint" {
-			args[i+1] = check.Command[0]
-		}
-	}
+	args := r.containerOptions(name, workspace, "", check.Command[0], true)
 	args = append(args, "--mount", "type=bind,src="+checks+",dst=/pack/checks,readonly,bind-propagation=rprivate", r.cfg.Image)
 	return append(args, check.Command[1:]...)
 }

@@ -165,14 +165,14 @@ func TestDockerIntegration(t *testing.T) {
 	// while preserving a foreign container created by this test.
 	orphan, foreign := "easygo-"+uuid.NewString(), "easygo-"+uuid.NewString()
 	host, _ := r.hostPath(workspace)
-	args := r.containerOptions(orphan, host, "", false)
+	args := r.containerOptions(orphan, host, "", taskShimEntrypoint, false)
 	args = append(args, r.cfg.Image, "codex")
 	if _, e := r.output(ctx, args...); e != nil {
 		t.Fatal(e)
 	}
 	other := &DockerRunner{cfg: r.cfg, root: r.root, gateway: r.gateway, maxOutput: r.maxOutput, command: r.command}
 	other.cfg.Owner = "other-" + uuid.NewString()
-	args = other.containerOptions(foreign, host, "", false)
+	args = other.containerOptions(foreign, host, "", taskShimEntrypoint, false)
 	args = append(args, r.cfg.Image, "codex")
 	if _, e := other.output(ctx, args...); e != nil {
 		t.Fatal(e)

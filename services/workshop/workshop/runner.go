@@ -63,7 +63,9 @@ func NewCommandRunner(engines map[string]EngineConfig, maxOutput int) (*CommandR
 	return r, nil
 }
 
-func engineArgs(in Invocation) ([]string, error) {
+// engineArgs builds the native CLI argv. codexSandbox is the Codex sandbox_mode
+// value: the workflow policy on the host, codexContainerSandbox under Docker.
+func engineArgs(in Invocation, codexSandbox string) ([]string, error) {
 	if err := validateWorkflow(in.Workflow); err != nil {
 		return nil, err
 	}
@@ -80,7 +82,7 @@ func engineArgs(in Invocation) ([]string, error) {
 			args = append(args, "resume")
 		}
 		// resume does not accept --sandbox. Config overrides are supported by both.
-		args = append(args, "--json", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "-c", `approval_policy="never"`, "-c", `sandbox_mode="`+string(w.Policy)+`"`, "--model", w.Model)
+		args = append(args, "--json", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "-c", `approval_policy="never"`, "-c", `sandbox_mode="`+codexSandbox+`"`, "--model", w.Model)
 		if in.SessionID != "" {
 			args = append(args, in.SessionID)
 		}
@@ -113,7 +115,7 @@ func (r *CommandRunner) Run(ctx context.Context, in Invocation, emit func(Event)
 	if !ok {
 		return Result{}, errors.New("engine not configured")
 	}
-	args, err := engineArgs(in)
+	args, err := engineArgs(in, string(in.Workflow.Policy))
 	if err != nil {
 		return Result{}, err
 	}

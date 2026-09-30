@@ -1,21 +1,10 @@
-import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { openDatabase, type Database, type Row } from './sqlite.js';
 import type { Message, Response, Run } from './types.js';
 import { RpcError } from './validation.js';
 
-type Row = Record<string, string | number | null>;
 const LEASE_MS = 30_000;
-export class Store {
-  private db: DatabaseSync;
-  private owner = randomUUID();
-  private closed = false;
-  constructor(file: string) {
-    mkdirSync(dirname(file), { recursive: true });
-    this.db = new DatabaseSync(file);
-    try {
-      this.db.exec(`PRAGMA busy_timeout=1000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
+const DDL = `
         CREATE TABLE IF NOT EXISTS ownership (id INTEGER PRIMARY KEY CHECK(id=1), owner TEXT NOT NULL, expires INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, namespace TEXT NOT NULL, created_at TEXT NOT NULL, context TEXT NOT NULL DEFAULT '[]');
         CREATE TABLE IF NOT EXISTS runs (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, namespace TEXT NOT NULL, session_id TEXT NOT NULL REFERENCES sessions(id), status TEXT NOT NULL, created_at TEXT NOT NULL, input TEXT NOT NULL, idempotency_key TEXT NOT NULL, result TEXT, error TEXT, UNIQUE(namespace, session_id, idempotency_key));
@@ -24,61 +13,53 @@ export class Store {
         CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL REFERENCES runs(id), kind TEXT NOT NULL, data TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS messages_session ON messages(session_id, seq);
         CREATE INDEX IF NOT EXISTS events_run ON events(run_id, seq);
-        CREATE TABLE IF NOT EXISTS knowledge_outbox (run_id TEXT PRIMARY KEY REFERENCES runs(id), namespace TEXT NOT NULL);`);
-      this.db.exec('BEGIN IMMEDIATE');
-      const previous = this.db.prepare('SELECT * FROM ownership WHERE id=1').get() as Row | undefined;
-      if (previous && Number(previous.expires) > Date.now())
-        throw new RpcError(-32009, 'database_owned', 'Database already has an active owner');
-      this.db
-        .prepare(
-          'INSERT INTO ownership VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET owner=excluded.owner, expires=excluded.expires'
-        )
-        .run(this.owner, Date.now() + LEASE_MS);
-      if (!(this.db.prepare('PRAGMA table_info(runs)').all() as Row[]).some((r) => r.name === 'workshop_runtime'))
-        this.db.exec("ALTER TABLE runs ADD COLUMN workshop_runtime TEXT NOT NULL DEFAULT ''");
-      const interrupted = this.db.prepare("SELECT id FROM runs WHERE status='running'").all() as Row[];
-      for (const row of interrupted) {
-        const error = { code: 'interrupted', message: 'Previous owner stopped; tools will not be replayed' };
-        this.db.prepare("UPDATE runs SET status='interrupted', error=? WHERE id=?").run(JSON.stringify(error), row.id!);
-        this.event(String(row.id), 'terminal', { status: 'interrupted', error });
-      }
-      this.db.exec('COMMIT');
+        CREATE TABLE IF NOT EXISTS knowledge_outbox (run_id TEXT PRIMARY KEY REFERENCES runs(id), namespace TEXT NOT NULL);`;
+export class Store {
+  private db: Database;
+  private owner = randomUUID();
+  private closed = false;
+  constructor(file: string) {
+    this.db = openDatabase(file, DDL);
+    try {
+      this.db.transaction(() => {
+        const previous = this.db.get('SELECT * FROM ownership WHERE id=1');
+        if (previous && Number(previous.expires) > Date.now())
+          throw new RpcError(-32009, 'database_owned', 'Database already has an active owner');
+        this.db.run(
+          'INSERT INTO ownership VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET owner=excluded.owner, expires=excluded.expires',
+          this.owner,
+          Date.now() + LEASE_MS
+        );
+        if (!this.db.all('PRAGMA table_info(runs)').some((r) => r.name === 'workshop_runtime'))
+          this.db.exec("ALTER TABLE runs ADD COLUMN workshop_runtime TEXT NOT NULL DEFAULT ''");
+        for (const row of this.db.all("SELECT id FROM runs WHERE status='running'")) {
+          const error = { code: 'interrupted', message: 'Previous owner stopped; tools will not be replayed' };
+          this.db.run("UPDATE runs SET status='interrupted', error=? WHERE id=?", JSON.stringify(error), row.id!);
+          this.event(String(row.id), 'terminal', { status: 'interrupted', error });
+        }
+      });
     } catch (error) {
-      try {
-        this.db.exec('ROLLBACK');
-      } catch {
-        /* no transaction */
-      }
       this.db.close();
       throw error;
     }
   }
   assertOwner() {
     if (this.closed) throw new RpcError(-32603, 'storage_closed');
-    const row = this.db.prepare('SELECT * FROM ownership WHERE id=1').get() as Row | undefined;
+    const row = this.db.get('SELECT * FROM ownership WHERE id=1');
     if (row?.owner !== this.owner || Number(row?.expires) <= Date.now()) throw new RpcError(-32603, 'ownership_lost');
   }
   transaction<T>(fn: () => T): T {
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      this.assertOwner();
-      const result = fn();
-      this.db.exec('COMMIT');
-      return result;
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
+    return this.db.transaction(fn, { before: () => this.assertOwner() });
   }
   heartbeat() {
     this.transaction(() =>
-      this.db.prepare('UPDATE ownership SET expires=? WHERE id=1 AND owner=?').run(Date.now() + LEASE_MS, this.owner)
+      this.db.run('UPDATE ownership SET expires=? WHERE id=1 AND owner=?', Date.now() + LEASE_MS, this.owner)
     );
   }
   close() {
     if (this.closed) return;
     try {
-      this.db.prepare('DELETE FROM ownership WHERE id=1 AND owner=?').run(this.owner);
+      this.db.run('DELETE FROM ownership WHERE id=1 AND owner=?', this.owner);
     } finally {
       this.closed = true;
       this.db.close();
@@ -87,48 +68,50 @@ export class Store {
   createSession(ns: string) {
     return this.transaction(() => {
       const session = { id: randomUUID(), namespace: ns, created_at: new Date().toISOString() };
-      this.db
-        .prepare('INSERT INTO sessions(id,namespace,created_at) VALUES(?,?,?)')
-        .run(session.id, ns, session.created_at);
+      this.db.run('INSERT INTO sessions(id,namespace,created_at) VALUES(?,?,?)', session.id, ns, session.created_at);
       return session;
     });
   }
   session(ns: string, id: string): Row {
     this.assertOwner();
-    const row = this.db.prepare('SELECT * FROM sessions WHERE namespace=? AND id=?').get(ns, id) as Row | undefined;
+    const row = this.db.get('SELECT * FROM sessions WHERE namespace=? AND id=?', ns, id);
     if (!row) throw new RpcError(-32004, 'session_not_found');
     return row;
   }
   listSessions(ns: string, offset: number, limit: number) {
     this.assertOwner();
-    const sessions = this.db
-      .prepare('SELECT id,namespace,created_at FROM sessions WHERE namespace=? ORDER BY rowid LIMIT ? OFFSET ?')
-      .all(ns, limit + 1, offset);
+    const sessions = this.db.all(
+      'SELECT id,namespace,created_at FROM sessions WHERE namespace=? ORDER BY rowid LIMIT ? OFFSET ?',
+      ns,
+      limit + 1,
+      offset
+    );
     return { sessions: sessions.slice(0, limit), next_offset: sessions.length > limit ? offset + limit : null };
   }
   history(ns: string, id: string, after: number, limit: number, before?: number) {
     this.session(ns, id);
     if (before !== undefined && after !== 0) throw new RpcError(-32602, 'conflicting_cursors');
-    const rows = (
+    const rows =
       before === undefined
-        ? this.db
-            .prepare(
-              'SELECT seq,run_id,message,metadata FROM messages WHERE session_id=? AND seq>? ORDER BY seq LIMIT ?'
-            )
-            .all(id, after, limit + 1)
-        : this.db
-            .prepare(
-              'SELECT seq,run_id,message,metadata FROM messages WHERE session_id=? AND seq<? ORDER BY seq DESC LIMIT ?'
-            )
-            .all(id, before, limit + 1)
-    ) as Row[];
+        ? this.db.all(
+            'SELECT seq,run_id,message,metadata FROM messages WHERE session_id=? AND seq>? ORDER BY seq LIMIT ?',
+            id,
+            after,
+            limit + 1
+          )
+        : this.db.all(
+            'SELECT seq,run_id,message,metadata FROM messages WHERE session_id=? AND seq<? ORDER BY seq DESC LIMIT ?',
+            id,
+            before,
+            limit + 1
+          );
     const page = rows.slice(0, limit);
     if (before !== undefined) page.reverse();
-    const runRows = this.db
-      .prepare(
-        "SELECT * FROM runs WHERE namespace=? AND session_id=? ORDER BY CASE WHEN status IN ('queued','running') THEN 0 ELSE 1 END, seq DESC LIMIT 101"
-      )
-      .all(ns, id) as Row[];
+    const runRows = this.db.all(
+      "SELECT * FROM runs WHERE namespace=? AND session_id=? ORDER BY CASE WHEN status IN ('queued','running') THEN 0 ELSE 1 END, seq DESC LIMIT 101",
+      ns,
+      id
+    );
     return {
       runs: runRows.slice(0, 100).map((row) => {
         const raw = String(row.input);
@@ -149,22 +132,30 @@ export class Store {
   start(ns: string, session: string, input: string, key: string, runtime = ''): Run {
     return this.transaction(() => {
       this.session(ns, session);
-      const existing = this.db
-        .prepare('SELECT * FROM runs WHERE namespace=? AND session_id=? AND idempotency_key=?')
-        .get(ns, session, key) as Row | undefined;
+      const existing = this.db.get(
+        'SELECT * FROM runs WHERE namespace=? AND session_id=? AND idempotency_key=?',
+        ns,
+        session,
+        key
+      );
       if (existing) {
         if (existing.input !== input || (runtime !== '' && (existing.workshop_runtime ?? '') !== runtime))
           throw new RpcError(-32009, 'idempotency_conflict');
         return this.runView(existing);
       }
-      const count = this.db.prepare("SELECT count(*) AS n FROM runs WHERE status IN ('running','queued')").get() as Row;
+      const count = this.db.get("SELECT count(*) AS n FROM runs WHERE status IN ('running','queued')")!;
       if (Number(count.n) >= 1000) throw new RpcError(-32029, 'queue_full');
       const id = randomUUID();
-      this.db
-        .prepare(
-          "INSERT INTO runs(id,namespace,session_id,status,created_at,input,idempotency_key,workshop_runtime) VALUES(?,?,?,'queued',?,?,?,?)"
-        )
-        .run(id, ns, session, new Date().toISOString(), input, key, runtime);
+      this.db.run(
+        "INSERT INTO runs(id,namespace,session_id,status,created_at,input,idempotency_key,workshop_runtime) VALUES(?,?,?,'queued',?,?,?,?)",
+        id,
+        ns,
+        session,
+        new Date().toISOString(),
+        input,
+        key,
+        runtime
+      );
       this.event(id, 'queued', {});
       return this.get(ns, id);
     });
@@ -183,36 +174,39 @@ export class Store {
   }
   get(ns: string, id: string): Run {
     this.assertOwner();
-    const row = this.db.prepare('SELECT * FROM runs WHERE namespace=? AND id=?').get(ns, id) as Row | undefined;
+    const row = this.db.get('SELECT * FROM runs WHERE namespace=? AND id=?', ns, id);
     if (!row) throw new RpcError(-32004, 'run_not_found');
     return this.runView(row);
   }
   next(busy: Set<string>): Run | undefined {
     this.assertOwner();
-    const rows = this.db.prepare("SELECT * FROM runs WHERE status='queued' ORDER BY seq LIMIT 1000").all() as Row[];
+    const rows = this.db.all("SELECT * FROM runs WHERE status='queued' ORDER BY seq LIMIT 1000");
     const row = rows.find((r) => !busy.has(String(r.session_id)));
     return row && this.runView(row);
   }
   begin(run: Run): Message[] {
     return this.transaction(() => {
-      const row = this.db.prepare("SELECT input FROM runs WHERE id=? AND status='queued'").get(run.id) as
-        Row | undefined;
+      const row = this.db.get("SELECT input FROM runs WHERE id=? AND status='queued'", run.id);
       if (!row) throw new RpcError(-32009, 'run_not_queued');
       const context = JSON.parse(String(this.session(run.namespace, run.session_id).context)) as Message[];
       const user: Message = { role: 'user', content: [{ type: 'text', text: String(row.input) }] };
-      this.db.prepare("UPDATE runs SET status='running' WHERE id=?").run(run.id);
+      this.db.run("UPDATE runs SET status='running' WHERE id=?", run.id);
       this.message(run, user, {});
       this.event(run.id, 'running', {});
       return [...context, user];
     });
   }
   private message(run: Run, message: Message, metadata: unknown) {
-    this.db
-      .prepare('INSERT INTO messages(session_id,run_id,message,metadata) VALUES(?,?,?,?)')
-      .run(run.session_id, run.id, JSON.stringify(message), JSON.stringify(metadata));
+    this.db.run(
+      'INSERT INTO messages(session_id,run_id,message,metadata) VALUES(?,?,?,?)',
+      run.session_id,
+      run.id,
+      JSON.stringify(message),
+      JSON.stringify(metadata)
+    );
   }
   private event(run: string, kind: string, data: unknown) {
-    this.db.prepare('INSERT INTO events(run_id,kind,data) VALUES(?,?,?)').run(run, kind, JSON.stringify(data));
+    this.db.run('INSERT INTO events(run_id,kind,data) VALUES(?,?,?)', run, kind, JSON.stringify(data));
   }
   recordEvent(run: Run, kind: string, data: unknown) {
     this.transaction(() => {
@@ -241,39 +235,42 @@ export class Store {
           cost: response.cost,
           finish_reason: response.finish_reason,
         });
-        this.db.prepare('UPDATE sessions SET context=? WHERE id=?').run(JSON.stringify(context), run.session_id);
-        this.db
-          .prepare('INSERT OR IGNORE INTO knowledge_outbox(run_id,namespace) VALUES(?,?)')
-          .run(run.id, run.namespace);
+        this.db.run('UPDATE sessions SET context=? WHERE id=?', JSON.stringify(context), run.session_id);
+        this.db.run('INSERT OR IGNORE INTO knowledge_outbox(run_id,namespace) VALUES(?,?)', run.id, run.namespace);
       }
-      this.db
-        .prepare('UPDATE runs SET status=?,result=?,error=? WHERE id=?')
-        .run(status, response ? JSON.stringify(response) : null, error ? JSON.stringify(error) : null, run.id);
+      this.db.run(
+        'UPDATE runs SET status=?,result=?,error=? WHERE id=?',
+        status,
+        response ? JSON.stringify(response) : null,
+        error ? JSON.stringify(error) : null,
+        run.id
+      );
       this.event(run.id, 'terminal', { status, ...(error ? { error } : {}) });
       return this.get(run.namespace, run.id);
     });
   }
   knowledgePending(limit = 100): Array<{ namespace: string; run_id: string; messages: Message[] }> {
     this.assertOwner();
-    const rows = this.db
-      .prepare('SELECT namespace,run_id FROM knowledge_outbox ORDER BY rowid LIMIT ?')
-      .all(limit) as Row[];
+    const rows = this.db.all('SELECT namespace,run_id FROM knowledge_outbox ORDER BY rowid LIMIT ?', limit);
     return rows.map((row) => ({
       namespace: String(row.namespace),
       run_id: String(row.run_id),
-      messages: (
-        this.db.prepare('SELECT message FROM messages WHERE run_id=? ORDER BY seq').all(row.run_id!) as Row[]
-      ).map((m) => JSON.parse(String(m.message)) as Message),
+      messages: this.db
+        .all('SELECT message FROM messages WHERE run_id=? ORDER BY seq', row.run_id!)
+        .map((m) => JSON.parse(String(m.message)) as Message),
     }));
   }
   acknowledgeKnowledge(runID: string) {
-    this.transaction(() => this.db.prepare('DELETE FROM knowledge_outbox WHERE run_id=?').run(runID));
+    this.transaction(() => this.db.run('DELETE FROM knowledge_outbox WHERE run_id=?', runID));
   }
   events(ns: string, id: string, after: number, limit: number) {
     this.get(ns, id);
-    const rows = this.db
-      .prepare('SELECT * FROM events WHERE run_id=? AND seq>? ORDER BY seq LIMIT ?')
-      .all(id, after, limit + 1) as Row[];
+    const rows = this.db.all(
+      'SELECT * FROM events WHERE run_id=? AND seq>? ORDER BY seq LIMIT ?',
+      id,
+      after,
+      limit + 1
+    );
     return {
       events: rows
         .slice(0, limit)

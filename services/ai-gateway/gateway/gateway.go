@@ -88,22 +88,22 @@ var _ ai.Client = (*Gateway)(nil)
 // Error never includes provider bodies, URLs, headers or user content. Cause is
 // available through errors.Is/As but is not serialized or included by Error().
 type Error struct {
-	Code    string `json:"code"`
+	Code    Code   `json:"code"`
 	Message string `json:"message"`
 	Status  int    `json:"status,omitempty"`
 	cause   error
 }
 
-func (e *Error) Error() string        { return e.Code + ": " + e.Message }
-func (e *Error) Unwrap() error        { return e.cause }
-func fail(code, message string) error { return &Error{Code: code, Message: message} }
-func caused(code, message string, cause error) error {
+func (e *Error) Error() string             { return string(e.Code) + ": " + e.Message }
+func (e *Error) Unwrap() error             { return e.cause }
+func fail(code Code, message string) error { return &Error{Code: code, Message: message} }
+func caused(code Code, message string, cause error) error {
 	return &Error{Code: code, Message: message, cause: cause}
 }
 
 func New(c Config) (*Gateway, error) {
 	if len(c.Models) == 0 {
-		return nil, fail("invalid_config", "at least one model is required")
+		return nil, fail(CodeInvalidConfig, "at least one model is required")
 	}
 	g := &Gateway{models: make(map[string]Model), observer: c.Observer, bodyLimit: c.MaxResponseBytes, streamLimit: c.MaxStreamBytes, eventLimit: c.MaxEventBytes}
 	if g.bodyLimit == 0 {
@@ -116,7 +116,7 @@ func New(c Config) (*Gateway, error) {
 		g.eventLimit = defaultEventLimit
 	}
 	if g.bodyLimit < 1 || g.streamLimit < 1 || g.eventLimit < 1 {
-		return nil, fail("invalid_config", "limits must be positive")
+		return nil, fail(CodeInvalidConfig, "limits must be positive")
 	}
 	g.billing = c.Billing
 	g.billingMaxOutput = c.BillingMaxOutputTokens
@@ -124,12 +124,12 @@ func New(c Config) (*Gateway, error) {
 		g.billingMaxOutput = 4096
 	}
 	if g.billingMaxOutput < 1 || g.billingMaxOutput > 131072 {
-		return nil, fail("invalid_config", "billing output cap must be 1..131072")
+		return nil, fail(CodeInvalidConfig, "billing output cap must be 1..131072")
 	}
 	g.client = safeClient(c.HTTPClient)
 	for alias, m := range c.Models {
 		if alias == "" || m.Model == "" || !validEndpoint(m.Endpoint) {
-			return nil, fail("invalid_config", "model alias, upstream model and full HTTP endpoint are required")
+			return nil, fail(CodeInvalidConfig, "model alias, upstream model and full HTTP endpoint are required")
 		}
 		switch m.Protocol {
 		case "chat_completions", "responses", "anthropic":
@@ -137,43 +137,43 @@ func New(c Config) (*Gateway, error) {
 			// Managed billing needs a standard bounded protocol; fail at startup
 			// rather than on every request.
 			if c.Billing != nil {
-				return nil, fail("invalid_config", "managed billing requires a standard bounded protocol")
+				return nil, fail(CodeInvalidConfig, "managed billing requires a standard bounded protocol")
 			}
 			if err := validateMapping(m.Custom); err != nil {
 				return nil, err
 			}
 		default:
-			return nil, fail("invalid_config", "unknown protocol")
+			return nil, fail(CodeInvalidConfig, "unknown protocol")
 		}
 		// Make configuration immutable even if the caller later edits its maps.
 		b, err := json.Marshal(m)
 		if err != nil {
-			return nil, fail("invalid_config", "model configuration is not valid JSON")
+			return nil, fail(CodeInvalidConfig, "model configuration is not valid JSON")
 		}
 		var copy Model
 		if json.Unmarshal(b, &copy) != nil {
-			return nil, fail("invalid_config", "invalid model configuration")
+			return nil, fail(CodeInvalidConfig, "invalid model configuration")
 		}
 		copy.APIKey = m.APIKey
 		m = copy
 		for k, v := range m.Headers {
 			if !validHeader(k, v) {
-				return nil, fail("invalid_config", "invalid or reserved header")
+				return nil, fail(CodeInvalidConfig, "invalid or reserved header")
 			}
 		}
 		for src, dst := range m.ParameterMap {
 			if src == "" || dst == "" || strings.Contains(dst, ".") || reserved(src) || reserved(dst) {
-				return nil, fail("invalid_config", "parameter mapping targets a reserved or invalid field")
+				return nil, fail(CodeInvalidConfig, "parameter mapping targets a reserved or invalid field")
 			}
 		}
 		if m.Price != nil {
 			p := m.Price
 			if p.Currency == "" {
-				return nil, fail("invalid_config", "pricing requires currency")
+				return nil, fail(CodeInvalidConfig, "pricing requires currency")
 			}
 			for _, r := range []float64{p.InputPerMillion, p.OutputPerMillion, p.CacheReadPerMillion, p.CacheWritePerMillion} {
 				if math.IsNaN(r) || math.IsInf(r, 0) || r < 0 {
-					return nil, fail("invalid_config", "pricing rates must be finite and nonnegative")
+					return nil, fail(CodeInvalidConfig, "pricing rates must be finite and nonnegative")
 				}
 			}
 		}
@@ -239,16 +239,16 @@ func (g *Gateway) Complete(ctx context.Context, r ai.Request, emit func(ai.Event
 	}
 	defer func() {
 		obs.Usage, obs.Cost = out.Usage, out.Cost
-		if e := g.settleObservation(&obs, start, accounting, price, settle, err, "internal_error"); e != nil {
+		if e := g.settleObservation(&obs, start, accounting, price, settle, err); e != nil {
 			err, out = e, ai.Response{}
 		}
 	}()
 	if ctx.Err() != nil {
-		return out, caused("canceled", "request canceled", ctx.Err())
+		return out, caused(CodeCanceled, "request canceled", ctx.Err())
 	}
 	m, ok := g.models[r.Model]
 	if !ok {
-		return out, fail("unknown_model", "model alias is not configured")
+		return out, fail(CodeUnknownModel, "model alias is not configured")
 	}
 	obs.Protocol = m.Protocol
 	price = m.Price
@@ -258,10 +258,10 @@ func (g *Gateway) Complete(ctx context.Context, r ai.Request, emit func(ai.Event
 	}
 	data, e := json.Marshal(body)
 	if e != nil {
-		return out, fail("invalid_request", "request is not valid JSON")
+		return out, fail(CodeInvalidRequest, "request is not valid JSON")
 	}
 	if int64(len(data)) > g.bodyLimit {
-		return out, fail("request_too_large", "encoded request exceeds limit")
+		return out, fail(CodeRequestTooLarge, "encoded request exceeds limit")
 	}
 	data, settle, e = g.admit(ctx, m, obs.RequestID, r.Model, "gateway.generate", data)
 	if e != nil {
@@ -286,7 +286,7 @@ func (g *Gateway) Complete(ctx context.Context, r ai.Request, emit func(ai.Event
 	}
 	if emit != nil {
 		if !strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
-			return out, fail("invalid_response", "upstream did not return SSE")
+			return out, fail(CodeInvalidResponse, "upstream did not return SSE")
 		}
 		wrapped := func(ev ai.Event) error {
 			if !obs.HasFirstDelta {
@@ -294,7 +294,7 @@ func (g *Gateway) Complete(ctx context.Context, r ai.Request, emit func(ai.Event
 				obs.HasFirstDelta = true
 			}
 			if e := emit(ev); e != nil {
-				return caused("callback_error", "stream callback failed", e)
+				return caused(CodeCallbackError, "stream callback failed", e)
 			}
 			return nil
 		}
@@ -309,11 +309,11 @@ func (g *Gateway) Complete(ctx context.Context, r ai.Request, emit func(ai.Event
 	// Only semantic terminal failures may be followed by a final usage frame.
 	// Callback cancellation/protocol errors must stop the upstream immediately.
 	var semantic *Error
-	if e != nil && accounting != nil && ctx.Err() == nil && errors.As(e, &semantic) && (semantic.Code == "incomplete_response" || semantic.Code == "refused_response") {
+	if e != nil && accounting != nil && ctx.Err() == nil && errors.As(e, &semantic) && (semantic.Code == CodeIncompleteResponse || semantic.Code == CodeRefusedResponse) {
 		_, _ = io.Copy(io.Discard, accounting)
 	}
 	if ctx.Err() != nil {
-		return ai.Response{}, caused("canceled", "request canceled", ctx.Err())
+		return ai.Response{}, caused(CodeCanceled, "request canceled", ctx.Err())
 	}
 	if e != nil {
 		return ai.Response{}, e
@@ -331,7 +331,7 @@ func (g *Gateway) Complete(ctx context.Context, r ai.Request, emit func(ai.Event
 func (g *Gateway) upstream(ctx context.Context, m Model, protocol string, data []byte, accept string, limit int64) (*http.Response, *accountingReader, error) {
 	req, e := http.NewRequestWithContext(ctx, http.MethodPost, m.Endpoint, bytes.NewReader(data))
 	if e != nil {
-		return nil, nil, fail("invalid_config", "invalid endpoint")
+		return nil, nil, fail(CodeInvalidConfig, "invalid endpoint")
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", accept)
@@ -351,9 +351,9 @@ func (g *Gateway) upstream(ctx context.Context, m Model, protocol string, data [
 	resp, e := g.client.Do(req)
 	if e != nil {
 		if ctx.Err() != nil {
-			return nil, nil, caused("canceled", "request canceled", ctx.Err())
+			return nil, nil, caused(CodeCanceled, "request canceled", ctx.Err())
 		}
-		return nil, nil, caused("transport_error", "upstream request failed", e)
+		return nil, nil, caused(CodeTransportError, "upstream request failed", e)
 	}
 	var accounting *accountingReader
 	if protocol != "custom" {
@@ -363,17 +363,17 @@ func (g *Gateway) upstream(ctx context.Context, m Model, protocol string, data [
 		if accounting != nil {
 			_, _ = io.Copy(io.Discard, accounting)
 		}
-		return resp, accounting, &Error{Code: "upstream_http_error", Message: "upstream rejected request", Status: resp.StatusCode}
+		return resp, accounting, &Error{Code: CodeUpstreamHTTPError, Message: "upstream rejected request", Status: resp.StatusCode}
 	}
 	return resp, accounting, nil
 }
 
 // settleObservation completes obs when a call returns: latency, accounted usage
-// and cost, the error code (fallback for errors that are not *Error), billing
-// settlement and the observer. It returns billing_unavailable only when
+// and cost, the error code (internal_error for errors that are not *Error),
+// billing settlement and the observer. It returns billing_unavailable only when
 // settlement fails for an otherwise successful call; the caller must then
 // discard its result.
-func (g *Gateway) settleObservation(obs *Observation, start time.Time, accounting *accountingReader, price *Pricing, settle func(Observation) error, err error, fallback string) error {
+func (g *Gateway) settleObservation(obs *Observation, start time.Time, accounting *accountingReader, price *Pricing, settle func(Observation) error, err error) error {
 	obs.Latency = time.Since(start)
 	if accounting != nil {
 		obs.Usage = accounting.Usage()
@@ -381,18 +381,17 @@ func (g *Gateway) settleObservation(obs *Observation, start time.Time, accountin
 	}
 	if err != nil {
 		var e *Error
+		obs.ErrorCode = string(CodeInternal)
 		if errors.As(err, &e) {
-			obs.ErrorCode = e.Code
-		} else {
-			obs.ErrorCode = fallback
+			obs.ErrorCode = string(e.Code)
 		}
 	}
 	var unrecorded error
 	if settle != nil {
 		if e := settle(*obs); e != nil {
-			obs.ErrorCode = "billing_unavailable"
+			obs.ErrorCode = string(CodeBillingUnavailable)
 			if err == nil {
-				unrecorded = fail("billing_unavailable", "usage could not be durably recorded")
+				unrecorded = fail(CodeBillingUnavailable, "usage could not be durably recorded")
 			}
 		}
 	}
@@ -405,10 +404,10 @@ func (g *Gateway) settleObservation(obs *Observation, start time.Time, accountin
 func readBounded(r io.Reader, limit int64) ([]byte, error) {
 	b, e := io.ReadAll(io.LimitReader(r, limit+1))
 	if e != nil {
-		return nil, caused("read_error", "response read failed", e)
+		return nil, caused(CodeReadError, "response read failed", e)
 	}
 	if int64(len(b)) > limit {
-		return nil, fail("response_too_large", "response exceeds limit")
+		return nil, fail(CodeResponseTooLarge, "response exceeds limit")
 	}
 	return b, nil
 }

@@ -1,9 +1,10 @@
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
-import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { fields, object, string, RpcError } from '../validation.js';
 import { API_BODY_ERRORS, closeOnce, listen, parseListen, readJsonBody } from '../http.js';
-import { PlatformStore, Wallet, count, type Row } from './store.js';
+import type { Row } from '../sqlite.js';
+import { PlatformStore, Wallet, count } from './store.js';
 import { createClientAddress } from './client-address.mjs';
 
 export interface PlatformConfig {
@@ -135,20 +136,12 @@ export async function createPlatform(
       const address = email(p.email),
         env = string(p.password_env, 128);
       if (!/^[A-Z][A-Z0-9_]*$/.test(env)) throw new Error('Invalid bootstrap password environment name');
-      const existing = store.get('SELECT * FROM accounts WHERE email=?', address);
+      const existing = store.accountByEmail(address);
       if (existing && existing.role !== 'admin') throw new Error('Bootstrap email already belongs to a non-admin');
       if (!existing) {
         const hash = await hashPassword(password(process.env[env]));
         store.transaction(() => {
-          const id = randomUUID();
-          store.run(
-            "INSERT INTO accounts(id,email,password,namespace,role,created_at) VALUES(?,?,?,?,'admin',?)",
-            id,
-            address,
-            hash,
-            `u-${id}`,
-            new Date().toISOString()
-          );
+          const id = store.createAccount(address, hash, 'admin');
           store.audit('bootstrap', 'admin_created', id);
         });
       }
@@ -172,13 +165,7 @@ export async function createPlatform(
   }
   function authenticate(req: IncomingMessage) {
     const session = token(req);
-    const a =
-      session &&
-      store.get(
-        'SELECT a.* FROM accounts a JOIN auth_sessions s ON s.user_id=a.id WHERE s.hash=? AND s.expires>? AND a.disabled=0',
-        digest(session),
-        Date.now()
-      );
+    const a = session && store.authenticate(digest(session), Date.now());
     if (!a) throw new RpcError(-32001, 'authentication_required');
     return a;
   }
@@ -191,13 +178,8 @@ export async function createPlatform(
   function session(req: IncomingMessage, res: ServerResponse, a: Row) {
     const value = randomBytes(32).toString('hex');
     store.transaction(() => {
-      store.run('DELETE FROM auth_sessions WHERE expires<=? OR hash=?', Date.now(), digest(token(req)));
-      store.run(
-        'DELETE FROM auth_sessions WHERE user_id=? AND hash NOT IN (SELECT hash FROM auth_sessions WHERE user_id=? ORDER BY expires DESC LIMIT 19)',
-        a.id!,
-        a.id!
-      );
-      store.run('INSERT INTO auth_sessions VALUES(?,?,?)', digest(value), a.id!, Date.now() + SESSION_MS);
+      store.sessionPrune(String(a.id), digest(token(req)), Date.now());
+      store.sessionCreate(digest(value), String(a.id), Date.now() + SESSION_MS);
     });
     cookie(res, value, SESSION_MS / 1000);
   }
@@ -257,24 +239,15 @@ export async function createPlatform(
             if (!config.registration) throw new RpcError(-32003, 'registration_disabled');
             const hash = await hashPassword(pass);
             const a = store.transaction(() => {
-              if (store.get('SELECT id FROM accounts WHERE email=?', address))
-                throw new RpcError(-32009, 'registration_unavailable');
-              const id = randomUUID();
-              store.run(
-                "INSERT INTO accounts(id,email,password,namespace,role,created_at) VALUES(?,?,?,?,'user',?)",
-                id,
-                address,
-                hash,
-                `u-${id}`,
-                new Date().toISOString()
-              );
+              if (store.accountByEmail(address)) throw new RpcError(-32009, 'registration_unavailable');
+              const id = store.createAccount(address, hash, 'user');
               store.audit(id, 'registered', id);
-              return store.get('SELECT * FROM accounts WHERE id=?', id)!;
+              return store.accountById(id)!;
             });
             session(req, res, a);
             json(res, { user: userView(a) }, 201);
           } else {
-            const a = store.get('SELECT * FROM accounts WHERE email=?', address);
+            const a = store.accountByEmail(address);
             const ok = await matches(pass, String(a?.password ?? dummyHash));
             if (!a || !ok || a.disabled) throw new RpcError(-32001, 'invalid_credentials');
             session(req, res, a);
@@ -292,7 +265,7 @@ export async function createPlatform(
       if (method === 'POST' && path === '/api/logout') {
         fields(await body(req), []);
         store.transaction(() => {
-          store.run('DELETE FROM auth_sessions WHERE hash=?', digest(token(req)));
+          store.sessionRevoke(digest(token(req)));
           store.audit(String(a.id), 'logout', String(a.id));
         });
         cookie(res, '', 0);
@@ -337,10 +310,7 @@ export async function createPlatform(
         }
         if (method === 'GET' && path === '/api/admin/users') {
           const offset = count(Number(url.searchParams.get('offset') ?? 0), 1_000_000);
-          const rows = store.all(
-            'SELECT id,email,namespace,role,disabled,balance,held,created_at FROM accounts ORDER BY rowid LIMIT 101 OFFSET ?',
-            offset
-          );
+          const rows = store.usersPage(offset, 101);
           json(res, { users: rows.slice(0, 100), next_offset: rows.length > 100 ? offset + 100 : null });
           return;
         }

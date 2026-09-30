@@ -1,10 +1,8 @@
-import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
+import type { SQLInputValue } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { openDatabase, type Database, type Row } from '../sqlite.js';
 import { fields, namespace, string, RpcError } from '../validation.js';
 
-export type Row = Record<string, string | number | null>;
 export function count(value: unknown, max = Number.MAX_SAFE_INTEGER): number {
   if (!Number.isSafeInteger(value) || Number(value) < 0 || Number(value) > max)
     throw new RpcError(-32602, 'invalid_integer');
@@ -15,13 +13,8 @@ function safe(value: bigint): number {
     throw new RpcError(-32602, 'credit_overflow');
   return Number(value);
 }
-export class PlatformStore {
-  readonly db: DatabaseSync;
-  constructor(file: string) {
-    mkdirSync(dirname(file), { recursive: true });
-    this.db = new DatabaseSync(file);
-    try {
-      this.db.exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
+// Schema and seed rows are applied in one transaction so concurrent openers agree.
+const DDL = `
         BEGIN IMMEDIATE;
         CREATE TABLE IF NOT EXISTS platform_migrations(version INTEGER PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS accounts(id TEXT PRIMARY KEY,email TEXT UNIQUE NOT NULL,password TEXT NOT NULL,namespace TEXT UNIQUE NOT NULL,role TEXT NOT NULL CHECK(role IN ('user','admin')),disabled INTEGER NOT NULL DEFAULT 0,balance INTEGER NOT NULL DEFAULT 0,held INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL);
@@ -46,31 +39,23 @@ export class PlatformStore {
         INSERT OR IGNORE INTO tariffs(version,input_micros,output_micros,created_at,actor) VALUES(1,1000,1000,strftime('%Y-%m-%dT%H:%M:%fZ','now'),'bootstrap');
         INSERT OR IGNORE INTO platform_migrations VALUES(1);
         INSERT OR IGNORE INTO platform_migrations VALUES(2);
-        COMMIT;`);
-    } catch (e) {
-      this.db.close();
-      throw e;
-    }
+        COMMIT;`;
+export class PlatformStore {
+  private db: Database;
+  constructor(file: string) {
+    this.db = openDatabase(file, DDL);
   }
   get(sql: string, ...args: SQLInputValue[]): Row | undefined {
-    return this.db.prepare(sql).get(...args) as Row | undefined;
+    return this.db.get(sql, ...args);
   }
   all(sql: string, ...args: SQLInputValue[]): Row[] {
-    return this.db.prepare(sql).all(...args) as Row[];
+    return this.db.all(sql, ...args);
   }
   run(sql: string, ...args: SQLInputValue[]) {
-    return this.db.prepare(sql).run(...args);
+    return this.db.run(sql, ...args);
   }
   transaction<T>(fn: () => T): T {
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      const result = fn();
-      this.db.exec('COMMIT');
-      return result;
-    } catch (e) {
-      this.db.exec('ROLLBACK');
-      throw e;
-    }
+    return this.db.transaction(fn);
   }
   audit(actor: string, action: string, subject: string, detail = '') {
     this.run(
@@ -86,6 +71,57 @@ export class PlatformStore {
     const row = this.get('SELECT * FROM accounts WHERE namespace=?', ns);
     if (!row || row.disabled) throw new RpcError(-32003, 'account_unavailable');
     return row;
+  }
+  accountByEmail(email: string): Row | undefined {
+    return this.get('SELECT * FROM accounts WHERE email=?', email);
+  }
+  accountById(id: string): Row | undefined {
+    return this.get('SELECT * FROM accounts WHERE id=?', id);
+  }
+  // Returns the new account id. Callers run it in a transaction together with their audit row.
+  createAccount(email: string, passwordHash: string, role: 'user' | 'admin'): string {
+    const id = randomUUID();
+    this.run(
+      'INSERT INTO accounts(id,email,password,namespace,role,created_at) VALUES(?,?,?,?,?,?)',
+      id,
+      email,
+      passwordHash,
+      `u-${id}`,
+      role,
+      new Date().toISOString()
+    );
+    return id;
+  }
+  // The enabled account behind an unexpired session hash.
+  authenticate(sessionHash: string, now: number): Row | undefined {
+    return this.get(
+      'SELECT a.* FROM accounts a JOIN auth_sessions s ON s.user_id=a.id WHERE s.hash=? AND s.expires>? AND a.disabled=0',
+      sessionHash,
+      now
+    );
+  }
+  // Drops expired sessions and the one being replaced, then keeps the user's 19 newest so
+  // that the session about to be created makes at most 20.
+  sessionPrune(userId: string, replacedHash: string, now: number) {
+    this.run('DELETE FROM auth_sessions WHERE expires<=? OR hash=?', now, replacedHash);
+    this.run(
+      'DELETE FROM auth_sessions WHERE user_id=? AND hash NOT IN (SELECT hash FROM auth_sessions WHERE user_id=? ORDER BY expires DESC LIMIT 19)',
+      userId,
+      userId
+    );
+  }
+  sessionCreate(hash: string, userId: string, expires: number) {
+    this.run('INSERT INTO auth_sessions VALUES(?,?,?)', hash, userId, expires);
+  }
+  sessionRevoke(hash: string) {
+    this.run('DELETE FROM auth_sessions WHERE hash=?', hash);
+  }
+  usersPage(offset: number, limit: number): Row[] {
+    return this.all(
+      'SELECT id,email,namespace,role,disabled,balance,held,created_at FROM accounts ORDER BY rowid LIMIT ? OFFSET ?',
+      limit,
+      offset
+    );
   }
   tariff() {
     return this.get('SELECT * FROM tariffs ORDER BY version DESC LIMIT 1')!;

@@ -5,25 +5,20 @@
 // oracle judges the workspace. The provider key is read from a file and given
 // only to the gateway process; it is never printed or written to evidence.
 import assert from 'node:assert/strict';
-import { spawn, execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import { once } from 'node:events';
-import net from 'node:net';
-import { mkdir, mkdtemp, writeFile, readFile, readdir, lstat } from 'node:fs/promises';
-import { openSync, closeSync, createReadStream } from 'node:fs';
+import { mkdir, mkdtemp, readFile, readdir, lstat } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { createRPCClient } from './rpc-call.mjs';
-const exec = promisify(execFile),
-  root = resolve(fileURLToPath(new URL('..', import.meta.url)));
+import { buildServices, exec, loopServer, ports, root, testbed, until } from './lib/procs.mjs';
+import { createPKI } from './lib/pki.mjs';
+import { localPlatform, writeConfigs } from './lib/config.mjs';
+import { browser } from './lib/web.mjs';
 const env = (name) => {
   const v = process.env[name];
   if (!v) throw Error('Missing ' + name);
   return v;
 };
-const go = process.env.EASYGO_GO_BIN ?? 'go',
-  docker = env('EASYGO_DOCKER_TEST_BINARY'),
+const docker = env('EASYGO_DOCKER_TEST_BINARY'),
   endpoint = env('EASYGO_DOCKER_TEST_ENDPOINT');
 const image = process.env.EASYGO_LIVE_RUNTIME_IMAGE ?? 'easygo-task-runtime:platform',
   runtime = process.env.EASYGO_LIVE_RUNTIME ?? 'codex',
@@ -62,82 +57,8 @@ const report = {
   rounds: [],
   paid_provider: true,
 };
-const children = [],
-  clients = [];
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function save() {
-  await writeFile(join(state, 'report.json'), JSON.stringify(report, null, 2));
-}
-async function port() {
-  const s = net.createServer();
-  s.listen(0, '127.0.0.1');
-  await once(s, 'listening');
-  const p = s.address().port;
-  await new Promise((r) => s.close(r));
-  return p;
-}
-async function until(fn, timeout, interval) {
-  const end = Date.now() + timeout;
-  while (Date.now() < end) {
-    const result = await fn();
-    if (result) return result;
-    await sleep(interval);
-  }
-  throw Error('Timed out waiting for condition');
-}
-function start(name, bin, args, extra = {}) {
-  const fd = openSync(join(state, name + '.log'), 'a', 0o600);
-  const child = spawn(bin, args, {
-    cwd: root,
-    env: { PATH: process.env.PATH, LANG: 'C.UTF-8', ...extra },
-    stdio: ['ignore', fd, fd],
-  });
-  closeSync(fd);
-  const entry = {
-    name,
-    child,
-    done: new Promise((r) => {
-      child.once('error', (e) => r({ error: e.message }));
-      child.once('exit', (code, signal) => r({ code, signal }));
-    }),
-  };
-  children.push(entry);
-  return entry;
-}
-async function stop(e) {
-  if (e.child.exitCode === null && e.child.signalCode === null) e.child.kill('SIGTERM');
-  let timer;
-  await Promise.race([
-    e.done,
-    new Promise((r) => {
-      timer = setTimeout(() => {
-        e.child.kill('SIGKILL');
-        r();
-      }, 12000);
-    }),
-  ]);
-  clearTimeout(timer);
-}
-function browser(origin) {
-  let cookie = '';
-  return {
-    async request(path, body, method = body === undefined ? 'GET' : 'POST', expected = 200) {
-      const r = await fetch(origin + path, {
-        method,
-        headers: { 'Content-Type': 'application/json', Origin: origin, ...(cookie ? { Cookie: cookie } : {}) },
-        body: body === undefined ? undefined : JSON.stringify(body),
-      });
-      const set = r.headers.get('set-cookie');
-      if (set) cookie = set.split(';')[0];
-      const value = await r.json();
-      assert.equal(r.status, expected, JSON.stringify(value));
-      return value;
-    },
-    async rpc(method, params = {}) {
-      return (await this.request('/api/rpc', { method, params })).result;
-    },
-  };
-}
+const clients = [];
+const bed = testbed(state, { report });
 async function oracle(workspace) {
   const started = Date.now();
   const args = [
@@ -214,63 +135,20 @@ async function scanForKey(dir, found = []) {
 }
 try {
   const spec = await readFile(join(root, 'scripts/platform-project-spec.md'), 'utf8');
-  await exec('bash', [join(root, 'scripts/dev-pki.sh'), join(state, 'pki')]);
-  await exec(go, ['build', '-o', join(state, 'gateway'), './cmd/server'], { cwd: join(root, 'services/ai-gateway') });
-  await exec(go, ['build', '-o', join(state, 'workshop'), './cmd/server'], { cwd: join(root, 'services/workshop') });
-  await exec('npm', ['run', 'build'], { cwd: join(root, 'services/agent-loop') });
-  const [gp, wp, ap, hp] = await Promise.all([port(), port(), port(), port()]);
+  const certs = await createPKI(join(state, 'pki'));
+  await buildServices(state);
+  const [gp, wp, ap, hp] = await ports(4);
   const origin = `http://127.0.0.1:${hp}`;
-  const identity = (n) => ({
-    cert_file: join(state, 'pki', n, 'tls.crt'),
-    key_file: join(state, 'pki', n, 'tls.key'),
-    ca_file: join(state, 'pki/public/ca.crt'),
-  });
-  const cert = (n) => join(state, 'pki/public', n + '.crt');
-  const ep = (n, p) => ({ url: `https://127.0.0.1:${p}/rpc`, peer_certificate_file: cert(n) });
-  const grant = (id, methods, namespaces = ['*']) => ({ id, cert_file: cert(id), methods, namespaces });
-  const gateway = JSON.parse(await readFile(join(root, 'services/ai-gateway/config.deepseek.example.json'), 'utf8'));
-  Object.assign(gateway, {
-    listen: `127.0.0.1:${gp}`,
-    tls: identity('ai-gateway'),
-    authorization: [
-      grant('client', ['health']),
-      grant('agent-loop', ['gateway.generate', 'gateway.models']),
-      grant('workshop', ['gateway.native']),
-    ],
-    meter: { ...ep('agent-loop', ap), database: join(state, 'meter.db'), max_output_tokens: maxOutput },
-  });
-  for (const [alias, m] of Object.entries(gateway.models)) {
-    m.model = model;
-    m.parameters = alias === 'responses' ? { reasoning: { effort: 'low' } } : { thinking: { type: 'disabled' } };
-  }
-  const workshopConfig = JSON.parse(
-    await readFile(join(root, 'services/workshop/config.runtimes.example.json'), 'utf8')
-  ).workshop;
   const profiles = { codex: 'codex-responses', claude: 'claude-messages', pi: 'pi-main', openclaw: 'openclaw-main' };
   assert.ok(profiles[runtime], 'runtime must be codex, claude, pi or openclaw');
-  const workshop = {
-    listen: `127.0.0.1:${wp}`,
-    tls: identity('workshop'),
-    authorization: [
-      grant('client', ['health']),
-      grant('agent-loop', [
-        'workshop.workflows',
-        'workshop.submit',
-        'workshop.get',
-        'workshop.list',
-        'workshop.cancel',
-        'workshop.resume',
-        'workshop.events',
-        'workshop.result',
-        'workshop.artifact',
-      ]),
-    ],
-    workshop: {
-      root: join(state, 'workshop-data'),
-      concurrency: 1,
-      queue_capacity: 4,
-      max_output_bytes: 4194304,
-      model_gateway: { ...ep('ai-gateway', gp), tls: identity('workshop') },
+  const { gateway, workshop, loop } = await localPlatform(
+    state,
+    certs,
+    { 'ai-gateway': gp, workshop: wp, 'agent-loop': ap, web: hp },
+    {
+      maxOutputTokens: maxOutput,
+      concurrency: 4,
+      consolidateIntervalMs: 86400000,
       sandbox: {
         mode: 'docker',
         docker_binary: docker,
@@ -283,90 +161,50 @@ try {
         pids_limit: 256,
         tmpfs_bytes: 268435456,
       },
-      engines: workshopConfig.engines,
-      runtime_profiles: workshopConfig.runtime_profiles,
-      workflows: [
-        {
-          name: 'build-project',
-          version: '1',
-          instructions:
-            'Implement the software project specified in the user input inside the current workspace. Create exactly the files it lists, using Node.js built-ins only; nothing can be installed and there is no network. Run the project and its tests with node to check your work before finishing, then summarize what you built.',
-          runtime: profiles[runtime],
-          policy: 'workspace-write',
-          timeout_seconds: taskSeconds,
-          artifacts: [
-            'package.json',
-            'src/store.mjs',
-            'src/server.mjs',
-            'bin/server.mjs',
-            'README.md',
-            'tests/smoke.test.mjs',
-          ],
-        },
-      ],
-    },
-  };
-  const loop = {
-    listen: `127.0.0.1:${ap}`,
-    tls: identity('agent-loop'),
-    authorization: [
-      grant('client', ['health']),
-      grant('ai-gateway', ['platform.wallet.reserve', 'platform.wallet.settle']),
-    ],
-    database: join(state, 'agent.sqlite'),
-    gateway: ep('ai-gateway', gp),
-    workshop: ep('workshop', wp),
-    model: 'chat',
-    streaming: true,
-    max_steps: 20,
-    concurrency: 4,
-    context_bytes: 128000,
-    platform: {
-      listen: `127.0.0.1:${hp}`,
-      database: join(state, 'platform.sqlite'),
-      public_origin: origin,
-      secure_cookies: false,
-      registration: true,
-      bootstrap_admin: { email: 'admin@example.test', password_env: 'LIVE_ADMIN_PASSWORD' },
-    },
-    knowledge: { database: join(state, 'knowledge.sqlite'), profile_limit: 5, consolidate_interval_ms: 86400000 },
-  };
-  for (const [name, config] of Object.entries({ gateway, workshop, loop }))
-    await writeFile(join(state, name + '.json'), JSON.stringify(config), { mode: 0o600 });
-  const adminPassword = 'live-admin-' + randomUUID();
-  start('gateway', join(state, 'gateway'), ['--config', join(state, 'gateway.json')], { DEEPSEEK_API_KEY: key });
-  start('workshop', join(state, 'workshop'), ['--config', join(state, 'workshop.json')]);
-  start(
-    'loop',
-    process.execPath,
-    [join(root, 'services/agent-loop/dist/server.js'), '--config', join(state, 'loop.json')],
-    { LIVE_ADMIN_PASSWORD: adminPassword }
+    }
   );
+  for (const [alias, m] of Object.entries(gateway.models)) {
+    m.model = model;
+    m.parameters = alias === 'responses' ? { reasoning: { effort: 'low' } } : { thinking: { type: 'disabled' } };
+  }
+  Object.assign(workshop.workshop, {
+    concurrency: 1,
+    queue_capacity: 4,
+    workflows: [
+      {
+        name: 'build-project',
+        version: '1',
+        instructions:
+          'Implement the software project specified in the user input inside the current workspace. Create exactly the files it lists, using Node.js built-ins only; nothing can be installed and there is no network. Run the project and its tests with node to check your work before finishing, then summarize what you built.',
+        runtime: profiles[runtime],
+        policy: 'workspace-write',
+        timeout_seconds: taskSeconds,
+        artifacts: [
+          'package.json',
+          'src/store.mjs',
+          'src/server.mjs',
+          'bin/server.mjs',
+          'README.md',
+          'tests/smoke.test.mjs',
+        ],
+      },
+    ],
+  });
+  await writeConfigs(state, { gateway, workshop, loop });
+  const adminPassword = 'live-admin-' + randomUUID();
+  bed.start('gateway', join(state, 'gateway'), ['--config', join(state, 'gateway.json')], { DEEPSEEK_API_KEY: key });
+  bed.start('workshop', join(state, 'workshop'), ['--config', join(state, 'workshop.json')]);
+  bed.start('loop', process.execPath, [loopServer, '--config', join(state, 'loop.json')], {
+    EASYGO_ADMIN_PASSWORD: adminPassword,
+  });
   for (const [name, p] of [
     ['ai-gateway', gp],
     ['workshop', wp],
     ['agent-loop', ap],
   ]) {
-    const tls = identity('client');
-    const c = createRPCClient({
-      url: ep(name, p).url,
-      certFile: tls.cert_file,
-      keyFile: tls.key_file,
-      caFile: tls.ca_file,
-      peerCertificateFile: cert(name),
-    });
+    const c = certs.client('client', name, p);
     clients.push(c);
-    await until(
-      async () => {
-        try {
-          return await c.health();
-        } catch {
-          return false;
-        }
-      },
-      30000,
-      250
-    );
+    await until(() => c.health(), { timeout: 30000, interval: 250, retryErrors: true });
   }
   const admin = browser(origin),
     user = browser(origin);
@@ -396,8 +234,7 @@ try {
         const t = await user.rpc('workshop.get', { task_id: id });
         return !['queued', 'running', 'cancelling'].includes(t.status) && t;
       },
-      (taskSeconds + 120) * 1000,
-      5000
+      { timeout: (taskSeconds + 120) * 1000, interval: 5000 }
     );
   let task = await user.rpc('workshop.submit', {
     workflow: 'build-project',
@@ -420,7 +257,7 @@ try {
       artifacts: (run?.artifacts ?? []).map((a) => ({ path: a.path, size: a.size })),
       oracle: verdict,
     });
-    await save();
+    await bed.save();
     console.log(
       `ROUND ${round} task=${task.status} oracle=${verdict.ok ? 'pass' : 'fail'} ${verdict.phase ?? ''} ${verdict.failure ?? ''}`
     );
@@ -428,7 +265,7 @@ try {
     const failure = `The independent acceptance test failed in phase "${verdict.phase ?? 'unknown'}": ${verdict.failure ?? 'no detail'}. Re-read the specification from the first message, fix the project in place, keep exactly the six files, run your own checks with node, then summarize.`;
     task = await user.rpc('workshop.resume', { task_id: task.id, input: failure });
   }
-  await until(async () => (await user.request('/api/wallet')).held_micros === 0, 120000, 2000);
+  await until(async () => (await user.request('/api/wallet')).held_micros === 0, { timeout: 120000, interval: 2000 });
   // A real agent can make well over one page (100) of model calls; read every page.
   const receipts = [];
   for (let offset = 0; offset !== null;) {
@@ -459,7 +296,7 @@ try {
   process.exitCode = 1;
 } finally {
   clients.forEach((c) => c.close());
-  for (const c of children.reverse()) await stop(c);
+  await bed.stopAll();
   // After every process stopped: nothing under the state directory (task workspaces,
   // native HOMEs, service logs, configs, report) may contain the provider key.
   try {
@@ -475,6 +312,6 @@ try {
     report.key_scan_error = e.message;
     process.exitCode = 1;
   }
-  await save();
+  await bed.save();
   console.log('REPORT ' + join(state, 'report.json'));
 }

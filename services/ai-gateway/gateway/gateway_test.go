@@ -57,7 +57,7 @@ func newTestGateway(t *testing.T, protocol, url string, observer Observer) *Gate
 func requireCode(t *testing.T, err error, code string) {
 	t.Helper()
 	var e *Error
-	if !errors.As(err, &e) || e.Code != code {
+	if !errors.As(err, &e) || string(e.Code) != code {
 		t.Fatalf("error = %v, want code %s", err, code)
 	}
 }
@@ -682,5 +682,32 @@ func TestCompleteDoesNotReturnPartialFailure(t *testing.T) {
 	}
 	if raw, _ := json.Marshal(out); strings.Contains(string(raw), "private partial") || strings.Contains(e.Error(), "private partial") {
 		t.Fatalf("partial output exposed: %s %v", raw, e)
+	}
+}
+func TestSettleObservationErrorCodes(t *testing.T) {
+	var got []Observation
+	g := &Gateway{observer: func(o Observation) { got = append(got, o) }}
+	settleFails := func(Observation) error { return errors.New("wallet down") }
+	for _, tc := range []struct {
+		err        error
+		settle     func(Observation) error
+		code       string
+		unrecorded bool
+	}{
+		{errors.New("not a gateway error"), nil, "internal_error", false},
+		{fmt.Errorf("wrapped: %w", fail(CodeTruncatedStream, "x")), nil, "truncated_stream", false},
+		{nil, nil, "", false},
+		{nil, settleFails, "billing_unavailable", true},
+		{fail(CodeCanceled, "x"), settleFails, "billing_unavailable", false},
+	} {
+		got = nil
+		obs := Observation{RequestID: "r"}
+		e := g.settleObservation(&obs, time.Now(), nil, nil, tc.settle, tc.err)
+		if (e != nil) != tc.unrecorded || len(got) != 1 || got[0].ErrorCode != tc.code {
+			t.Fatalf("err=%v: returned %v, observed %+v, want code %q", tc.err, e, got, tc.code)
+		}
+		if tc.unrecorded {
+			requireCode(t, e, "billing_unavailable")
+		}
 	}
 }

@@ -15,7 +15,7 @@ const dist = process.env.EASYGO_KNOWLEDGE_PLATFORM_DIST ?? fileURLToPath(new URL
 // The Go half runs the remote TUI adapter test from the repository root.
 const repo = resolve(fileURLToPath(new URL('../../../', import.meta.url)));
 const go =
-  process.env.EASYGO_GO ??
+  process.env.EASYGO_GO_BIN ??
   (process.env.PATH ?? '')
     .split(delimiter)
     .filter(Boolean)
@@ -26,7 +26,7 @@ test(
   {
     skip:
       !existsSync(join(dist, 'platform/server.js')) ||
-      (!go && 'needs Go: set EASYGO_GO or put go on PATH') ||
+      (!go && 'needs Go: set EASYGO_GO_BIN or put go on PATH') ||
       (!existsSync(join(repo, 'internal/remotetui')) && 'needs the repository internal/remotetui'),
     timeout: 60000,
   },

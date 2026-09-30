@@ -1,0 +1,19 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+
+formatters:
+  enable:
+    - gofmt
+
+issues:
+  # Report every finding instead of the default 50 per linter / 3 identical.
+  max-issues-per-linter: 0
+  max-same-issues: 0

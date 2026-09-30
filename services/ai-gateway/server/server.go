@@ -104,24 +104,10 @@ func Methods(g *gateway.Gateway) map[string]rpc.Method {
 	}
 }
 func domainError(err error) *rpc.Error {
+	code := gateway.CodeInternal
 	var e *gateway.Error
 	if errors.As(err, &e) {
-		switch e.Code {
-		case "insufficient_credits":
-			return rpc.Failure(-32002, e.Code)
-		case "duplicate_request":
-			return rpc.Failure(-32009, e.Code)
-		case "billing_identity_required":
-			return rpc.Failure(-32003, e.Code)
-		case "billing_unavailable":
-			return rpc.Failure(-32000, e.Code)
-		case "invalid_request", "invalid_parameters", "unsupported_capability", "request_too_large":
-			return rpc.Failure(-32602, e.Code)
-		case "unknown_model":
-			return rpc.Failure(-32004, e.Code)
-		case "upstream_http_error", "upstream_error", "invalid_response", "truncated_stream", "incomplete_response", "refused_response", "canceled", "response_too_large", "transport_error", "stream_read_error", "callback_error":
-			return rpc.Failure(-32000, e.Code)
-		}
+		code = e.Code
 	}
-	return rpc.Failure(-32603, "internal_error")
+	return rpc.Failure(gateway.RPCError(code))
 }

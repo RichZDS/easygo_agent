@@ -20,7 +20,7 @@ type limitedStream struct {
 
 func (r *limitedStream) Read(b []byte) (int, error) {
 	if r.remaining <= 0 {
-		return 0, fail("response_too_large", "stream exceeds limit")
+		return 0, fail(CodeResponseTooLarge, "stream exceeds limit")
 	}
 	if int64(len(b)) > r.remaining {
 		b = b[:r.remaining]
@@ -67,7 +67,7 @@ func readSSE(r io.Reader, total int64, eventLimit int, handle func(string, []byt
 			event = value
 		case "data":
 			if data.Len()+len(value)+1 > eventLimit {
-				return fail("response_too_large", "SSE event exceeds limit")
+				return fail(CodeResponseTooLarge, "SSE event exceeds limit")
 			}
 			data.WriteString(value)
 			data.WriteByte('\n')
@@ -78,9 +78,9 @@ func readSSE(r io.Reader, total int64, eventLimit int, handle func(string, []byt
 		if errors.As(e, &ge) {
 			return e
 		}
-		return caused("stream_read_error", "SSE read failed or event exceeds limit", e)
+		return caused(CodeStreamReadError, "SSE read failed or event exceeds limit", e)
 	}
-	return fail("truncated_stream", "stream ended without a terminal event")
+	return fail(CodeTruncatedStream, "stream ended without a terminal event")
 }
 func decodeStream(r io.Reader, m Model, alias string, total int64, eventLimit int, emit func(ai.Event) error) (ai.Response, error) {
 	switch m.Protocol {
@@ -91,7 +91,7 @@ func decodeStream(r io.Reader, m Model, alias string, total int64, eventLimit in
 	case "anthropic":
 		return streamAnthropic(r, alias, total, eventLimit, emit)
 	}
-	return ai.Response{}, fail("unsupported_capability", "streaming is not supported")
+	return ai.Response{}, fail(CodeUnsupportedCapability, "streaming is not supported")
 }
 
 type streamBlocks struct {
@@ -117,14 +117,14 @@ func streamChat(r io.Reader, alias string, total int64, limit int, emit func(ai.
 	finished := false
 	err := readSSE(r, total, limit, func(event string, raw []byte) error {
 		if event == "error" {
-			return fail("upstream_error", "upstream stream failed")
+			return fail(CodeUpstreamError, "upstream stream failed")
 		}
 		if string(raw) == "[DONE]" {
 			if !finished {
-				return fail("truncated_stream", "chat stream has no finish reason")
+				return fail(CodeTruncatedStream, "chat stream has no finish reason")
 			}
 			if out.FinishReason == "tool_calls" && !hasToolCall(blocks.blocks) {
-				return fail("invalid_response", "tool finish without a tool call")
+				return fail(CodeInvalidResponse, "tool finish without a tool call")
 			}
 			if err := validateBlocks(blocks.blocks); err != nil {
 				return err
@@ -149,25 +149,25 @@ func streamChat(r io.Reader, alias string, total int64, limit int, emit func(ai.
 		}
 		choices := arr(o["choices"])
 		if len(choices) > 1 {
-			return fail("unsupported_capability", "multiple streaming choices are not supported")
+			return fail(CodeUnsupportedCapability, "multiple streaming choices are not supported")
 		}
 		for _, v := range choices {
 			if finished {
-				return fail("invalid_response", "chat delta after finish")
+				return fail(CodeInvalidResponse, "chat delta after finish")
 			}
 			c := obj(v)
 			if n, ok := number(c["index"]); !ok || n != 0 {
-				return fail("invalid_response", "invalid choice index")
+				return fail(CodeInvalidResponse, "invalid choice index")
 			}
 			d := obj(c["delta"])
 			if str(d["refusal"]) != "" {
-				return fail("refused_response", "upstream refused the response")
+				return fail(CodeRefusedResponse, "upstream refused the response")
 			}
 			for _, part := range []struct{ field, key, typ, event string }{{"content", "text", "text", "text_delta"}, {"reasoning_content", "reasoning", "reasoning", "reasoning_delta"}} {
 				if v := d[part.field]; v != nil {
 					s, ok := v.(string)
 					if !ok {
-						return fail("invalid_response", "invalid text delta")
+						return fail(CodeInvalidResponse, "invalid text delta")
 					}
 					if s != "" || part.typ == "reasoning" {
 						b, i := blocks.block(part.key, part.typ)
@@ -183,7 +183,7 @@ func streamChat(r io.Reader, alias string, total int64, limit int, emit func(ai.
 			}
 			if v := d["tool_calls"]; v != nil {
 				if _, ok := v.([]any); !ok {
-					return fail("invalid_response", "invalid tool call delta")
+					return fail(CodeInvalidResponse, "invalid tool call delta")
 				}
 			}
 			for _, v := range arr(d["tool_calls"]) {
@@ -193,7 +193,7 @@ func streamChat(r io.Reader, alias string, total int64, limit int, emit func(ai.
 					return e
 				}
 				if typ := str(t["type"]); typ != "" && typ != "function" {
-					return fail("unsupported_capability", "unsupported streaming tool type")
+					return fail(CodeUnsupportedCapability, "unsupported streaming tool type")
 				}
 				b, i := blocks.block("tool:"+strconv.Itoa(n), "tool_call")
 				f := obj(t["function"])
@@ -242,7 +242,7 @@ func streamResponses(r io.Reader, alias string, total int64, limit int, emit fun
 		}
 		if !argumentsSent[n] && arguments != "" {
 			if !json.Valid([]byte(arguments)) {
-				return fail("invalid_response", "invalid completed tool arguments")
+				return fail(CodeInvalidResponse, "invalid completed tool arguments")
 			}
 			b.Arguments = []byte(arguments)
 			ev.Delta = arguments
@@ -269,9 +269,9 @@ func streamResponses(r io.Reader, alias string, total int64, limit int, emit fun
 		}
 		switch typ {
 		case "error", "response.failed":
-			return fail("upstream_error", "upstream stream failed")
+			return fail(CodeUpstreamError, "upstream stream failed")
 		case "response.incomplete":
-			return fail("incomplete_response", "upstream response was incomplete")
+			return fail(CodeIncompleteResponse, "upstream response was incomplete")
 		case "response.completed":
 			out, e = decodeResponses(alias, obj(o["response"]))
 			if e != nil {
@@ -331,10 +331,10 @@ func streamResponses(r io.Reader, alias string, total int64, limit int, emit fun
 			b, i := blocks.block("tool:"+strconv.Itoa(n), "tool_call")
 			s, ok := o["delta"].(string)
 			if !ok {
-				return fail("invalid_response", "invalid function argument delta")
+				return fail(CodeInvalidResponse, "invalid function argument delta")
 			}
 			if argumentsDone[n] {
-				return fail("invalid_response", "argument delta after tool completion")
+				return fail(CodeInvalidResponse, "argument delta after tool completion")
 			}
 			if s != "" {
 				if !argumentsSent[n] {
@@ -360,7 +360,7 @@ func streamResponses(r io.Reader, alias string, total int64, limit int, emit fun
 			}
 			s, ok := o["delta"].(string)
 			if !ok {
-				return fail("invalid_response", "invalid text delta")
+				return fail(CodeInvalidResponse, "invalid text delta")
 			}
 			key := blockType + ":" + strconv.Itoa(n) + ":" + strconv.Itoa(j)
 			if blockType == "reasoning" {
@@ -370,7 +370,7 @@ func streamResponses(r io.Reader, alias string, total int64, limit int, emit fun
 			b.Text += s
 			return emit(ai.Event{Type: eventType, Index: i, Delta: s})
 		case "response.refusal.delta":
-			return fail("refused_response", "upstream refused the response")
+			return fail(CodeRefusedResponse, "upstream refused the response")
 		}
 		return nil
 	})
@@ -399,17 +399,17 @@ func streamAnthropic(r io.Reader, alias string, total int64, limit int, emit fun
 			return nil
 		}
 		if typ == "error" {
-			return fail("upstream_error", "upstream stream failed")
+			return fail(CodeUpstreamError, "upstream stream failed")
 		}
 		switch typ {
 		case "message_start":
 			if started {
-				return fail("invalid_response", "duplicate message start")
+				return fail(CodeInvalidResponse, "duplicate message start")
 			}
 			started = true
 			m := obj(o["message"])
 			if m == nil {
-				return fail("invalid_response", "missing initial message")
+				return fail(CodeInvalidResponse, "missing initial message")
 			}
 			out.ID = str(m["id"])
 			for k, v := range obj(m["usage"]) {
@@ -417,14 +417,14 @@ func streamAnthropic(r io.Reader, alias string, total int64, limit int, emit fun
 			}
 		case "content_block_start":
 			if !started || finished {
-				return fail("invalid_response", "content block outside message")
+				return fail(CodeInvalidResponse, "content block outside message")
 			}
 			i, e := index(o["index"])
 			if e != nil {
 				return e
 			}
 			if i != len(out.Message.Content) {
-				return fail("invalid_response", "nonsequential content block")
+				return fail(CodeInvalidResponse, "nonsequential content block")
 			}
 			b, e := anthropicBlock(obj(o["content_block"]))
 			if e != nil {
@@ -450,7 +450,7 @@ func streamAnthropic(r io.Reader, alias string, total int64, limit int, emit fun
 				return e
 			}
 			if !open[i] || finished {
-				return fail("invalid_response", "delta outside open content block")
+				return fail(CodeInvalidResponse, "delta outside open content block")
 			}
 			b := &out.Message.Content[i]
 			d := obj(o["delta"])
@@ -458,23 +458,23 @@ func streamAnthropic(r io.Reader, alias string, total int64, limit int, emit fun
 			switch str(d["type"]) {
 			case "text_delta":
 				if b.Type != "text" {
-					return fail("invalid_response", "text delta block mismatch")
+					return fail(CodeInvalidResponse, "text delta block mismatch")
 				}
 				ev.Type = "text_delta"
 				value, ok := d["text"].(string)
 				if !ok {
-					return fail("invalid_response", "invalid content delta")
+					return fail(CodeInvalidResponse, "invalid content delta")
 				}
 				ev.Delta = value
 				b.Text += ev.Delta
 			case "thinking_delta":
 				if b.Type != "reasoning" {
-					return fail("invalid_response", "thinking delta block mismatch")
+					return fail(CodeInvalidResponse, "thinking delta block mismatch")
 				}
 				ev.Type = "reasoning_delta"
 				value, ok := d["thinking"].(string)
 				if !ok {
-					return fail("invalid_response", "invalid content delta")
+					return fail(CodeInvalidResponse, "invalid content delta")
 				}
 				ev.Delta = value
 				b.Text += ev.Delta
@@ -483,12 +483,12 @@ func streamAnthropic(r io.Reader, alias string, total int64, limit int, emit fun
 				b.ProviderState = state("anthropic", reasoningState)
 			case "input_json_delta":
 				if b.Type != "tool_call" {
-					return fail("invalid_response", "argument delta block mismatch")
+					return fail(CodeInvalidResponse, "argument delta block mismatch")
 				}
 				ev.Type = "tool_call_delta"
 				value, ok := d["partial_json"].(string)
 				if !ok {
-					return fail("invalid_response", "invalid content delta")
+					return fail(CodeInvalidResponse, "invalid content delta")
 				}
 				ev.Delta = value
 				if !partial[i] && ev.Delta != "" {
@@ -498,7 +498,7 @@ func streamAnthropic(r io.Reader, alias string, total int64, limit int, emit fun
 				b.Arguments = append(b.Arguments, []byte(ev.Delta)...)
 			case "signature_delta":
 				if b.Type != "reasoning" {
-					return fail("invalid_response", "signature delta block mismatch")
+					return fail(CodeInvalidResponse, "signature delta block mismatch")
 				}
 				value, e := decodeObject(stateValue(*b))
 				if e != nil {
@@ -506,13 +506,13 @@ func streamAnthropic(r io.Reader, alias string, total int64, limit int, emit fun
 				}
 				signature, ok := d["signature"].(string)
 				if !ok {
-					return fail("invalid_response", "invalid signature delta")
+					return fail(CodeInvalidResponse, "invalid signature delta")
 				}
 				value["signature"] = str(value["signature"]) + signature
 				b.ProviderState = state("anthropic", value)
 				return nil
 			default:
-				return fail("unsupported_capability", "unsupported content delta")
+				return fail(CodeUnsupportedCapability, "unsupported content delta")
 			}
 			return emit(ev)
 		case "content_block_stop":
@@ -521,11 +521,11 @@ func streamAnthropic(r io.Reader, alias string, total int64, limit int, emit fun
 				return e
 			}
 			if !open[i] {
-				return fail("invalid_response", "content block stop without start")
+				return fail(CodeInvalidResponse, "content block stop without start")
 			}
 			delete(open, i)
 			if e = validateState(out.Message.Content[i], "anthropic"); e != nil {
-				return fail("invalid_response", "incomplete anthropic continuation state")
+				return fail(CodeInvalidResponse, "incomplete anthropic continuation state")
 			}
 			if e = validateBlocks(out.Message.Content[i : i+1]); e != nil {
 				return e
@@ -539,7 +539,7 @@ func streamAnthropic(r io.Reader, alias string, total int64, limit int, emit fun
 
 		case "message_delta":
 			if !started || len(open) > 0 {
-				return fail("invalid_response", "message delta before content completion")
+				return fail(CodeInvalidResponse, "message delta before content completion")
 			}
 			if reason := str(obj(o["delta"])["stop_reason"]); reason != "" {
 				out.FinishReason, e = finish(reason)
@@ -553,10 +553,10 @@ func streamAnthropic(r io.Reader, alias string, total int64, limit int, emit fun
 			}
 		case "message_stop":
 			if !started || !finished || len(open) > 0 {
-				return fail("truncated_stream", "message stopped without complete blocks and finish reason")
+				return fail(CodeTruncatedStream, "message stopped without complete blocks and finish reason")
 			}
 			if out.FinishReason == "tool_calls" && !hasToolCall(out.Message.Content) {
-				return fail("invalid_response", "tool finish without a tool call")
+				return fail(CodeInvalidResponse, "tool finish without a tool call")
 			}
 			out.Usage, e = parseUsage(usage, "anthropic")
 			if e != nil {

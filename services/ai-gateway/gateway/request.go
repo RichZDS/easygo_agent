@@ -18,7 +18,7 @@ func reserved(k string) bool {
 }
 func parameters(m Model, r ai.Request) (object, error) {
 	if r.MaxOutputTokens < 0 {
-		return nil, fail("invalid_request", "max output tokens must be nonnegative")
+		return nil, fail(CodeInvalidRequest, "max output tokens must be nonnegative")
 	}
 	explicit := map[string]json.RawMessage{}
 	if r.MaxOutputTokens > 0 {
@@ -27,7 +27,7 @@ func parameters(m Model, r ai.Request) (object, error) {
 	if r.Temperature != nil {
 		v, e := json.Marshal(*r.Temperature)
 		if e != nil {
-			return nil, fail("invalid_request", "temperature must be finite")
+			return nil, fail(CodeInvalidRequest, "temperature must be finite")
 		}
 		explicit["temperature"] = v
 	}
@@ -39,7 +39,7 @@ func parameters(m Model, r ai.Request) (object, error) {
 		mapped := map[string]bool{}
 		for key, raw := range layer {
 			if reserved(key) {
-				return nil, fail("invalid_parameters", "parameter targets a reserved field")
+				return nil, fail(CodeInvalidParameters, "parameter targets a reserved field")
 			}
 			dst := key
 			if d, ok := m.ParameterMap[key]; ok {
@@ -53,15 +53,15 @@ func parameters(m Model, r ai.Request) (object, error) {
 				}
 			}
 			if reserved(dst) {
-				return nil, fail("invalid_parameters", "parameter mapping targets a reserved field")
+				return nil, fail(CodeInvalidParameters, "parameter mapping targets a reserved field")
 			}
 			if mapped[dst] {
-				return nil, fail("invalid_parameters", "parameters map to the same field")
+				return nil, fail(CodeInvalidParameters, "parameters map to the same field")
 			}
 			mapped[dst] = true
 			var value any
 			if json.Unmarshal(raw, &value) != nil {
-				return nil, fail("invalid_parameters", "parameter is not valid JSON")
+				return nil, fail(CodeInvalidParameters, "parameter is not valid JSON")
 			}
 			out[dst] = value
 		}
@@ -70,48 +70,48 @@ func parameters(m Model, r ai.Request) (object, error) {
 }
 func validateRequest(r ai.Request) error {
 	if len(r.Messages) == 0 {
-		return fail("invalid_request", "messages are required")
+		return fail(CodeInvalidRequest, "messages are required")
 	}
 	for _, m := range r.Messages {
 		switch m.Role {
 		case "system", "user", "assistant", "tool":
 		default:
-			return fail("unsupported_capability", "unsupported message role")
+			return fail(CodeUnsupportedCapability, "unsupported message role")
 		}
 		if len(m.Content) == 0 {
-			return fail("invalid_request", "message content is required")
+			return fail(CodeInvalidRequest, "message content is required")
 		}
 		for _, b := range m.Content {
 			switch b.Type {
 			case "reasoning":
 				if m.Role != "assistant" {
-					return fail("invalid_request", "reasoning requires assistant role")
+					return fail(CodeInvalidRequest, "reasoning requires assistant role")
 				}
 			case "text":
 				if m.Role == "tool" {
-					return fail("invalid_request", "tool messages require tool_result blocks")
+					return fail(CodeInvalidRequest, "tool messages require tool_result blocks")
 				}
 			case "image":
 				if m.Role != "user" || (b.URL == "" && (b.Data == "" || b.MediaType == "")) {
-					return fail("unsupported_capability", "images require user role and URL or base64 data with media type")
+					return fail(CodeUnsupportedCapability, "images require user role and URL or base64 data with media type")
 				}
 			case "tool_call":
 				if m.Role != "assistant" || b.ID == "" || b.Name == "" || !json.Valid(b.Arguments) {
-					return fail("invalid_request", "tool calls require assistant role, id, name and JSON arguments")
+					return fail(CodeInvalidRequest, "tool calls require assistant role, id, name and JSON arguments")
 				}
 			case "tool_result":
 				if (m.Role != "tool" && m.Role != "user") || b.ID == "" {
-					return fail("invalid_request", "tool results require tool or user role and call id")
+					return fail(CodeInvalidRequest, "tool results require tool or user role and call id")
 				}
 			default:
-				return fail("unsupported_capability", "unsupported input block type")
+				return fail(CodeUnsupportedCapability, "unsupported input block type")
 			}
 		}
 	}
 	names := map[string]bool{}
 	for _, t := range r.Tools {
 		if t.Name == "" || names[t.Name] || !json.Valid(t.Parameters) {
-			return fail("invalid_request", "tools require unique names and valid JSON schemas")
+			return fail(CodeInvalidRequest, "tools require unique names and valid JSON schemas")
 		}
 		names[t.Name] = true
 	}
@@ -130,7 +130,7 @@ func encodeRequest(m Model, r ai.Request, stream bool) (object, error) {
 	}
 	if m.Protocol == "custom" {
 		if stream {
-			return nil, fail("unsupported_capability", "custom protocol does not support streaming")
+			return nil, fail(CodeUnsupportedCapability, "custom protocol does not support streaming")
 		}
 		return encodeCustom(m, r)
 	}
@@ -143,12 +143,12 @@ func encodeRequest(m Model, r ai.Request, stream bool) (object, error) {
 	if choice, ok := out["tool_choice"]; ok {
 		s, ok := choice.(string)
 		if !ok {
-			return nil, fail("invalid_request", "tool_choice must be a string")
+			return nil, fail(CodeInvalidRequest, "tool_choice must be a string")
 		}
 		switch s {
 		case "auto", "none", "required":
 		default:
-			return nil, fail("unsupported_capability", "tool_choice must be auto, none or required")
+			return nil, fail(CodeUnsupportedCapability, "tool_choice must be auto, none or required")
 		}
 		if m.Protocol == "anthropic" {
 			if s == "required" {
@@ -189,9 +189,9 @@ func encodeRequest(m Model, r ai.Request, stream bool) (object, error) {
 			out["system"] = system
 		}
 		if v, ok := out["max_tokens"]; !ok {
-			return nil, fail("invalid_request", "anthropic requires max_output_tokens or a max_tokens default")
+			return nil, fail(CodeInvalidRequest, "anthropic requires max_output_tokens or a max_tokens default")
 		} else if n, ok := v.(float64); !ok || n <= 0 || n != float64(int64(n)) {
-			return nil, fail("invalid_request", "anthropic max_tokens must be a positive integer")
+			return nil, fail(CodeInvalidRequest, "anthropic max_tokens must be a positive integer")
 		}
 	}
 	return out, nil

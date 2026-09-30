@@ -33,7 +33,7 @@ func Resolve(file FileConfig) (Config, error) {
 		}
 		value, ok := os.LookupEnv(name)
 		if !ok || value == "" {
-			return "", fail("missing_environment", "configured credential environment variable is unset")
+			return "", fail(CodeMissingEnvironment, "configured credential environment variable is unset")
 		}
 		return value, nil
 	}
@@ -49,18 +49,18 @@ func Resolve(file FileConfig) (Config, error) {
 		f.Headers = headers
 		for k, v := range f.Headers {
 			if strings.Contains(strings.ToLower(k), "key") || strings.Contains(strings.ToLower(k), "token") || strings.Contains(strings.ToLower(k), "auth") || strings.Contains(strings.ToLower(k), "secret") || strings.EqualFold(k, "Cookie") {
-				return Config{}, fail("invalid_config", "credential headers require header_env")
+				return Config{}, fail(CodeInvalidConfig, "credential headers require header_env")
 			}
 			if !validHeader(k, v) {
-				return Config{}, fail("invalid_config", "invalid header")
+				return Config{}, fail(CodeInvalidConfig, "invalid header")
 			}
 		}
 		for k, name := range f.HeaderEnv {
 			if name == "" {
-				return Config{}, fail("invalid_config", "header_env requires an environment name")
+				return Config{}, fail(CodeInvalidConfig, "header_env requires an environment name")
 			}
 			if _, ok := f.Headers[k]; ok {
-				return Config{}, fail("invalid_config", "header and header_env overlap")
+				return Config{}, fail(CodeInvalidConfig, "header and header_env overlap")
 			}
 			value, e := resolve(name)
 			if e != nil {
@@ -71,7 +71,7 @@ func Resolve(file FileConfig) (Config, error) {
 		c.Models[alias] = f.Model
 	}
 	if file.MaxRequestBytes < 0 {
-		return Config{}, fail("invalid_config", "request limit must be positive")
+		return Config{}, fail(CodeInvalidConfig, "request limit must be positive")
 	}
 	return c, nil
 }

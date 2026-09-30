@@ -1,13 +1,12 @@
-import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { Block, Message, Response, Tool } from '../types.js';
+import { openDatabase, type Database, type Row } from '../sqlite.js';
 import { parseJSON } from '../strict-json.mjs';
 import { fields, integer, namespace, RpcError, string } from '../validation.js';
 
 export const KINDS = ['agent', 'memory', 'experiment', 'error', 'preference', 'style', 'prompt', 'constraint'] as const;
-type Row = Record<string, string | number | null>;
 export interface Memory {
   id: string;
   kind: string;
@@ -73,9 +72,18 @@ function draft(value: unknown, source?: Set<string>) {
   };
 }
 
+const DDL = `
+      CREATE TABLE IF NOT EXISTS memories(ns TEXT,id TEXT,body TEXT NOT NULL,deleted INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(ns,id));
+      CREATE TABLE IF NOT EXISTS skills(ns TEXT,name TEXT,body TEXT NOT NULL,deleted INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(ns,name));
+      CREATE TABLE IF NOT EXISTS revisions(seq INTEGER PRIMARY KEY,ns TEXT,entity TEXT,id TEXT,body TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS completed(seq INTEGER PRIMARY KEY AUTOINCREMENT,ns TEXT,run_id TEXT,digest TEXT,messages TEXT,UNIQUE(ns,run_id));
+      CREATE INDEX IF NOT EXISTS completed_ns ON completed(ns,seq);
+      CREATE TABLE IF NOT EXISTS checkpoints(ns TEXT PRIMARY KEY,through INTEGER NOT NULL DEFAULT 0,revision INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS jobs(ns TEXT PRIMARY KEY,body TEXT,attempts INTEGER NOT NULL DEFAULT 0,next_at INTEGER NOT NULL DEFAULT 0,error TEXT);`;
+
 /** Only the core committed-completion outbox may call recordCompleted. */
 export class Knowledge {
-  private db: DatabaseSync;
+  private db: Database;
   private limit: number;
   private interval: number;
   private timer?: ReturnType<typeof setInterval>;
@@ -90,36 +98,18 @@ export class Knowledge {
     this.limit = integer(config.profile_limit, 5, 20, 1);
     this.interval = integer(config.consolidate_interval_ms, 86400000, 2147483647, 1000);
     mkdirSync(dirname(config.database), { recursive: true, mode: 0o700 });
-    this.db = new DatabaseSync(config.database);
-    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=1000;
-      CREATE TABLE IF NOT EXISTS memories(ns TEXT,id TEXT,body TEXT NOT NULL,deleted INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(ns,id));
-      CREATE TABLE IF NOT EXISTS skills(ns TEXT,name TEXT,body TEXT NOT NULL,deleted INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(ns,name));
-      CREATE TABLE IF NOT EXISTS revisions(seq INTEGER PRIMARY KEY,ns TEXT,entity TEXT,id TEXT,body TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS completed(seq INTEGER PRIMARY KEY AUTOINCREMENT,ns TEXT,run_id TEXT,digest TEXT,messages TEXT,UNIQUE(ns,run_id));
-      CREATE INDEX IF NOT EXISTS completed_ns ON completed(ns,seq);
-      CREATE TABLE IF NOT EXISTS checkpoints(ns TEXT PRIMARY KEY,through INTEGER NOT NULL DEFAULT 0,revision INTEGER NOT NULL DEFAULT 0);
-      CREATE TABLE IF NOT EXISTS jobs(ns TEXT PRIMARY KEY,body TEXT,attempts INTEGER NOT NULL DEFAULT 0,next_at INTEGER NOT NULL DEFAULT 0,error TEXT);`);
+    this.db = openDatabase(config.database, DDL);
   }
   private tx<T>(fn: () => T): T {
     if (this.closed) throw new Error('knowledge_closed');
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      const r = fn();
-      this.db.exec('COMMIT');
-      return r;
-    } catch (e) {
-      this.db.exec('ROLLBACK');
-      throw e;
-    }
+    return this.db.transaction(fn);
   }
   private checkpoint(ns: string): Row {
-    this.db.prepare('INSERT OR IGNORE INTO checkpoints(ns) VALUES(?)').run(ns);
-    return this.db.prepare('SELECT * FROM checkpoints WHERE ns=?').get(ns) as Row;
+    this.db.run('INSERT OR IGNORE INTO checkpoints(ns) VALUES(?)', ns);
+    return this.db.get('SELECT * FROM checkpoints WHERE ns=?', ns)!;
   }
   private rows(table: 'memories' | 'skills', ns: string): Array<Memory | Skill> {
-    return (this.db.prepare(`SELECT body FROM ${table} WHERE ns=? AND deleted=0`).all(ns) as Row[]).map((r) =>
-      JSON.parse(String(r.body))
-    );
+    return this.db.all(`SELECT body FROM ${table} WHERE ns=? AND deleted=0`, ns).map((r) => JSON.parse(String(r.body)));
   }
   private profile(ns: string): Memory[] {
     return (this.rows('memories', ns) as Memory[])
@@ -133,21 +123,25 @@ export class Knowledge {
   }
   private save(table: 'memories' | 'skills', ns: string, id: string, body: Memory | Skill, deleted = false) {
     const key = table === 'memories' ? 'id' : 'name';
-    this.db
-      .prepare(
-        `INSERT INTO ${table}(ns,${key},body,deleted) VALUES(?,?,?,?) ON CONFLICT(ns,${key}) DO UPDATE SET body=excluded.body,deleted=excluded.deleted`
-      )
-      .run(ns, id, JSON.stringify(body), Number(deleted));
-    this.db
-      .prepare('INSERT INTO revisions(ns,entity,id,body) VALUES(?,?,?,?)')
-      .run(ns, table, id, JSON.stringify({ ...body, deleted }));
+    this.db.run(
+      `INSERT INTO ${table}(ns,${key},body,deleted) VALUES(?,?,?,?) ON CONFLICT(ns,${key}) DO UPDATE SET body=excluded.body,deleted=excluded.deleted`,
+      ns,
+      id,
+      JSON.stringify(body),
+      Number(deleted)
+    );
+    this.db.run(
+      'INSERT INTO revisions(ns,entity,id,body) VALUES(?,?,?,?)',
+      ns,
+      table,
+      id,
+      JSON.stringify({ ...body, deleted })
+    );
     this.checkpoint(ns);
-    this.db.prepare('UPDATE checkpoints SET revision=revision+1 WHERE ns=?').run(ns);
+    this.db.run('UPDATE checkpoints SET revision=revision+1 WHERE ns=?', ns);
   }
   private existing(table: 'memories' | 'skills', ns: string, id: string): Row | undefined {
-    return this.db
-      .prepare(`SELECT * FROM ${table} WHERE ns=? AND ${table === 'memories' ? 'id' : 'name'}=?`)
-      .get(ns, id) as Row | undefined;
+    return this.db.get(`SELECT * FROM ${table} WHERE ns=? AND ${table === 'memories' ? 'id' : 'name'}=?`, ns, id);
   }
   private version(row: Row | undefined, expected: unknown): number {
     const current = row ? Number(JSON.parse(String(row.body)).version) : 0;
@@ -176,13 +170,12 @@ export class Knowledge {
     ];
   }
   private catalog(ns: string) {
-    return (
-      this.db
-        .prepare(
-          "SELECT name,json_extract(body,'$.description') AS description,json_extract(body,'$.version') AS version FROM skills WHERE ns=? AND deleted=0 ORDER BY name"
-        )
-        .all(ns) as Row[]
-    ).map((r) => ({ name: String(r.name), description: String(r.description), version: Number(r.version) }));
+    return this.db
+      .all(
+        "SELECT name,json_extract(body,'$.description') AS description,json_extract(body,'$.version') AS version FROM skills WHERE ns=? AND deleted=0 ORDER BY name",
+        ns
+      )
+      .map((r) => ({ name: String(r.name), description: String(r.description), version: Number(r.version) }));
   }
   tools(): Tool[] {
     return [
@@ -234,15 +227,18 @@ export class Knowledge {
     }
     const digest = hash(JSON.stringify(messages));
     this.tx(() => {
-      const old = this.db.prepare('SELECT digest FROM completed WHERE ns=? AND run_id=?').get(ns, runID) as
-        Row | undefined;
+      const old = this.db.get('SELECT digest FROM completed WHERE ns=? AND run_id=?', ns, runID);
       if (old) {
         if (old.digest !== digest) throw new RpcError(-32009, 'completion_conflict');
         return;
       }
-      this.db
-        .prepare('INSERT INTO completed(ns,run_id,digest,messages) VALUES(?,?,?,?)')
-        .run(ns, runID, digest, JSON.stringify(clean));
+      this.db.run(
+        'INSERT INTO completed(ns,run_id,digest,messages) VALUES(?,?,?,?)',
+        ns,
+        runID,
+        digest,
+        JSON.stringify(clean)
+      );
       this.checkpoint(ns);
     });
   }
@@ -326,7 +322,7 @@ export class Knowledge {
     );
     // User-provided source references must still belong to completed runs in this namespace.
     for (const id of d.source_run_ids)
-      if (!this.db.prepare('SELECT 1 FROM completed WHERE ns=? AND run_id=?').get(ns, id)) fail('invalid_sources');
+      if (!this.db.get('SELECT 1 FROM completed WHERE ns=? AND run_id=?', ns, id)) fail('invalid_sources');
     const id = p.id === undefined ? randomUUID() : string(p.id);
     const old = this.existing('memories', ns, id);
     if ((!old || old.deleted) && this.profile(ns).length >= this.limit) throw new RpcError(-32029, 'profile_full');
@@ -419,7 +415,7 @@ export class Knowledge {
   }
   private async doConsolidate(ns: string) {
     const cp = this.checkpoint(ns);
-    let jobRow = this.db.prepare('SELECT * FROM jobs WHERE ns=?').get(ns) as Row | undefined;
+    let jobRow = this.db.get('SELECT * FROM jobs WHERE ns=?', ns);
     if (jobRow && Number(jobRow.next_at) > Date.now()) throw new RpcError(-32029, 'consolidation_backoff');
     type Job = {
       through: number;
@@ -429,18 +425,22 @@ export class Knowledge {
     };
     let job: Job | undefined = jobRow?.body ? JSON.parse(String(jobRow.body)) : undefined;
     if (!job || job.revision !== Number(cp.revision)) {
-      const rows = this.db
-        .prepare('SELECT * FROM completed WHERE ns=? AND seq>? ORDER BY seq LIMIT 20')
-        .all(ns, Number(cp.through)) as Row[];
+      const rows = this.db.all(
+        'SELECT * FROM completed WHERE ns=? AND seq>? ORDER BY seq LIMIT 20',
+        ns,
+        Number(cp.through)
+      );
       if (!rows.length) return { processed: 0, through: cp.through };
       job = {
         through: Number(rows.at(-1)!.seq),
         revision: Number(cp.revision),
         turns: rows.map((r) => ({ run_id: String(r.run_id), messages: JSON.parse(String(r.messages)) })),
       };
-      this.db
-        .prepare('INSERT INTO jobs(ns,body) VALUES(?,?) ON CONFLICT(ns) DO UPDATE SET body=excluded.body')
-        .run(ns, JSON.stringify(job));
+      this.db.run(
+        'INSERT INTO jobs(ns,body) VALUES(?,?) ON CONFLICT(ns) DO UPDATE SET body=excluded.body',
+        ns,
+        JSON.stringify(job)
+      );
     }
     try {
       const sources = new Set(job.turns.map((t) => t.run_id));
@@ -451,7 +451,7 @@ export class Knowledge {
           job.turns,
           sources
         );
-        this.db.prepare('UPDATE jobs SET body=? WHERE ns=?').run(JSON.stringify(job), ns);
+        this.db.run('UPDATE jobs SET body=? WHERE ns=?', JSON.stringify(job), ns);
       }
       const existing = this.profile(ns);
       for (const m of existing) for (const id of m.source_run_ids) sources.add(id);
@@ -488,22 +488,21 @@ export class Knowledge {
             updated_at: new Date().toISOString(),
           });
         }
-        this.db.prepare('UPDATE checkpoints SET through=? WHERE ns=?').run(currentJob.through, ns);
-        this.db.prepare('UPDATE completed SET messages=NULL WHERE ns=? AND seq<=?').run(ns, currentJob.through);
-        this.db.prepare('DELETE FROM jobs WHERE ns=?').run(ns);
+        this.db.run('UPDATE checkpoints SET through=? WHERE ns=?', currentJob.through, ns);
+        this.db.run('UPDATE completed SET messages=NULL WHERE ns=? AND seq<=?', ns, currentJob.through);
+        this.db.run('DELETE FROM jobs WHERE ns=?', ns);
         return { processed: currentJob.turns.length, through: currentJob.through };
       });
     } catch (e) {
-      jobRow = this.db.prepare('SELECT * FROM jobs WHERE ns=?').get(ns) as Row | undefined;
+      jobRow = this.db.get('SELECT * FROM jobs WHERE ns=?', ns);
       const attempts = Math.min(Number(jobRow?.attempts ?? 0) + 1, 20);
-      this.db
-        .prepare('UPDATE jobs SET attempts=?,next_at=?,error=? WHERE ns=?')
-        .run(
-          attempts,
-          Date.now() + Math.min(3600000, 1000 * 2 ** attempts),
-          e instanceof RpcError ? e.reason : 'generation_failed',
-          ns
-        );
+      this.db.run(
+        'UPDATE jobs SET attempts=?,next_at=?,error=? WHERE ns=?',
+        attempts,
+        Date.now() + Math.min(3600000, 1000 * 2 ** attempts),
+        e instanceof RpcError ? e.reason : 'generation_failed',
+        ns
+      );
       throw e;
     }
   }
@@ -513,11 +512,10 @@ export class Knowledge {
       if (this.closed || this.scheduled) return;
       this.scheduled = true;
       try {
-        const rows = this.db
-          .prepare(
-            'SELECT DISTINCT c.ns FROM completed c JOIN checkpoints p ON c.ns=p.ns WHERE c.seq>p.through AND c.ns>? ORDER BY c.ns LIMIT 100'
-          )
-          .all(this.scheduleCursor) as Row[];
+        const rows = this.db.all(
+          'SELECT DISTINCT c.ns FROM completed c JOIN checkpoints p ON c.ns=p.ns WHERE c.seq>p.through AND c.ns>? ORDER BY c.ns LIMIT 100',
+          this.scheduleCursor
+        );
         this.scheduleCursor = rows.length === 100 ? String(rows.at(-1)!.ns) : '';
         for (const r of rows) {
           if (this.closed) break;

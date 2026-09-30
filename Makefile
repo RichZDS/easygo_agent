@@ -50,6 +50,7 @@ fmt:
 	$(PRETTIER) --check $(PRETTIER_FILES)
 
 lint:
+	$(NODE) scripts/check-cli-versions.mjs
 	@if command -v $(GOLANGCI_LINT) >/dev/null 2>&1; then \
 		rc=0; for m in $(GO_MODULES); do echo "==> $$m: golangci-lint run"; (cd $$m && $(GOLANGCI_LINT) run ./...) || rc=1; done; exit $$rc; \
 	else \

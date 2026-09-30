@@ -185,6 +185,15 @@ func TestStrictDecodeOpaqueStateAndBounds(t *testing.T) {
 		}
 	}
 }
+func TestReadConfigNamesUnknownField(t *testing.T) {
+	var c struct {
+		Listen string `json:"listen"`
+	}
+	e := rpc.ReadConfig(strings.NewReader(`{"listen":":1","lisen":":2"}`), &c)
+	if e == nil || !strings.Contains(e.Error(), `unknown field "lisen"`) {
+		t.Fatalf("unknown field not named: %v", e)
+	}
+}
 func TestTypedDecodesStrictlyBeforeCalling(t *testing.T) {
 	type params struct {
 		Namespace string          `json:"namespace"`

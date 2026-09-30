@@ -23,6 +23,7 @@ import (
 const defaultBodyLimit int64 = 16 << 20
 const defaultStreamLimit int64 = 64 << 20
 const defaultEventLimit = 1 << 20
+const anthropicVersion = "2023-06-01"
 
 type Pricing struct {
 	Currency             string  `json:"currency"`
@@ -133,6 +134,11 @@ func New(c Config) (*Gateway, error) {
 		switch m.Protocol {
 		case "chat_completions", "responses", "anthropic":
 		case "custom":
+			// Managed billing needs a standard bounded protocol; fail at startup
+			// rather than on every request.
+			if c.Billing != nil {
+				return nil, fail("invalid_config", "managed billing requires a standard bounded protocol")
+			}
 			if err := validateMapping(m.Custom); err != nil {
 				return nil, err
 			}
@@ -299,7 +305,7 @@ func (g *Gateway) Complete(ctx context.Context, r ai.Request, emit func(ai.Event
 	}
 	if m.Protocol == "anthropic" {
 		if req.Header.Get("Anthropic-Version") == "" {
-			req.Header.Set("Anthropic-Version", "2023-06-01")
+			req.Header.Set("Anthropic-Version", anthropicVersion)
 		}
 		if m.APIKey != "" {
 			req.Header.Set("X-Api-Key", m.APIKey)

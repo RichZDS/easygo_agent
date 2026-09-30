@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
 	"strings"
@@ -143,7 +144,7 @@ func shape(raw []byte, t reflect.Type) error {
 		for k, v := range m {
 			ft, ok := fs[k]
 			if !ok {
-				return errors.New("unknown field")
+				return fmt.Errorf("unknown field %q", k)
 			}
 			if err := shape(v, ft); err != nil {
 				return err
@@ -174,12 +175,12 @@ func shape(raw []byte, t reflect.Type) error {
 }
 
 func ReadConfig(r io.Reader, out any) error {
-	raw, e := io.ReadAll(io.LimitReader(r, 8*1024*1024+1))
-	if e != nil || len(raw) > 8*1024*1024 {
+	raw, e := io.ReadAll(io.LimitReader(r, DefaultMaxRequestBytes+1))
+	if e != nil || int64(len(raw)) > DefaultMaxRequestBytes {
 		return errors.New("configuration exceeds limit or cannot be read")
 	}
 	if e = Decode(raw, out); e != nil {
-		return errors.New("invalid configuration JSON")
+		return fmt.Errorf("invalid configuration JSON: %w", e)
 	}
 	return nil
 }

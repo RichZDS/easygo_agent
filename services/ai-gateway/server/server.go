@@ -2,7 +2,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -25,11 +24,7 @@ type Config struct {
 
 func LoadConfig(r io.Reader) (Config, error) {
 	var c Config
-	e := rpc.ReadConfig(r, &c)
-	if c.Listen == "" {
-		c.Listen = ":8441"
-	}
-	if e != nil {
+	if e := rpc.ReadConfig(r, &c); e != nil {
 		return c, e
 	}
 	if c.BearerTokenEnv != "" {
@@ -41,14 +36,7 @@ func New(c Config) (*http.Server, error) {
 	if c.Listen == "" {
 		c.Listen = ":8441"
 	}
-	if c.BearerTokenEnv != "" {
-		return nil, errors.New("RPC listener does not accept bearer configuration")
-	}
-	raw, e := json.Marshal(c.FileConfig)
-	if e != nil {
-		return nil, errors.New("invalid gateway configuration")
-	}
-	config, _, e := gateway.LoadConfig(bytes.NewReader(raw))
+	config, _, e := gateway.Resolve(c.FileConfig)
 	if e != nil {
 		return nil, e
 	}

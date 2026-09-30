@@ -473,6 +473,33 @@ func TestCustomMappingFailures(t *testing.T) {
 	}
 }
 
+type billingFunc func(context.Context, Reservation) (func(Observation) error, error)
+
+func (f billingFunc) Reserve(ctx context.Context, r Reservation) (func(Observation) error, error) {
+	return f(ctx, r)
+}
+
+func TestBilledCustomProtocolRejectedByNew(t *testing.T) {
+	custom := Model{Protocol: "custom", Endpoint: "http://localhost", Model: "u", Custom: customMapping()}
+	standard := Model{Protocol: "responses", Endpoint: "http://localhost", Model: "u"}
+	billing := billingFunc(func(context.Context, Reservation) (func(Observation) error, error) {
+		t.Error("New reserved credits")
+		return nil, errors.New("unused")
+	})
+	if _, e := New(Config{Models: map[string]Model{"custom": custom}}); e != nil {
+		t.Fatalf("unbilled custom rejected: %v", e)
+	}
+	if _, e := New(Config{Models: map[string]Model{"standard": standard}, Billing: billing}); e != nil {
+		t.Fatalf("billed standard protocol rejected: %v", e)
+	}
+	for name, models := range map[string]map[string]Model{"custom only": {"custom": custom}, "mixed": {"standard": standard, "custom": custom}} {
+		t.Run(name, func(t *testing.T) {
+			_, e := New(Config{Models: models, Billing: billing})
+			requireCode(t, e, "invalid_config")
+		})
+	}
+}
+
 func TestConcurrentComplete(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, responseFixture("responses")) }))
 	defer s.Close()

@@ -86,6 +86,19 @@ Agent Loop 借鉴了早先几个 Agent 项目的做法：类型化消息、异�
 ## 验证
 
 ```bash
+npm --prefix services/agent-loop ci   # 首次或 lockfile 变更后
+make test
+make test-e2e
+```
+
+Go 在 PATH 中即可，或设置 `EASYGO_GO_BIN`（Makefile 和端到端脚本都认）。`make build`、`make vet`、`make fmt`、`make lint`、`make tidy` 分别是构建、静态检查、格式检查（gofmt + prettier）、golangci-lint（不在 PATH 上时跳过）和 `go mod tidy`，目标定义见 [`Makefile`](Makefile)。
+
+<details>
+<summary>手动等价命令</summary>
+
+改用 make 之前的手敲命令如下；`make test GOTESTFLAGS=-race`、`make vet`、`make test-e2e` 覆盖它们（`typecheck` 由 `npm test` 开头的 tsc 构建覆盖）。
+
+```bash
 # Go 在 PATH 中；或者给端到端脚本设置 EASYGO_GO_BIN。
 (cd packages/rpc-go && go test -race ./... && go vet ./...)
 (cd services/ai-gateway && go test -race ./... && go vet ./...)
@@ -98,7 +111,11 @@ node --test scripts/rpc-call.test.mjs
 node scripts/test-services.mjs
 ```
 
-端到端脚本实际启动三个独立进程和本机 TLS 连接，验证权限、工坊子进程产物、幂等、取消和崩溃恢复；模型和 CLI 响应使用本机夹具，不调用付费模型。Docker 镜像/容器验证状态另见 [验收记录](doc/independent-services-verification.md)。
+</details>
+
+端到端脚本实际启动三个独立进程和本机 TLS 连接，验证权限、工坊子进程产物、幂等、取消和崩溃恢复；模型和 CLI 响应使用本机夹具，不调用付费模型。
+
+`make test-e2e-docker` 在真实任务容器里跑 `test-harness`、`test-platform`、`test-platform-faults`，需要一个专用 Docker daemon（不能是宿主的 `/var/run/docker.sock`）和任务镜像，通过 `EASYGO_DOCKER_TEST_BINARY`、`EASYGO_DOCKER_TEST_ENDPOINT`、`EASYGO_DOCKER_TEST_IMAGE` 指定，缺任何一个就报错退出。Docker 镜像/容器验证状态另见 [验收记录](doc/independent-services-verification.md)。
 
 ## 旧版 Go 本地应用
 

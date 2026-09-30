@@ -1,11 +1,14 @@
 import type { RpcClient } from '../rpc.js';
 import { fields, object, string } from '../validation.js';
-import { check, enumValue, numberValue, statuses } from './receipts.js';
+import { acceptanceStates, check, enumValue, numberValue, runIds, statuses } from './receipts.js';
 import { callWorkshop } from './workshop.js';
 
 const kinds = ['state', 'session', 'text', 'result', 'diagnostic', 'crew.message', 'crew.read', 'acceptance'];
 const visible = new Set(['state', 'crew.message', 'crew.read', 'acceptance']);
 const budget = 32768;
+// A run whose acceptance never ran reports `skipped` on its summary (rpc-v1.md §3),
+// but no acceptance event is written for it (§2), so events never carry `skipped`.
+const eventAcceptanceStates = acceptanceStates.filter((state) => state !== 'skipped');
 const size = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
 
 function validateEvents(value: unknown, params: Record<string, unknown>, runIDs: Set<string>): void {
@@ -66,7 +69,7 @@ function validateEvents(value: unknown, params: Record<string, unknown>, runIDs:
     }
     if (event.kind === 'acceptance') {
       const acceptance = fields(event.acceptance, ['state', 'check', 'exit_code', 'evidence_id', 'false_green']);
-      enumValue(acceptance.state, ['running', 'passed', 'failed', 'error', 'cancelled', 'interrupted']);
+      enumValue(acceptance.state, eventAcceptanceStates);
       if (acceptance.check !== undefined) check(/^[a-z0-9-]{1,32}$/.test(string(acceptance.check)));
       if (acceptance.exit_code !== undefined) numberValue(acceptance.exit_code, -2147483648, 2147483647);
       if (acceptance.evidence_id !== undefined) string(acceptance.evidence_id);
@@ -90,10 +93,7 @@ export async function readMessages(
     false,
     (value) => {
       const task = object(value);
-      check(Array.isArray(task.run_ids) && task.run_ids.length <= 256);
-      const ids = task.run_ids.map((id) => string(id));
-      check(new Set(ids).size === ids.length);
-      runIDs = new Set(ids);
+      runIDs = new Set(runIds(task.run_ids));
       if (task.runs !== undefined) for (const run of task.runs as unknown[]) check(runIDs.has(string(object(run).id)));
     }
   );

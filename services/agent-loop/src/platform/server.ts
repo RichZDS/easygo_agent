@@ -15,7 +15,7 @@ export interface PlatformConfig {
   bootstrap_admin?: { email: string; password_env: string };
   trusted_proxies?: string[];
 }
-export const PUBLIC_METHODS = new Set([
+const PUBLIC_METHODS = new Set([
   'agent.session.create',
   'agent.session.list',
   'agent.session.history',

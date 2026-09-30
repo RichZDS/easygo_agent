@@ -1,4 +1,4 @@
-import { validateHarnessReceipt, validateRunSummary } from './receipts.js';
+import { runIds, statuses, validateHarnessReceipt, validateRunSummary } from './receipts.js';
 import type { ToolEntry } from './registry.js';
 import type { Block, Run, Tool } from '../types.js';
 import { RpcClient } from '../rpc.js';
@@ -139,17 +139,11 @@ function validateReceipt(method: string, params: Record<string, unknown>, value:
     if (
       receipt.namespace !== params.namespace ||
       (requestedID !== undefined && id !== requestedID) ||
-      !['queued', 'running', 'cancelling', 'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'].includes(
-        string(receipt.status)
-      )
+      !statuses.includes(string(receipt.status))
     ) {
       throw new Error('Invalid workshop receipt');
     }
-    if (receipt.run_ids !== undefined) {
-      if (!Array.isArray(receipt.run_ids) || receipt.run_ids.length > 256) throw new Error('Invalid workshop runs');
-      const ids = receipt.run_ids.map((id) => string(id));
-      if (new Set(ids).size !== ids.length) throw new Error('Invalid workshop runs');
-    }
+    if (receipt.run_ids !== undefined) runIds(receipt.run_ids);
     if (receipt.runs !== undefined) {
       if (!Array.isArray(receipt.runs)) throw new Error('Invalid workshop runs');
       for (const run of receipt.runs) validateRunSummary(run);

@@ -6,10 +6,10 @@ import { parseJSON } from './strict-json.mjs';
 import type { Authorization, Endpoint, TLSConfig } from './types.js';
 import { object, RpcError } from './validation.js';
 
-export function fingerprint(raw: Buffer): string {
+function fingerprint(raw: Buffer): string {
   return createHash('sha256').update(raw).digest('hex');
 }
-export function certFingerprint(file: string): string {
+function certFingerprint(file: string): string {
   return fingerprint(new X509Certificate(readFileSync(file)).raw);
 }
 export function tlsOptions(tls: TLSConfig) {

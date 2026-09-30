@@ -1,15 +1,8 @@
-configs/config.local.yaml
-configs/config.production.yaml
 .env
 logs/
-Storage/
-storage/
 *.log
 bin/
 coverage.out
-skills/builtin/
-skills/staging/
-skills/workspaces/
 .vscode/
 
 # CLI workshop task state, native sessions and generated artifacts.

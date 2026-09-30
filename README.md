@@ -90,6 +90,7 @@ Agent Loop 借鉴了早先几个 Agent 项目的做法：类型化消息、异�
 (cd packages/rpc-go && go test -race ./... && go vet ./...)
 (cd services/ai-gateway && go test -race ./... && go vet ./...)
 (cd services/workshop && go test -race ./... && go vet ./...)
+go test ./... && go vet ./...   # 根模块：个人 CLI（cmd/easygo-remote）
 npm --prefix services/agent-loop ci
 npm --prefix services/agent-loop run typecheck
 npm --prefix services/agent-loop test
@@ -99,8 +100,8 @@ node scripts/test-services.mjs
 
 端到端脚本实际启动三个独立进程和本机 TLS 连接，验证权限、工坊子进程产物、幂等、取消和崩溃恢复；模型和 CLI 响应使用本机夹具，不调用付费模型。Docker 镜像/容器验证状态另见 [验收记录](doc/independent-services-verification.md)。
 
-## 从原 Go 应用迁移
+## 旧版 Go 本地应用
 
-原 `cmd/easygo-agent`、Go 本地循环及既有数据库仍保留用于过渡与回归，`go test ./...` 验证它们。它们不参与新的三服务部署；旧 HTTP/Bearer 客户端不能直接调用新 RPC 端口。旧用法见 [历史说明](doc/legacy-local-app.md)。
+原 `cmd/easygo-agent` 本地应用（Go 本地循环、PostgreSQL 记忆库、沙箱控制面）已从主分支移除，代码保留在 tag `legacy-go-app-final`，说明见 [历史说明](doc/legacy-local-app.md)。个人 CLI `cmd/easygo-remote` 只依赖 `internal/{tui,remotetui,clientapi}`，继续保留。旧 HTTP/Bearer 客户端不能调用新 RPC 端口。
 
 新 TS 服务使用自己的 SQLite 数据库，不自动转换旧 PostgreSQL/Eino 历史。已开始但中断的任务不自动重放副作用；CLI 执行策略与每任务 OS 沙箱也不是同一层权限。

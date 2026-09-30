@@ -27,7 +27,7 @@ CLI 只请求 `/api/login`、`/api/logout`、`/api/rpc` 三个路径，不访问
 
 ## 与旧应用的关系
 
-CLI 只由三个包组成：`internal/tui`（界面）、`internal/remotetui`（平台适配）、`internal/clientapi`（运行队列接口、run 记录、运行事件等共用声明）。旧应用的 `agentruntime` 和 `conversation` 用类型别名引用 `clientapi` 里的声明，CLI 不依赖旧应用的任何包，P5 移除旧 Go 本地应用时不受影响。
+CLI 只由三个包组成：`internal/tui`（界面）、`internal/remotetui`（平台适配）、`internal/clientapi`（运行队列接口、run 记录、运行事件等共用声明）。旧应用的 `agentruntime` 和 `conversation` 用类型别名引用 `clientapi` 里的声明，CLI 不依赖旧应用的任何包；旧 Go 本地应用已于 2026-09-30 从主分支移除（代码在 tag `legacy-go-app-final`），CLI 不受影响。
 
 检查方法：
 

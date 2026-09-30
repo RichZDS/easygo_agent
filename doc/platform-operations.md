@@ -169,7 +169,7 @@ go run ./cmd/easygo-remote --url https://agent.example.com --email you@example.c
 # 其他：--session ID 续接会话；--runtime NAME 指定工坊运行时；--sessions / --runtimes 列表后退出
 ```
 
-- 原 `cmd/easygo-agent` 本地应用仍保留用于过渡和回归，不参与托管部署。
+- 原 `cmd/easygo-agent` 本地应用已从主分支移除（代码在 tag `legacy-go-app-final`），不参与托管部署。
 
 ## 10. 验证命令
 

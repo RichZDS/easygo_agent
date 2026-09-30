@@ -1,3 +1,5 @@
+> 历史文档：这里描述的代码已于 2026-09-30 从主分支移除，完整实现保留在 git tag `legacy-go-app-final`。
+
 # 分层 skill 与可恢复后台任务
 
 主 agent 继续使用 Go/Eino Deep Agent、会话 FIFO、长期记忆和原有沙箱。后台任务使用独立的 Eino AgenticModel 执行循环，以便在模型输出和工具副作用之间持久化检查点。旧配置未声明 `tasks` 时默认关闭；仓库示例启用。

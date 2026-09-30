@@ -1,7 +1,7 @@
 # Three mTLS RPC services. Start this file by itself:
 #   docker compose -f compose.services.yaml up --build
-# compose.yaml is the one-click managed platform and compose.legacy.yaml the
-# older Postgres and sandbox stack. Neither is part of this deployment.
+# compose.yaml is the one-click managed platform; it is not part of this
+# deployment. The old Postgres/sandbox stack lives at tag legacy-go-app-final.
 #
 # Published ports bind the host to 127.0.0.1. Inside the compose network the
 # listeners are whatever each config.example.json sets; the service defaults

@@ -7,7 +7,9 @@ GOTESTFLAGS ?=
 GOLANGCI_LINT ?= golangci-lint
 NODE ?= node
 NPM ?= npm
-PRETTIER ?= npx --yes prettier@3.9.9
+# The prettier that npm ci installs for the agent loop, else fetched with npx. Keep the
+# fallback version equal to the prettier devDependency in services/agent-loop/package.json.
+PRETTIER ?= $(or $(wildcard $(LOOP)/node_modules/.bin/prettier),npx --yes prettier@3.9.9)
 
 GO_MODULES := . packages/rpc-go services/ai-gateway services/workshop
 LOOP := services/agent-loop

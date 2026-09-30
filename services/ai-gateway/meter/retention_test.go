@@ -226,3 +226,17 @@ func TestRetentionConfig(t *testing.T) {
 		}
 	}
 }
+
+func TestInvalidWalletURL(t *testing.T) {
+	wallet := newWallet(t)
+	for _, u := range []string{"http://wallet/rpc", "https:///rpc", "https://u:p@wallet/rpc", "https://wallet/rpc?x=1", "https://wallet/rpc#f"} {
+		c := wallet.config
+		c.URL = u
+		if m, e := New(c, wallet.identity); e == nil || e.Error() != "invalid meter configuration" {
+			if m != nil {
+				m.Close()
+			}
+			t.Errorf("%s => %v", u, e)
+		}
+	}
+}

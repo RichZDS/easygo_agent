@@ -244,3 +244,46 @@ func TestNativeNullableErrorSuccess(t *testing.T) {
 		}
 	}
 }
+
+// Complete and Native share the upstream call, so cancellation before the
+// provider answers is reported as canceled on both paths, not transport_error.
+func TestNativeCancellationBeforeResponseIsCanceled(t *testing.T) {
+	for _, mode := range []string{"before_call", "awaiting_headers"} {
+		t.Run(mode, func(t *testing.T) {
+			var calls atomic.Int32
+			reached := make(chan struct{})
+			p := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// Consume the body so the server notices the client disconnect.
+				io.Copy(io.Discard, r.Body)
+				if calls.Add(1) == 1 {
+					close(reached)
+				}
+				<-r.Context().Done()
+			}))
+			defer p.Close()
+			observed := make(chan Observation, 1)
+			g := newTestGateway(t, "responses", p.URL, func(o Observation) { observed <- o })
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if mode == "before_call" {
+				cancel()
+			} else {
+				go func() {
+					select {
+					case <-reached:
+					case <-time.After(3 * time.Second):
+					}
+					cancel()
+				}()
+			}
+			_, err := g.Native(ctx, "test", "responses", "cancel-"+mode, json.RawMessage(`{}`))
+			requireCode(t, err, "canceled")
+			if o := <-observed; o.ErrorCode != "canceled" {
+				t.Fatalf("observation code %q", o.ErrorCode)
+			}
+			if want := map[string]int32{"before_call": 0, "awaiting_headers": 1}[mode]; calls.Load() != want {
+				t.Fatalf("provider calls %d, want %d", calls.Load(), want)
+			}
+		})
+	}
+}

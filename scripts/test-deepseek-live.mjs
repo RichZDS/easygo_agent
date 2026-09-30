@@ -14,17 +14,12 @@ import { createRPCClient } from './rpc-call.mjs';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const key = process.env.DEEPSEEK_API_KEY;
-if (!key)
-  throw new Error(
-    'Live test requires DEEPSEEK_API_KEY; this test makes billable requests.',
-  );
+if (!key) throw new Error('Live test requires DEEPSEEK_API_KEY; this test makes billable requests.');
 // Builds and PKI helpers must not inherit the provider credential.
 delete process.env.DEEPSEEK_API_KEY;
 const exec = promisify(execFile),
   go = process.env.EASYGO_GO_BIN ?? 'go';
-const state = await mkdtemp(
-  join(process.env.EASYGO_LIVE_STATE_ROOT ?? tmpdir(), 'easygo-deepseek-live-'),
-);
+const state = await mkdtemp(join(process.env.EASYGO_LIVE_STATE_ROOT ?? tmpdir(), 'easygo-deepseek-live-'));
 const toolsOnly = process.env.EASYGO_LIVE_TOOLS_ONLY === '1';
 const reportDir = process.env.EASYGO_LIVE_REPORT_DIR ?? state;
 await mkdir(reportDir, { recursive: true });
@@ -41,14 +36,9 @@ const report = {
 const children = [],
   clients = [];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const scrub = (v) =>
-  JSON.parse(JSON.stringify(v).replaceAll(key, '[REDACTED]'));
+const scrub = (v) => JSON.parse(JSON.stringify(v).replaceAll(key, '[REDACTED]'));
 async function save() {
-  await writeFile(
-    join(reportDir, 'live-report.json'),
-    JSON.stringify(scrub(report), null, 2),
-    { mode: 0o600 },
-  );
+  await writeFile(join(reportDir, 'live-report.json'), JSON.stringify(scrub(report), null, 2), { mode: 0o600 });
 }
 function log(value) {
   process.stdout.write(JSON.stringify(scrub(value)) + '\n');
@@ -126,12 +116,7 @@ try {
     clients.push(c);
     return c;
   }
-  const gateway = JSON.parse(
-    await readFile(
-      join(root, 'services/ai-gateway/config.deepseek.example.json'),
-      'utf8',
-    ),
-  );
+  const gateway = JSON.parse(await readFile(join(root, 'services/ai-gateway/config.deepseek.example.json'), 'utf8'));
   gateway.listen = `127.0.0.1:${gatewayPort}`;
   gateway.tls = identity('ai-gateway');
   gateway.authorization = [
@@ -142,9 +127,7 @@ try {
   for (const [alias, m] of Object.entries(gateway.models))
     m.parameters = {
       max_output_tokens: 1024,
-      ...(alias === 'responses'
-        ? { reasoning: { effort: 'low' } }
-        : { thinking: { type: 'disabled' } }),
+      ...(alias === 'responses' ? { reasoning: { effort: 'low' } } : { thinking: { type: 'disabled' } }),
     };
   const binaries = {
     codex: process.env.WORKSHOP_NATIVE_CODEX ?? 'codex',
@@ -176,9 +159,7 @@ try {
       concurrency: 1,
       queue_capacity: 4,
       max_output_bytes: 4194304,
-      engines: Object.fromEntries(
-        Object.entries(binaries).map(([n, binary]) => [n, { binary }]),
-      ),
+      engines: Object.fromEntries(Object.entries(binaries).map(([n, binary]) => [n, { binary }])),
       model_gateway: {
         ...ep('ai-gateway', gatewayPort),
         tls: identity('workshop'),
@@ -219,13 +200,7 @@ try {
     listen: `127.0.0.1:${loopPort}`,
     tls: identity('agent-loop'),
     authorization: [
-      grant('client', [
-        'health',
-        'agent.session.create',
-        'agent.run.start',
-        'agent.run.get',
-        'agent.workshop.catalog',
-      ]),
+      grant('client', ['health', 'agent.session.create', 'agent.run.start', 'agent.run.get', 'agent.workshop.catalog']),
     ],
     database: join(state, 'agent.sqlite'),
     gateway: ep('ai-gateway', gatewayPort),
@@ -248,16 +223,8 @@ try {
   await exec('npm', ['run', 'build'], {
     cwd: join(root, 'services/agent-loop'),
   });
-  start(
-    'gateway',
-    join(state, 'gateway'),
-    ['--config', join(state, 'gateway.json')],
-    { DEEPSEEK_API_KEY: key },
-  );
-  start('workshop', join(state, 'workshop'), [
-    '--config',
-    join(state, 'workshop.json'),
-  ]);
+  start('gateway', join(state, 'gateway'), ['--config', join(state, 'gateway.json')], { DEEPSEEK_API_KEY: key });
+  start('workshop', join(state, 'workshop'), ['--config', join(state, 'workshop.json')]);
   start('loop', process.execPath, [
     join(root, 'services/agent-loop/dist/server.js'),
     '--config',
@@ -286,9 +253,7 @@ try {
           },
           stream: true,
         });
-        entry.pass = r.message.content.some(
-          (b) => b.type === 'text' && b.text.includes('LIVE_OK'),
-        );
+        entry.pass = r.message.content.some((b) => b.type === 'text' && b.text.includes('LIVE_OK'));
         entry.finish_reason = r.finish_reason;
         entry.usage = r.usage;
       } catch (e) {
@@ -316,9 +281,7 @@ try {
     }, 125000);
     report.checks.push({
       name: 'main-loop',
-      pass:
-        final.status === 'completed' &&
-        JSON.stringify(final.result).includes('MAIN_LOOP_OK'),
+      pass: final.status === 'completed' && JSON.stringify(final.result).includes('MAIN_LOOP_OK'),
       status: final.status,
       error: final.error,
     });
@@ -331,8 +294,7 @@ try {
       pass: catalog[0]?.runtimes.length === 4,
     });
   }
-  const allowed =
-    process.env.EASYGO_LIVE_ENGINES?.split(',') ?? Object.keys(binaries);
+  const allowed = process.env.EASYGO_LIVE_ENGINES?.split(',') ?? Object.keys(binaries);
   for (const engine of allowed) {
     const alias = workshop.workshop.runtime_profiles[engine].gateway_model;
     if (!toolsOnly && !report.protocols.find((p) => p.alias === alias)?.pass) {
@@ -355,8 +317,7 @@ try {
         task = await w.call('workshop.resume', {
           namespace: 'live',
           task_id: task.id,
-          input:
-            'Repeat exactly the marker from your previous answer. Do not add any words.',
+          input: 'Repeat exactly the marker from your previous answer. Do not add any words.',
         });
       const done = await wait(async () => {
         const r = await w.call('workshop.get', {
@@ -369,20 +330,13 @@ try {
       let artifact;
       if (toolsOnly && done.status === 'succeeded') {
         try {
-          artifact = await readFile(
-            join(state, 'workshop-data', 'workspaces', task.id, 'proof.txt'),
-            'utf8',
-          );
+          artifact = await readFile(join(state, 'workshop-data', 'workspaces', task.id, 'proof.txt'), 'utf8');
         } catch {}
       }
       const result = {
         turn,
         status: done.status,
-        pass:
-          done.status === 'succeeded' &&
-          (toolsOnly
-            ? artifact === 'LIVE_FILE_OK'
-            : latest.text?.includes(marker)),
+        pass: done.status === 'succeeded' && (toolsOnly ? artifact === 'LIVE_FILE_OK' : latest.text?.includes(marker)),
         ...(toolsOnly ? { artifact_matches: artifact === 'LIVE_FILE_OK' } : {}),
         elapsed_ms: Date.now() - begin,
         text: latest.text,
@@ -394,14 +348,10 @@ try {
         namespace: 'live',
         task_id: task.id,
       });
-      await writeFile(
-        join(reportDir, engine + '-events.json'),
-        JSON.stringify(scrub(events), null, 2),
-        { mode: 0o600 },
-      );
-      const sessions = events
-        .filter((e) => e.kind === 'session')
-        .map((e) => e.session_id);
+      await writeFile(join(reportDir, engine + '-events.json'), JSON.stringify(scrub(events), null, 2), {
+        mode: 0o600,
+      });
+      const sessions = events.filter((e) => e.kind === 'session').map((e) => e.session_id);
       entry.same_session = sessions.length > 0 && new Set(sessions).size === 1;
       await save();
       if (!result.pass) break;
@@ -411,10 +361,7 @@ try {
     report.protocols.every((x) => x.pass) &&
     report.checks.every((x) => x.pass) &&
     report.runtimes.every(
-      (x) =>
-        x.turns?.length === (toolsOnly ? 1 : 2) &&
-        x.turns.every((y) => y.pass) &&
-        x.same_session,
+      (x) => x.turns?.length === (toolsOnly ? 1 : 2) && x.turns.every((y) => y.pass) && x.same_session
     );
 } catch (e) {
   report.error = { message: e.message, code: e.code };

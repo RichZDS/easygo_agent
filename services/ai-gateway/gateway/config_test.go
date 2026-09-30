@@ -25,3 +25,23 @@ func TestLoadConfigEnvironmentOnly(t *testing.T) {
 		}
 	}
 }
+func TestResolveLeavesFileConfigUntouched(t *testing.T) {
+	t.Setenv("GW_TEST_VENDOR_SECRET", "not-a-real-secret")
+	file := FileConfig{Models: map[string]FileModel{"test": {Model: Model{Protocol: "responses", Endpoint: "http://localhost/v1/responses", Model: "u", Headers: map[string]string{"X-Deployment": "local"}}, HeaderEnv: map[string]string{"X-Vendor-Secret": "GW_TEST_VENDOR_SECRET"}}}}
+	for i := 0; i < 2; i++ {
+		c, _, e := Resolve(file)
+		if h := c.Models["test"].Headers; e != nil || h["X-Vendor-Secret"] != "not-a-real-secret" || h["X-Deployment"] != "local" {
+			t.Fatalf("resolve %d: %v %v", i, e, h)
+		}
+	}
+	if h := file.Models["test"].Headers; len(h) != 1 || h["X-Deployment"] != "local" {
+		t.Fatalf("caller headers modified: %v", h)
+	}
+}
+func TestLoadConfigNamesUnknownField(t *testing.T) {
+	_, _, e := LoadConfig(strings.NewReader(`{"models":{},"extra_field":1}`))
+	requireCode(t, e, "invalid_config")
+	if !strings.Contains(e.Error(), `"extra_field"`) {
+		t.Fatalf("unknown field not named: %v", e)
+	}
+}

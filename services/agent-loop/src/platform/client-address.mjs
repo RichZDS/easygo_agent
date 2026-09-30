@@ -10,7 +10,8 @@ function normalizeAddress(value) {
   const canonical = new URL(`http://[${value}]/`).hostname.slice(1, -1);
   const mapped = /^::ffff:([a-f0-9]{1,4}):([a-f0-9]{1,4})$/.exec(canonical);
   if (!mapped) return canonical;
-  const high = parseInt(mapped[1], 16), low = parseInt(mapped[2], 16);
+  const high = parseInt(mapped[1], 16),
+    low = parseInt(mapped[2], 16);
   return `${high >>> 8}.${high & 255}.${low >>> 8}.${low & 255}`;
 }
 
@@ -20,7 +21,8 @@ function normalizeAddress(value) {
  */
 export function trustedProxyAddresses(value = undefined) {
   if (value === undefined) return new Set();
-  if (!Array.isArray(value) || value.length > 16) throw Error('trusted_proxies must be an array of at most 16 IP literals');
+  if (!Array.isArray(value) || value.length > 16)
+    throw Error('trusted_proxies must be an array of at most 16 IP literals');
   const addresses = [];
   for (const entry of value) {
     const address = normalizeAddress(entry);

@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -13,6 +12,10 @@ import (
 	"easygo-agent/rpc"
 	"easygo-agent/services/ai-gateway/ai"
 )
+
+// A unary RPC carries base64 bytes; cap at 8MiB even if other gateway limits
+// are larger, leaving room for the envelope in a 16MiB RPC response.
+const nativeBodyLimit int64 = 8 << 20
 
 // NativeResponse retains a framework's wire format. SSE is bounded and buffered;
 // it is released only after the provider response has been read completely.
@@ -33,30 +36,8 @@ func (g *Gateway) Native(ctx context.Context, alias, protocol, requestID string,
 	var accounting *accountingReader
 	var price *Pricing
 	defer func() {
-		obs.Latency = time.Since(start)
-		if accounting != nil {
-			obs.Usage = accounting.Usage()
-			obs.Cost = calculateCost(obs.Usage, price)
-		}
-		if err != nil {
-			var e *Error
-			if errors.As(err, &e) {
-				obs.ErrorCode = e.Code
-			} else {
-				obs.ErrorCode = "invalid_response"
-			}
-		}
-		if settle != nil {
-			if e := settle(obs); e != nil {
-				obs.ErrorCode = "billing_unavailable"
-				if err == nil {
-					err = fail("billing_unavailable", "usage could not be durably recorded")
-					out = NativeResponse{}
-				}
-			}
-		}
-		if g.observer != nil {
-			g.observer(obs)
+		if e := g.settleObservation(&obs, start, accounting, price, settle, err, "invalid_response"); e != nil {
+			err, out = e, NativeResponse{}
 		}
 	}()
 	m, ok := g.models[alias]
@@ -72,7 +53,6 @@ func (g *Gateway) Native(ctx context.Context, alias, protocol, requestID string,
 	if int64(len(raw)) > g.bodyLimit || rpc.Decode(raw, &body) != nil || body == nil {
 		return out, fail("invalid_request", "invalid native request")
 	}
-	body["model"], _ = json.Marshal(m.Model)
 	// Operator parameters remain authoritative. Native framework tool definitions
 	// are intentionally retained instead of translated into the neutral tool API.
 	defaults, e := parameters(m, ai.Request{})
@@ -91,45 +71,18 @@ func (g *Gateway) Native(ctx context.Context, alias, protocol, requestID string,
 	if e != nil {
 		return out, e
 	}
-	req, e := http.NewRequestWithContext(ctx, http.MethodPost, m.Endpoint, bytes.NewReader(data))
-	if e != nil {
-		return out, fail("invalid_config", "invalid endpoint")
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	for k, v := range m.Headers {
-		req.Header.Set(k, v)
-	}
-	if protocol == "anthropic" {
-		if req.Header.Get("Anthropic-Version") == "" {
-			req.Header.Set("Anthropic-Version", "2023-06-01")
-		}
-		if m.APIKey != "" {
-			req.Header.Set("X-Api-Key", m.APIKey)
-		}
-	} else if m.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+m.APIKey)
-	}
-	res, e := g.client.Do(req)
-	if e != nil {
-		return out, caused("transport_error", "native upstream failed", e)
-	}
-	defer res.Body.Close()
-	obs.HTTPStatus = res.StatusCode
-	accountingLimit := g.bodyLimit
-	if accountingLimit > 8<<20 {
-		accountingLimit = 8 << 20
-	}
-	accounting = newAccountingReader(res.Body, protocol, res.Header.Get("Content-Type"), accountingLimit, g.eventLimit)
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		_, _ = io.Copy(io.Discard, accounting)
-		return out, &Error{Code: "upstream_http_error", Message: "upstream rejected request", Status: res.StatusCode}
-	}
-	// A unary RPC carries base64 bytes; cap at 8MiB even if other gateway limits
-	// are larger, leaving room for the envelope in a 16MiB RPC response.
 	limit := g.bodyLimit
-	if limit > 8<<20 {
-		limit = 8 << 20
+	if limit > nativeBodyLimit {
+		limit = nativeBodyLimit
+	}
+	var res *http.Response
+	res, accounting, e = g.upstream(ctx, m, protocol, data, "application/json, text/event-stream", limit)
+	if res != nil {
+		defer res.Body.Close()
+		obs.HTTPStatus = res.StatusCode
+	}
+	if e != nil {
+		return out, e
 	}
 	raw, e = readBounded(accounting, limit)
 	if e != nil {
@@ -139,25 +92,21 @@ func (g *Gateway) Native(ctx context.Context, alias, protocol, requestID string,
 	if e = validateNative(raw, contentType, protocol, g.eventLimit); e != nil {
 		return out, e
 	}
-	var parsed ai.Response
 	if contentType == "text/event-stream" {
-		parsed, e = decodeStream(bytes.NewReader(raw), m, alias, limit, g.eventLimit, func(ai.Event) error { return nil })
+		_, e = decodeStream(bytes.NewReader(raw), m, alias, limit, g.eventLimit, func(ai.Event) error { return nil })
 	} else if contentType == "application/json" {
-		parsed, e = decodeResponse(m, alias, raw)
+		_, e = decodeResponse(m, alias, raw)
 	} else {
 		return out, fail("invalid_response", "unsupported native response content type")
 	}
-	// Native framework-specific tools may exceed the neutral parser's vocabulary.
-	// Forward the original bytes, but only report usage/cost when parsing proves it.
+	// Usage and cost come from the accounting reader; parsing here only validates.
+	// Native framework-specific tools may exceed the neutral parser's vocabulary,
+	// so unsupported_capability still forwards the original bytes.
 	if e != nil {
 		var problem *Error
 		if !errors.As(e, &problem) || problem.Code != "unsupported_capability" {
 			return out, e
 		}
-	}
-	if e == nil {
-		obs.Usage = parsed.Usage
-		obs.Cost = calculateCost(parsed.Usage, m.Price)
 	}
 	if ctx.Err() != nil {
 		return out, caused("canceled", "request canceled", ctx.Err())

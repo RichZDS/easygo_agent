@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { mkdtemp, rm, readFile, stat } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -13,29 +14,57 @@ import { RpcError } from '../dist/validation.js';
 
 async function fixture(t) {
   const dir = await mkdtemp(join(tmpdir(), 'platform-wallet-'));
-  const file = join(dir, 'platform.db'), store = new PlatformStore(file), wallet = new Wallet(store);
-  store.run("INSERT INTO accounts(id,email,password,namespace,role,created_at) VALUES('a','a@example.test','unused','account-a','user','now')");
-  store.run("INSERT INTO accounts(id,email,password,namespace,role,created_at) VALUES('b','b@example.test','unused','account-b','user','now')");
-  t.after(async () => { store.close(); await rm(dir, { recursive: true, force: true }); });
+  const file = join(dir, 'platform.db'),
+    store = new PlatformStore(file),
+    wallet = new Wallet(store);
+  store.run(
+    "INSERT INTO accounts(id,email,password,namespace,role,created_at) VALUES('a','a@example.test','unused','account-a','user','now')"
+  );
+  store.run(
+    "INSERT INTO accounts(id,email,password,namespace,role,created_at) VALUES('b','b@example.test','unused','account-b','user','now')"
+  );
+  t.after(async () => {
+    store.close();
+    await rm(dir, { recursive: true, force: true });
+  });
   return { dir, file, store, wallet };
 }
-const reserve = (request_id, extra = {}) => ({ namespace: 'account-a', request_id, fingerprint: `fp-${request_id}`, model: 'fixture', reserve_input_tokens: 70, reserve_output_tokens: 30, source: 'gateway', ...extra });
-const settle = (request_id, extra = {}) => ({ namespace: 'account-a', request_id, usage: { known: true, input_tokens: 40, output_tokens: 20, cache_read_tokens: 10, cache_write_tokens: 5 }, outcome: 'complete', source: 'gateway', ...extra });
-const grant = (store, amount, key = 'grant') => store.grant({ user_id: 'a', amount_micros: amount, reason: 'fixture', idempotency_key: key }, 'admin');
-const reason = code => error => error instanceof RpcError && error.reason === code;
+const reserve = (request_id, extra = {}) => ({
+  namespace: 'account-a',
+  request_id,
+  fingerprint: `fp-${request_id}`,
+  model: 'fixture',
+  reserve_input_tokens: 70,
+  reserve_output_tokens: 30,
+  source: 'gateway',
+  ...extra,
+});
+const settle = (request_id, extra = {}) => ({
+  namespace: 'account-a',
+  request_id,
+  usage: { known: true, input_tokens: 40, output_tokens: 20, cache_read_tokens: 10, cache_write_tokens: 5 },
+  outcome: 'complete',
+  source: 'gateway',
+  ...extra,
+});
+const grant = (store, amount, key = 'grant') =>
+  store.grant({ user_id: 'a', amount_micros: amount, reason: 'fixture', idempotency_key: key }, 'admin');
+const reason = (code) => (error) => error instanceof RpcError && error.reason === code;
 
-test('zero credit rejects dispatch; idempotent grants, reservations, snapshot and exact debit survive reopen', async t => {
+test('zero credit rejects dispatch; idempotent grants, reservations, snapshot and exact debit survive reopen', async (t) => {
   const { store, wallet, file } = await fixture(t);
   assert.throws(() => wallet.reserve(reserve('r')), reason('insufficient_credits'));
   assert.deepEqual(grant(store, 1_000_000), { ledger_seq: 1, duplicate: false });
   assert.equal(grant(store, 1_000_000).duplicate, true);
   assert.throws(() => grant(store, 2_000_000), reason('idempotency_conflict'));
-  const first = wallet.reserve(reserve('r')); assert.equal(first.reserved_micros, 100_000);
+  const first = wallet.reserve(reserve('r'));
+  assert.equal(first.reserved_micros, 100_000);
   assert.equal(wallet.reserve(reserve('r')).duplicate, true);
   assert.throws(() => wallet.reserve(reserve('r', { fingerprint: 'changed' })), reason('idempotency_conflict'));
   assert.equal(store.walletView('account-a').available_micros, 900_000);
   store.setTariff({ input_micros: 9000, output_micros: 9000 }, 'admin');
-  const receipt = wallet.settle(settle('r')); assert.equal(receipt.charged_micros, 60_000);
+  const receipt = wallet.settle(settle('r'));
+  assert.equal(receipt.charged_micros, 60_000);
   assert.equal(wallet.settle(settle('r')).duplicate, true);
   assert.throws(() => wallet.settle(settle('r', { source: 'changed' })), reason('settlement_conflict'));
   assert.equal(store.walletView('account-a').balance_micros, 940_000);
@@ -44,25 +73,45 @@ test('zero credit rejects dispatch; idempotent grants, reservations, snapshot an
   assert.equal(store.walletView('account-b').balance_micros, 0);
   assert.throws(() => wallet.settle(settle('r', { namespace: 'account-b' })), reason('reservation_not_found'));
   const reopened = new PlatformStore(file);
-  try { assert.equal(new Wallet(reopened).settle(settle('r')).duplicate, true); assert.equal(reopened.walletView('account-a').balance_micros, 940_000); } finally { reopened.close(); }
+  try {
+    assert.equal(new Wallet(reopened).settle(settle('r')).duplicate, true);
+    assert.equal(reopened.walletView('account-a').balance_micros, 940_000);
+  } finally {
+    reopened.close();
+  }
   assert.throws(() => store.run('UPDATE ledger SET amount_micros=0'), /append_only/);
 });
 
-test('unknown/uncertain stays pending, rejected releases, overage stops admission, disabled still settles', async t => {
-  const { store, wallet } = await fixture(t); grant(store, 1_000_000);
+test('unknown/uncertain stays pending, rejected releases, overage stops admission, disabled still settles', async (t) => {
+  const { store, wallet } = await fixture(t);
+  grant(store, 1_000_000);
   wallet.reserve(reserve('unknown'));
   const unknown = settle('unknown', { usage: { known: false, input_tokens: 0, output_tokens: 0 } });
-  assert.equal(wallet.settle(unknown).status, 'pending'); assert.equal(wallet.settle(unknown).duplicate, true);
+  assert.equal(wallet.settle(unknown).status, 'pending');
+  assert.equal(wallet.settle(unknown).duplicate, true);
   assert.throws(() => wallet.settle(settle('unknown')), reason('settlement_conflict'));
-  wallet.reserve(reserve('uncertain')); assert.equal(wallet.settle(settle('uncertain', { outcome: 'uncertain' })).status, 'settled');
+  wallet.reserve(reserve('uncertain'));
+  assert.equal(wallet.settle(settle('uncertain', { outcome: 'uncertain' })).status, 'settled');
   assert.equal(wallet.settle(settle('uncertain', { outcome: 'uncertain' })).duplicate, true);
   assert.equal(store.usage('account-a')[0].settlement.usage.input_tokens, 40);
   wallet.reserve(reserve('rejected'));
-  assert.equal(wallet.settle(settle('rejected', { outcome: 'rejected', usage: { known: false, input_tokens: 0, output_tokens: 0 }, provider_status: 429 })).status, 'released');
+  assert.equal(
+    wallet.settle(
+      settle('rejected', {
+        outcome: 'rejected',
+        usage: { known: false, input_tokens: 0, output_tokens: 0 },
+        provider_status: 429,
+      })
+    ).status,
+    'released'
+  );
   assert.equal(store.walletView('account-a').held_micros, 100_000);
   wallet.reserve(reserve('overage'));
   store.run('UPDATE accounts SET disabled=1 WHERE id=?', 'a');
-  assert.equal(wallet.settle(settle('overage', { usage: { known: true, input_tokens: 1500, output_tokens: 0 } })).charged_micros, 1_500_000);
+  assert.equal(
+    wallet.settle(settle('overage', { usage: { known: true, input_tokens: 1500, output_tokens: 0 } })).charged_micros,
+    1_500_000
+  );
   assert.throws(() => wallet.reserve(reserve('disabled')), reason('account_unavailable'));
   store.run('UPDATE accounts SET disabled=0 WHERE id=?', 'a');
   assert.equal(store.walletView('account-a').balance_micros, -560_000);
@@ -70,31 +119,61 @@ test('unknown/uncertain stays pending, rejected releases, overage stops admissio
   assert.throws(() => wallet.reserve(reserve('blocked')), reason('insufficient_credits'));
 });
 
-test('strict integer, overflow, cache subset and rejected-usage validation leaves wallet unchanged', async t => {
-  const { store, wallet } = await fixture(t); grant(store, Number.MAX_SAFE_INTEGER);
+test('strict integer, overflow, cache subset and rejected-usage validation leaves wallet unchanged', async (t) => {
+  const { store, wallet } = await fixture(t);
+  grant(store, Number.MAX_SAFE_INTEGER);
   assert.throws(() => grant(store, 1, 'overflow'), reason('credit_overflow'));
-  for (const value of [-1, 1.1, Number.MAX_SAFE_INTEGER + 1, '2', null]) assert.throws(() => wallet.reserve(reserve('bad', { reserve_input_tokens: value })), reason('invalid_integer'));
-  assert.throws(() => wallet.reserve(reserve('overflow', { reserve_input_tokens: Number.MAX_SAFE_INTEGER })), reason('credit_overflow'));
+  for (const value of [-1, 1.1, Number.MAX_SAFE_INTEGER + 1, '2', null])
+    assert.throws(() => wallet.reserve(reserve('bad', { reserve_input_tokens: value })), reason('invalid_integer'));
+  assert.throws(
+    () => wallet.reserve(reserve('overflow', { reserve_input_tokens: Number.MAX_SAFE_INTEGER })),
+    reason('credit_overflow')
+  );
   wallet.reserve(reserve('valid'));
-  assert.throws(() => wallet.settle(settle('valid', { usage: { known: true, input_tokens: 10, output_tokens: 1, cache_read_tokens: 8, cache_write_tokens: 4 } })), reason('invalid_cache_subset'));
+  assert.throws(
+    () =>
+      wallet.settle(
+        settle('valid', {
+          usage: { known: true, input_tokens: 10, output_tokens: 1, cache_read_tokens: 8, cache_write_tokens: 4 },
+        })
+      ),
+    reason('invalid_cache_subset')
+  );
   assert.throws(() => wallet.settle(settle('valid', { outcome: 'rejected' })), reason('rejected_usage_conflict'));
-  assert.throws(() => wallet.settle(settle('valid', { usage: { known: false, input_tokens: 1, output_tokens: 0 } })), reason('unknown_usage_has_counts'));
+  assert.throws(
+    () => wallet.settle(settle('valid', { usage: { known: false, input_tokens: 1, output_tokens: 0 } })),
+    reason('unknown_usage_has_counts')
+  );
   assert.equal(store.walletView('account-a').held_micros, 100_000);
   assert.equal(store.usage('account-a')[0].settlement, null);
 });
 
-test('manual reconciliation is atomic, snapshot priced, audited, idempotent and preserves original raw receipt', async t => {
-  const { store, wallet } = await fixture(t); grant(store, 1_000_000);
+test('manual reconciliation is atomic, snapshot priced, audited, idempotent and preserves original raw receipt', async (t) => {
+  const { store, wallet } = await fixture(t);
+  grant(store, 1_000_000);
   wallet.reserve(reserve('pending'));
-  const unknown = settle('pending', { outcome: 'uncertain', usage: { known: false, input_tokens: 0, output_tokens: 0 } });
+  const unknown = settle('pending', {
+    outcome: 'uncertain',
+    usage: { known: false, input_tokens: 0, output_tokens: 0 },
+  });
   wallet.settle(unknown);
   const original = store.usage('account-a')[0].settlement;
   store.setTariff({ input_micros: 5000, output_micros: 5000 }, 'admin');
-  const resolution = { namespace: 'account-a', request_id: 'pending', decision: 'settle', usage: { known: true, input_tokens: 20, output_tokens: 10 }, reason: 'Verified provider receipt', idempotency_key: 'reconcile-1' };
+  const resolution = {
+    namespace: 'account-a',
+    request_id: 'pending',
+    decision: 'settle',
+    usage: { known: true, input_tokens: 20, output_tokens: 10 },
+    reason: 'Verified provider receipt',
+    idempotency_key: 'reconcile-1',
+  };
   assert.equal(wallet.resolve(resolution, 'admin').charged_micros, 30_000);
   assert.equal(wallet.resolve(resolution, 'admin').duplicate, true);
   assert.throws(() => wallet.resolve({ ...resolution, reason: 'changed' }, 'admin'), reason('idempotency_conflict'));
-  assert.throws(() => wallet.resolve({ ...resolution, idempotency_key: 'different' }, 'admin'), reason('reservation_not_pending'));
+  assert.throws(
+    () => wallet.resolve({ ...resolution, idempotency_key: 'different' }, 'admin'),
+    reason('reservation_not_pending')
+  );
   assert.deepEqual(store.usage('account-a')[0].settlement, original);
   assert.equal(store.usage('account-a')[0].resolution.payload.usage.input_tokens, 20);
   assert.equal(store.walletView('account-a').balance_micros, 970_000);
@@ -102,57 +181,108 @@ test('manual reconciliation is atomic, snapshot priced, audited, idempotent and 
   assert.equal(wallet.settle(unknown).duplicate, true);
   assert.throws(() => wallet.settle(settle('pending')), reason('settlement_conflict'));
   wallet.reserve(reserve('orphan'));
-  const release = { namespace: 'account-a', request_id: 'orphan', decision: 'release', reason: 'Provider confirms no dispatch', idempotency_key: 'reconcile-2' };
+  const release = {
+    namespace: 'account-a',
+    request_id: 'orphan',
+    decision: 'release',
+    reason: 'Provider confirms no dispatch',
+    idempotency_key: 'reconcile-2',
+  };
   assert.equal(wallet.resolve(release, 'admin').status, 'resolved_released');
   assert.equal(wallet.resolve(release, 'admin').duplicate, true);
   assert.equal(wallet.settle(settle('orphan')).late, true);
   assert.equal(store.pending().length, 0);
   assert.equal(store.walletView('account-a').balance_micros, 970_000);
   assert.throws(() => store.run('UPDATE resolutions SET payload=?', '{}'), /append_only/);
-  assert.throws(() => store.run('UPDATE reservations SET settlement=? WHERE request_id=?', '{}', 'pending'), /immutable_receipt/);
+  assert.throws(
+    () => store.run('UPDATE reservations SET settlement=? WHERE request_id=?', '{}', 'pending'),
+    /immutable_receipt/
+  );
   assert.equal(store.all("SELECT * FROM audit WHERE action LIKE 'resolved_%'").length, 2);
 });
 
-for (const decision of ['release', 'settle']) test(`late provider receipt after admin ${decision} preserves raw usage without changing credits`, async t => {
-  const { store, wallet, file } = await fixture(t); grant(store, 1_000_000);
-  const reserved = wallet.reserve(reserve('late'));
-  const manual = { namespace: 'account-a', request_id: 'late', decision, ...(decision === 'settle' ? { usage: { known: true, input_tokens: 20, output_tokens: 10 } } : {}), reason: 'Manual provider verification', idempotency_key: 'manual-late' };
-  const resolved = wallet.resolve(manual, 'admin');
-  // A different active request must keep its hold; late receipt must not release it.
-  wallet.reserve(reserve('other'));
-  const before = store.walletView('account-a'), resolution = store.resolution(reserved.reservation_id);
-  const late = settle('late', { usage: { known: true, input_tokens: 200, output_tokens: 80, cache_read_tokens: 40, cache_write_tokens: 10 } });
-  const accepted = wallet.settle(late);
-  assert.deepEqual(accepted, { reservation_id: reserved.reservation_id, status: resolved.status, charged_micros: resolved.charged_micros, duplicate: false, late: true });
-  assert.deepEqual(store.walletView('account-a'), before);
-  assert.equal(before.held_micros, 100_000);
-  assert.deepEqual(store.resolution(reserved.reservation_id), resolution);
-  const usage = store.usage('account-a').find(r => r.request_id === 'late');
-  assert.deepEqual(usage.settlement.usage, late.usage);
-  assert.equal(usage.status, resolved.status); assert.equal(usage.charged_micros, decision === 'settle' ? 30_000 : 0);
-  assert.equal(store.all("SELECT * FROM audit WHERE action='late_receipt' AND subject=?", reserved.reservation_id).length, 1);
-  assert.equal(wallet.settle(late).duplicate, true);
-  assert.throws(() => wallet.settle(settle('late')), reason('settlement_conflict'));
-  assert.deepEqual(store.walletView('account-a'), before);
-  assert.equal(store.all("SELECT * FROM audit WHERE action='late_receipt' AND subject=?", reserved.reservation_id).length, 1);
-  const reopened = new PlatformStore(file);
-  try {
-    assert.equal(new Wallet(reopened).settle(late).duplicate, true);
-    assert.deepEqual(reopened.walletView('account-a'), before);
-    assert.deepEqual(reopened.usage('account-a').find(r => r.request_id === 'late').settlement.usage, late.usage);
-  } finally { reopened.close(); }
-});
-
-test('independent SQLite connections race for limited credit without overspend', async t => {
-  const { store, file } = await fixture(t); grant(store, 1_000_000);
-  const module = new URL('../dist/platform/store.js', import.meta.url).href;
-  const run = index => new Promise((resolve, reject) => {
-    const worker = new Worker(`const {parentPort,workerData}=require('node:worker_threads'); (async()=>{const {PlatformStore,Wallet}=await import(workerData.module); const s=new PlatformStore(workerData.file),w=new Wallet(s);let admitted=0,rejected=0;for(let i=0;i<20;i++){try{w.reserve({namespace:'account-a',request_id:workerData.index+'-'+i,fingerprint:'f',model:'fixture',reserve_input_tokens:70,reserve_output_tokens:30,source:'gateway'});admitted++;}catch(e){if(e.reason!=='insufficient_credits')throw e;rejected++;}}s.close();parentPort.postMessage({admitted,rejected});})().catch(e=>{throw e})`, { eval: true, workerData: { module, file, index } });
-    worker.once('message', resolve); worker.once('error', reject); worker.once('exit', code => { if (code) reject(Error(`worker exit ${code}`)); });
+for (const decision of ['release', 'settle'])
+  test(`late provider receipt after admin ${decision} preserves raw usage without changing credits`, async (t) => {
+    const { store, wallet, file } = await fixture(t);
+    grant(store, 1_000_000);
+    const reserved = wallet.reserve(reserve('late'));
+    const manual = {
+      namespace: 'account-a',
+      request_id: 'late',
+      decision,
+      ...(decision === 'settle' ? { usage: { known: true, input_tokens: 20, output_tokens: 10 } } : {}),
+      reason: 'Manual provider verification',
+      idempotency_key: 'manual-late',
+    };
+    const resolved = wallet.resolve(manual, 'admin');
+    // A different active request must keep its hold; late receipt must not release it.
+    wallet.reserve(reserve('other'));
+    const before = store.walletView('account-a'),
+      resolution = store.resolution(reserved.reservation_id);
+    const late = settle('late', {
+      usage: { known: true, input_tokens: 200, output_tokens: 80, cache_read_tokens: 40, cache_write_tokens: 10 },
+    });
+    const accepted = wallet.settle(late);
+    assert.deepEqual(accepted, {
+      reservation_id: reserved.reservation_id,
+      status: resolved.status,
+      charged_micros: resolved.charged_micros,
+      duplicate: false,
+      late: true,
+    });
+    assert.deepEqual(store.walletView('account-a'), before);
+    assert.equal(before.held_micros, 100_000);
+    assert.deepEqual(store.resolution(reserved.reservation_id), resolution);
+    const usage = store.usage('account-a').find((r) => r.request_id === 'late');
+    assert.deepEqual(usage.settlement.usage, late.usage);
+    assert.equal(usage.status, resolved.status);
+    assert.equal(usage.charged_micros, decision === 'settle' ? 30_000 : 0);
+    assert.equal(
+      store.all("SELECT * FROM audit WHERE action='late_receipt' AND subject=?", reserved.reservation_id).length,
+      1
+    );
+    assert.equal(wallet.settle(late).duplicate, true);
+    assert.throws(() => wallet.settle(settle('late')), reason('settlement_conflict'));
+    assert.deepEqual(store.walletView('account-a'), before);
+    assert.equal(
+      store.all("SELECT * FROM audit WHERE action='late_receipt' AND subject=?", reserved.reservation_id).length,
+      1
+    );
+    const reopened = new PlatformStore(file);
+    try {
+      assert.equal(new Wallet(reopened).settle(late).duplicate, true);
+      assert.deepEqual(reopened.walletView('account-a'), before);
+      assert.deepEqual(reopened.usage('account-a').find((r) => r.request_id === 'late').settlement.usage, late.usage);
+    } finally {
+      reopened.close();
+    }
   });
+
+test('independent SQLite connections race for limited credit without overspend', async (t) => {
+  const { store, file } = await fixture(t);
+  grant(store, 1_000_000);
+  const module = new URL('../dist/platform/store.js', import.meta.url).href;
+  const run = (index) =>
+    new Promise((resolve, reject) => {
+      const worker = new Worker(
+        `const {parentPort,workerData}=require('node:worker_threads'); (async()=>{const {PlatformStore,Wallet}=await import(workerData.module); const s=new PlatformStore(workerData.file),w=new Wallet(s);let admitted=0,rejected=0;for(let i=0;i<20;i++){try{w.reserve({namespace:'account-a',request_id:workerData.index+'-'+i,fingerprint:'f',model:'fixture',reserve_input_tokens:70,reserve_output_tokens:30,source:'gateway'});admitted++;}catch(e){if(e.reason!=='insufficient_credits')throw e;rejected++;}}s.close();parentPort.postMessage({admitted,rejected});})().catch(e=>{throw e})`,
+        { eval: true, workerData: { module, file, index } }
+      );
+      worker.once('message', resolve);
+      worker.once('error', reject);
+      worker.once('exit', (code) => {
+        if (code) reject(Error(`worker exit ${code}`));
+      });
+    });
   const results = await Promise.all([run(1), run(2), run(3), run(4)]);
-  assert.equal(results.reduce((n, r) => n + r.admitted, 0), 10);
-  assert.equal(results.reduce((n, r) => n + r.rejected, 0), 70);
+  assert.equal(
+    results.reduce((n, r) => n + r.admitted, 0),
+    10
+  );
+  assert.equal(
+    results.reduce((n, r) => n + r.rejected, 0),
+    70
+  );
   assert.equal(store.walletView('account-a').available_micros, 0);
   assert.equal(store.walletView('account-a').held_micros, 1_000_000);
 });
@@ -160,174 +290,414 @@ test('independent SQLite connections race for limited credit without overspend',
 async function apiFixture(t, extra = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'platform-http-'));
   process.env.PLATFORM_TEST_ADMIN_PASSWORD = 'fixture-admin-password';
-  const seen = [], sessions = new Map();
-  const config = { listen: '127.0.0.1:0', database: join(dir, 'db.sqlite'), public_origin: 'http://platform.test', secure_cookies: false, registration: true, bootstrap_admin: { email: 'admin@example.test', password_env: 'PLATFORM_TEST_ADMIN_PASSWORD' }, ...extra };
-  const app = await createPlatform(config, { async rpc(method, params) {
-    seen.push({ method, params });
-    if (method === 'agent.session.create') { const id = `s-${sessions.size}`; sessions.set(id, params.namespace); return { id }; }
-    if (method === 'agent.session.history') { if (sessions.get(params.session_id) !== params.namespace) throw new RpcError(-32004, 'session_not_found'); return { messages: [] }; }
-    if (method === 'agent.run.get') throw Error('secret upstream password should never be returned');
-    return [];
-  } });
-  t.after(async () => { await app.close(); delete process.env.PLATFORM_TEST_ADMIN_PASSWORD; await rm(dir, { recursive: true, force: true }); });
+  const seen = [],
+    sessions = new Map();
+  const config = {
+    listen: '127.0.0.1:0',
+    database: join(dir, 'db.sqlite'),
+    public_origin: 'http://platform.test',
+    secure_cookies: false,
+    registration: true,
+    bootstrap_admin: { email: 'admin@example.test', password_env: 'PLATFORM_TEST_ADMIN_PASSWORD' },
+    ...extra,
+  };
+  const app = await createPlatform(config, {
+    async rpc(method, params) {
+      seen.push({ method, params });
+      if (method === 'agent.session.create') {
+        const id = `s-${sessions.size}`;
+        sessions.set(id, params.namespace);
+        return { id };
+      }
+      if (method === 'agent.session.history') {
+        if (sessions.get(params.session_id) !== params.namespace) throw new RpcError(-32004, 'session_not_found');
+        return { messages: [] };
+      }
+      if (method === 'agent.run.get') throw Error('secret upstream password should never be returned');
+      return [];
+    },
+  });
+  t.after(async () => {
+    await app.close();
+    delete process.env.PLATFORM_TEST_ADMIN_PASSWORD;
+    await rm(dir, { recursive: true, force: true });
+  });
   const base = `http://127.0.0.1:${app.address.port}`;
   async function call(path, data, cookie, options = {}) {
-    const res = await fetch(base + path, { method: options.method ?? (data === undefined ? 'GET' : 'POST'), headers: { origin: 'http://platform.test', ...(data === undefined ? {} : { 'content-type': 'application/json' }), ...(cookie ? { cookie } : {}), ...options.headers }, ...(data === undefined ? {} : { body: typeof data === 'string' ? data : JSON.stringify(data) }) });
-    const text = await res.text(); let json; try { json = JSON.parse(text); } catch { json = undefined; }
-    return { status: res.status, data: json, text, headers: res.headers, cookie: res.headers.get('set-cookie')?.split(';')[0] };
+    const res = await fetch(base + path, {
+      method: options.method ?? (data === undefined ? 'GET' : 'POST'),
+      headers: {
+        origin: 'http://platform.test',
+        ...(data === undefined ? {} : { 'content-type': 'application/json' }),
+        ...(cookie ? { cookie } : {}),
+        ...options.headers,
+      },
+      ...(data === undefined ? {} : { body: typeof data === 'string' ? data : JSON.stringify(data) }),
+    });
+    const text = await res.text();
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      json = undefined;
+    }
+    return {
+      status: res.status,
+      data: json,
+      text,
+      headers: res.headers,
+      cookie: res.headers.get('set-cookie')?.split(';')[0],
+    };
   }
-  const register = address => call('/api/register', { email: address, password: 'fixture-user-password' });
+  const register = (address) => call('/api/register', { email: address, password: 'fixture-user-password' });
   return { app, call, register, seen, base, file: config.database };
 }
 
-test('HTTP workshop message and evidence use authenticated namespace and retain CSRF checks', async t => {
-  const {call,register,seen}=await apiFixture(t);
-  const user=await register('harness@example.test');
-  for(const method of ['workshop.message','workshop.evidence']) {
-    const params={task_id:'task',...(method==='workshop.message'?{text:'Continue',idempotency_key:'reply-1'}:{})};
-    assert.equal((await call('/api/rpc',{method,params})).status,401);
-    assert.equal((await call('/api/rpc',{method,params},user.cookie,{headers:{origin:'https://evil.test'}})).status,403);
-    assert.equal((await call('/api/rpc',{method,params:{...params,namespace:'other'}},user.cookie)).status,400);
-    assert.equal((await call('/api/rpc',{method,params},user.cookie)).status,200);
-    assert.deepEqual(seen.at(-1),{method,params:{...params,namespace:user.data.user.namespace}});
+test('HTTP workshop message and evidence use authenticated namespace and retain CSRF checks', async (t) => {
+  const { call, register, seen } = await apiFixture(t);
+  const user = await register('harness@example.test');
+  for (const method of ['workshop.message', 'workshop.evidence']) {
+    const params = {
+      task_id: 'task',
+      ...(method === 'workshop.message' ? { text: 'Continue', idempotency_key: 'reply-1' } : {}),
+    };
+    assert.equal((await call('/api/rpc', { method, params })).status, 401);
+    assert.equal(
+      (await call('/api/rpc', { method, params }, user.cookie, { headers: { origin: 'https://evil.test' } })).status,
+      403
+    );
+    assert.equal(
+      (await call('/api/rpc', { method, params: { ...params, namespace: 'other' } }, user.cookie)).status,
+      400
+    );
+    assert.equal((await call('/api/rpc', { method, params }, user.cookie)).status, 200);
+    assert.deepEqual(seen.at(-1), { method, params: { ...params, namespace: user.data.user.namespace } });
   }
-  assert.equal(seen.length,2);
+  assert.equal(seen.length, 2);
 });
 
-test('HTTP auth, zero signup, cookies, CSRF, role checks, namespace binding, allowlist and logout revocation', async t => {
+test('HTTP auth, zero signup, cookies, CSRF, role checks, namespace binding, allowlist and logout revocation', async (t) => {
   const { call, register, seen } = await apiFixture(t);
   assert.equal((await call('/api/me')).status, 401);
-  assert.equal((await call('/api/register', { email: 'x@example.test', password: 'fixture-password', role: 'admin' })).status, 400);
-  assert.equal((await call('/api/register', { email: 'x@example.test', password: 'fixture-password' }, null, { headers: { origin: 'https://evil.test' } })).status, 403);
-  const alice = await register('Alice@example.test'), bob = await register('bob@example.test');
-  assert.equal(alice.status, 201); assert.equal(alice.data.user.role, 'user'); assert.equal(alice.data.user.email, 'alice@example.test');
+  assert.equal(
+    (await call('/api/register', { email: 'x@example.test', password: 'fixture-password', role: 'admin' })).status,
+    400
+  );
+  assert.equal(
+    (
+      await call('/api/register', { email: 'x@example.test', password: 'fixture-password' }, null, {
+        headers: { origin: 'https://evil.test' },
+      })
+    ).status,
+    403
+  );
+  const alice = await register('Alice@example.test'),
+    bob = await register('bob@example.test');
+  assert.equal(alice.status, 201);
+  assert.equal(alice.data.user.role, 'user');
+  assert.equal(alice.data.user.email, 'alice@example.test');
   assert.match(alice.headers.get('set-cookie'), /HttpOnly; SameSite=Strict/);
   assert.equal((await call('/api/wallet', undefined, alice.cookie)).data.balance_micros, 0);
   assert.equal((await call('/api/admin/users', undefined, alice.cookie)).status, 403);
-  assert.equal((await call('/api/admin/credits', { user_id: alice.data.user.id, amount_micros: 1000, reason: 'steal', idempotency_key: 'evil' }, alice.cookie)).status, 403);
-  const denied = await call('/api/rpc', { method: 'platform.wallet.reserve', params: {} }, alice.cookie); assert.equal(denied.status, 400); assert.equal(seen.length, 0);
-  assert.equal((await call('/api/rpc', { method: 'agent.session.list', params: { namespace: bob.data.user.namespace } }, alice.cookie)).status, 400);
+  assert.equal(
+    (
+      await call(
+        '/api/admin/credits',
+        { user_id: alice.data.user.id, amount_micros: 1000, reason: 'steal', idempotency_key: 'evil' },
+        alice.cookie
+      )
+    ).status,
+    403
+  );
+  const denied = await call('/api/rpc', { method: 'platform.wallet.reserve', params: {} }, alice.cookie);
+  assert.equal(denied.status, 400);
+  assert.equal(seen.length, 0);
+  assert.equal(
+    (
+      await call(
+        '/api/rpc',
+        { method: 'agent.session.list', params: { namespace: bob.data.user.namespace } },
+        alice.cookie
+      )
+    ).status,
+    400
+  );
   const session = await call('/api/rpc', { method: 'agent.session.create', params: {} }, alice.cookie);
   assert.equal(seen.at(-1).params.namespace, alice.data.user.namespace);
-  assert.equal((await call('/api/rpc', { method: 'agent.session.history', params: { session_id: session.data.result.id } }, bob.cookie)).data.error.code, 'session_not_found');
-  const error = await call('/api/rpc', { method: 'agent.run.get', params: { run_id: 'x' } }, alice.cookie); assert.equal(error.status, 500); assert.doesNotMatch(error.text, /secret|password/);
+  assert.equal(
+    (
+      await call(
+        '/api/rpc',
+        { method: 'agent.session.history', params: { session_id: session.data.result.id } },
+        bob.cookie
+      )
+    ).data.error.code,
+    'session_not_found'
+  );
+  const error = await call('/api/rpc', { method: 'agent.run.get', params: { run_id: 'x' } }, alice.cookie);
+  assert.equal(error.status, 500);
+  assert.doesNotMatch(error.text, /secret|password/);
   assert.equal((await call('/api/logout', {}, alice.cookie, { headers: { origin: '' } })).status, 403);
   assert.equal((await call('/api/logout', {}, alice.cookie)).status, 200);
   assert.equal((await call('/api/me', undefined, alice.cookie)).status, 401);
-  const login = await call('/api/login', { email: 'alice@example.test', password: 'fixture-user-password' }); assert.equal(login.status, 200); assert.notEqual(login.cookie, alice.cookie);
+  const login = await call('/api/login', { email: 'alice@example.test', password: 'fixture-user-password' });
+  assert.equal(login.status, 200);
+  assert.notEqual(login.cookie, alice.cookie);
   assert.equal((await call('/api/me', undefined, bob.cookie)).status, 200);
   assert.equal((await call('/api/login', { email: 'alice@example.test', password: 'wrong-password' })).status, 401);
 });
 
-test('admin grants/usage/tariff API, strict JSON/body bounds, static CSP and rate limits', async t => {
+test('admin grants/usage/tariff API, strict JSON/body bounds, static CSP and rate limits', async (t) => {
   const { call, register, app } = await apiFixture(t);
   const user = await register('user@example.test');
   const admin = await call('/api/login', { email: 'admin@example.test', password: 'fixture-admin-password' });
-  const users = await call('/api/admin/users', undefined, admin.cookie); assert.equal(users.data.users.length, 2); assert.doesNotMatch(users.text, /password|session_hash/);
-  const payload = { user_id: user.data.user.id, amount_micros: 1_000_000, reason: 'test allocation', idempotency_key: 'allocation' };
+  const users = await call('/api/admin/users', undefined, admin.cookie);
+  assert.equal(users.data.users.length, 2);
+  assert.doesNotMatch(users.text, /password|session_hash/);
+  const payload = {
+    user_id: user.data.user.id,
+    amount_micros: 1_000_000,
+    reason: 'test allocation',
+    idempotency_key: 'allocation',
+  };
   assert.equal((await call('/api/admin/credits', payload, admin.cookie)).data.duplicate, false);
   assert.equal((await call('/api/admin/credits', payload, admin.cookie)).data.duplicate, true);
   app.wallet.reserve(reserve('metered', { namespace: user.data.user.namespace }));
   app.wallet.settle(settle('metered', { namespace: user.data.user.namespace }));
-  const wallet = await call('/api/wallet', undefined, user.cookie); assert.equal(wallet.data.balance_micros, 940_000); assert.equal(wallet.data.ledger.length, 2);
-  const usage = await call('/api/usage', undefined, user.cookie); assert.equal(usage.data.receipts[0].settlement.usage.input_tokens, 40);
+  const wallet = await call('/api/wallet', undefined, user.cookie);
+  assert.equal(wallet.data.balance_micros, 940_000);
+  assert.equal(wallet.data.ledger.length, 2);
+  const usage = await call('/api/usage', undefined, user.cookie);
+  assert.equal(usage.data.receipts[0].settlement.usage.input_tokens, 40);
   assert.equal((await call('/api/usage', undefined, admin.cookie)).data.receipts.length, 0);
-  assert.equal((await call('/api/admin/tariff', { input_micros: 2000, output_micros: 3000 }, admin.cookie, { method: 'PUT' })).data.version, 2);
-  assert.equal((await call('/api/rpc', '{"method":"agent.session.list","method":"agent.run.start","params":{}}', user.cookie)).status, 400);
-  assert.equal((await call('/api/rpc', { method: 'agent.session.list', params: {}, excess: true }, user.cookie)).status, 400);
-  assert.equal((await call('/api/rpc', JSON.stringify({ method: 'agent.session.list', params: { huge: 'x'.repeat(270000) } }), user.cookie)).status, 400);
+  assert.equal(
+    (await call('/api/admin/tariff', { input_micros: 2000, output_micros: 3000 }, admin.cookie, { method: 'PUT' })).data
+      .version,
+    2
+  );
+  assert.equal(
+    (await call('/api/rpc', '{"method":"agent.session.list","method":"agent.run.start","params":{}}', user.cookie))
+      .status,
+    400
+  );
+  assert.equal(
+    (await call('/api/rpc', { method: 'agent.session.list', params: {}, excess: true }, user.cookie)).status,
+    400
+  );
+  assert.equal(
+    (
+      await call(
+        '/api/rpc',
+        JSON.stringify({ method: 'agent.session.list', params: { huge: 'x'.repeat(270000) } }),
+        user.cookie
+      )
+    ).status,
+    400
+  );
   app.wallet.reserve(reserve('orphan', { namespace: user.data.user.namespace }));
-  const pending = await call('/api/admin/usage/pending', undefined, admin.cookie); assert.equal(pending.data.receipts.length, 1);
-  const resolution = { namespace: user.data.user.namespace, request_id: 'orphan', decision: 'release', reason: 'fixture no charge', idempotency_key: 'manual-1' };
+  const pending = await call('/api/admin/usage/pending', undefined, admin.cookie);
+  assert.equal(pending.data.receipts.length, 1);
+  const resolution = {
+    namespace: user.data.user.namespace,
+    request_id: 'orphan',
+    decision: 'release',
+    reason: 'fixture no charge',
+    idempotency_key: 'manual-1',
+  };
   assert.equal((await call('/api/admin/usage/resolve', resolution, user.cookie)).status, 403);
   assert.equal((await call('/api/admin/usage/resolve', resolution, admin.cookie)).data.status, 'resolved_released');
   assert.equal((await call('/api/admin/usage/resolve', resolution, admin.cookie)).data.duplicate, true);
-  const html = await call('/'); assert.equal(html.status, 200); assert.match(html.text, /lang="zh-CN"/); assert.match(html.headers.get('content-security-policy'), /frame-ancestors 'none'/);
-  assert.equal((await call('/app.js')).status, 200); assert.equal((await call('/style.css')).status, 200); assert.equal((await call('/src/platform/server.ts')).status, 404);
-  const script = await readFile(new URL('../web/app.js', import.meta.url), 'utf8'); assert.doesNotMatch(script, /innerHTML|outerHTML|insertAdjacentHTML/);
-  let last; for (let i = 0; i < 12; i++) last = await call('/api/login', { email: 'missing@example.test', password: 'incorrect-fixture' });
+  const html = await call('/');
+  assert.equal(html.status, 200);
+  assert.match(html.text, /lang="zh-CN"/);
+  assert.match(html.headers.get('content-security-policy'), /frame-ancestors 'none'/);
+  assert.equal((await call('/app.js')).status, 200);
+  assert.equal((await call('/style.css')).status, 200);
+  assert.equal((await call('/src/platform/server.ts')).status, 404);
+  const script = await readFile(new URL('../web/app.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(script, /innerHTML|outerHTML|insertAdjacentHTML/);
+  let last;
+  for (let i = 0; i < 12; i++)
+    last = await call('/api/login', { email: 'missing@example.test', password: 'incorrect-fixture' });
   assert.equal(last.status, 429);
 });
 
-test('registration disabled and secure cookies remain explicit', async t => {
-  const { call } = await apiFixture(t, { registration: false, public_origin: 'https://platform.test', secure_cookies: true });
+test('registration disabled and secure cookies remain explicit', async (t) => {
+  const { call } = await apiFixture(t, {
+    registration: false,
+    public_origin: 'https://platform.test',
+    secure_cookies: true,
+  });
   const data = { email: 'new@example.test', password: 'fixture-password' };
-  assert.equal((await call('/api/register', data, null, { headers: { origin: 'https://platform.test' } })).data.error.code, 'registration_disabled');
-  const login = await call('/api/login', { email: 'admin@example.test', password: 'fixture-admin-password' }, null, { headers: { origin: 'https://platform.test' } });
+  assert.equal(
+    (await call('/api/register', data, null, { headers: { origin: 'https://platform.test' } })).data.error.code,
+    'registration_disabled'
+  );
+  const login = await call('/api/login', { email: 'admin@example.test', password: 'fixture-admin-password' }, null, {
+    headers: { origin: 'https://platform.test' },
+  });
   assert.match(login.headers.get('set-cookie'), /; Secure/);
 });
 
-test('read pagination exposes all rows with exact end cursors and namespace-bound artifact dispatch', async t => {
+test('read pagination exposes all rows with exact end cursors and namespace-bound artifact dispatch', async (t) => {
   const { call, register, app, seen, file } = await apiFixture(t);
   const user = await register('paging@example.test');
   const admin = await call('/api/login', { email: 'admin@example.test', password: 'fixture-admin-password' });
   const store = new PlatformStore(file);
   try {
-    store.grant({ user_id: user.data.user.id, amount_micros: 1_000_001, reason: 'paging fixture', idempotency_key: 'seed' }, 'fixture');
-    store.transaction(() => { for (let i = 0; i < 103; i++) store.run("INSERT INTO accounts(id,email,password,namespace,role,created_at) VALUES(?,?,?,?,'user','now')", `seed-${i}`, `seed${i}@example.test`, 'unused', `seed-${i}`); });
+    store.grant(
+      { user_id: user.data.user.id, amount_micros: 1_000_001, reason: 'paging fixture', idempotency_key: 'seed' },
+      'fixture'
+    );
+    store.transaction(() => {
+      for (let i = 0; i < 103; i++)
+        store.run(
+          "INSERT INTO accounts(id,email,password,namespace,role,created_at) VALUES(?,?,?,?,'user','now')",
+          `seed-${i}`,
+          `seed${i}@example.test`,
+          'unused',
+          `seed-${i}`
+        );
+    });
     for (let i = 0; i < 105; i++) {
-      app.wallet.reserve(reserve(`page-${i}`, { namespace: user.data.user.namespace, reserve_input_tokens: 0, reserve_output_tokens: 0 }));
-      app.wallet.settle(settle(`page-${i}`, { namespace: user.data.user.namespace, usage: { known: true, input_tokens: 0, output_tokens: 0 } }));
-      app.wallet.reserve(reserve(`pending-${i}`, { namespace: user.data.user.namespace, reserve_input_tokens: 0, reserve_output_tokens: 0 }));
+      app.wallet.reserve(
+        reserve(`page-${i}`, { namespace: user.data.user.namespace, reserve_input_tokens: 0, reserve_output_tokens: 0 })
+      );
+      app.wallet.settle(
+        settle(`page-${i}`, {
+          namespace: user.data.user.namespace,
+          usage: { known: true, input_tokens: 0, output_tokens: 0 },
+        })
+      );
+      app.wallet.reserve(
+        reserve(`pending-${i}`, {
+          namespace: user.data.user.namespace,
+          reserve_input_tokens: 0,
+          reserve_output_tokens: 0,
+        })
+      );
     }
-  } finally { store.close(); }
+  } finally {
+    store.close();
+  }
   const ledger1 = (await call('/api/wallet', undefined, user.cookie)).data;
   const ledger2 = (await call(`/api/wallet?after=${ledger1.next_after}`, undefined, user.cookie)).data;
-  assert.equal(ledger1.ledger.length, 100); assert.equal(ledger2.ledger.length, 6); assert.equal(ledger2.next_after, null);
-  assert.equal(new Set([...ledger1.ledger, ...ledger2.ledger].map(r => r.seq)).size, 106);
+  assert.equal(ledger1.ledger.length, 100);
+  assert.equal(ledger2.ledger.length, 6);
+  assert.equal(ledger2.next_after, null);
+  assert.equal(new Set([...ledger1.ledger, ...ledger2.ledger].map((r) => r.seq)).size, 106);
   assert.equal(ledger2.balance_micros, 1_000_001);
   const receipts = [];
-  for (let offset = 0; offset !== null;) { const page = (await call(`/api/usage?offset=${offset}`, undefined, user.cookie)).data; receipts.push(...page.receipts); offset = page.next_offset; }
-  assert.equal(receipts.length, 210); assert.equal(new Set(receipts.map(r => r.request_id)).size, 210);
-  const empty = (await call('/api/usage', undefined, admin.cookie)).data; assert.deepEqual(empty, { receipts: [], next_offset: null });
-  for (const [route, key] of [['users', 'users'], ['usage/pending', 'receipts']]) {
+  for (let offset = 0; offset !== null;) {
+    const page = (await call(`/api/usage?offset=${offset}`, undefined, user.cookie)).data;
+    receipts.push(...page.receipts);
+    offset = page.next_offset;
+  }
+  assert.equal(receipts.length, 210);
+  assert.equal(new Set(receipts.map((r) => r.request_id)).size, 210);
+  const empty = (await call('/api/usage', undefined, admin.cookie)).data;
+  assert.deepEqual(empty, { receipts: [], next_offset: null });
+  for (const [route, key] of [
+    ['users', 'users'],
+    ['usage/pending', 'receipts'],
+  ]) {
     const first = (await call(`/api/admin/${route}`, undefined, admin.cookie)).data;
     const last = (await call(`/api/admin/${route}?offset=${first.next_offset}`, undefined, admin.cookie)).data;
-    assert.equal(first[key].length, 100); assert.equal(first.next_offset, 100); assert.equal(last[key].length, 5); assert.equal(last.next_offset, null);
+    assert.equal(first[key].length, 100);
+    assert.equal(first.next_offset, 100);
+    assert.equal(last[key].length, 5);
+    assert.equal(last.next_offset, null);
   }
-  const artifact = await call('/api/rpc', { method: 'workshop.artifact', params: { task_id: 'task', run_id: 'run', path: 'result.txt' } }, user.cookie);
-  assert.equal(artifact.status, 200); assert.equal(seen.at(-1).params.namespace, user.data.user.namespace); assert.equal(seen.at(-1).method, 'workshop.artifact');
-  assert.equal((await call('/api/rpc', { method: 'workshop.artifact', params: { namespace: 'other', task_id: 'task', path: 'result.txt' } }, user.cookie)).status, 400);
+  const artifact = await call(
+    '/api/rpc',
+    { method: 'workshop.artifact', params: { task_id: 'task', run_id: 'run', path: 'result.txt' } },
+    user.cookie
+  );
+  assert.equal(artifact.status, 200);
+  assert.equal(seen.at(-1).params.namespace, user.data.user.namespace);
+  assert.equal(seen.at(-1).method, 'workshop.artifact');
+  assert.equal(
+    (
+      await call(
+        '/api/rpc',
+        { method: 'workshop.artifact', params: { namespace: 'other', task_id: 'task', path: 'result.txt' } },
+        user.cookie
+      )
+    ).status,
+    400
+  );
 });
 
-
-test('non-string settlement/reconciliation enums never mutate holds or usage', async t => {
-  const {store,wallet}=await fixture(t);grant(store,1000000);wallet.reserve(reserve('strict-enum'));
-  const before=store.walletView('account-a');
-  for(const value of [['settle'],['release'],{},null,1,true]) {
-    assert.throws(()=>wallet.resolve({namespace:'account-a',request_id:'strict-enum',decision:value,reason:'malformed enum',idempotency_key:'bad'},'admin'),reason('invalid_decision'));
-    assert.deepEqual(store.walletView('account-a'),before);
+test('non-string settlement/reconciliation enums never mutate holds or usage', async (t) => {
+  const { store, wallet } = await fixture(t);
+  grant(store, 1000000);
+  wallet.reserve(reserve('strict-enum'));
+  const before = store.walletView('account-a');
+  for (const value of [['settle'], ['release'], {}, null, 1, true]) {
+    assert.throws(
+      () =>
+        wallet.resolve(
+          {
+            namespace: 'account-a',
+            request_id: 'strict-enum',
+            decision: value,
+            reason: 'malformed enum',
+            idempotency_key: 'bad',
+          },
+          'admin'
+        ),
+      reason('invalid_decision')
+    );
+    assert.deepEqual(store.walletView('account-a'), before);
   }
-  for(const value of [['complete'],['rejected'],['uncertain'],{},null,1,true]) {
-    assert.throws(()=>wallet.settle(settle('strict-enum',{outcome:value})),reason('invalid_outcome'));
-    assert.deepEqual(store.walletView('account-a'),before);
+  for (const value of [['complete'], ['rejected'], ['uncertain'], {}, null, 1, true]) {
+    assert.throws(() => wallet.settle(settle('strict-enum', { outcome: value })), reason('invalid_outcome'));
+    assert.deepEqual(store.walletView('account-a'), before);
   }
-  assert.equal(store.usage('account-a')[0].settlement,null);
+  assert.equal(store.usage('account-a')[0].settlement, null);
 });
 
 // Rotate emails so these assertions exercise the IP bucket, not auth-email's 10/min bucket.
-const proxyLogin = (call, index, headers = {}) => call('/api/login', { email: `proxy-${index}@example.test`, password: 'proxy-test-password' }, undefined, { headers });
-for (const [name, config] of [['default empty', {}], ['nonmatching allowlist', { trusted_proxies: ['10.0.0.1'] }]]) {
-  test(`untrusted proxy headers cannot bypass login rate limits (${name})`, async t => {
+const proxyLogin = (call, index, headers = {}) =>
+  call('/api/login', { email: `proxy-${index}@example.test`, password: 'proxy-test-password' }, undefined, { headers });
+for (const [name, config] of [
+  ['default empty', {}],
+  ['nonmatching allowlist', { trusted_proxies: ['10.0.0.1'] }],
+]) {
+  test(`untrusted proxy headers cannot bypass login rate limits (${name})`, async (t) => {
     const { call } = await apiFixture(t, config);
-    for (let i = 0; i < 20; i++) assert.equal((await proxyLogin(call, i, { 'x-forwarded-for': `192.0.2.${i + 1}`, 'x-real-ip': `198.51.100.${i + 1}`, forwarded: `for=203.0.113.${i + 1}` })).status, 401);
+    for (let i = 0; i < 20; i++)
+      assert.equal(
+        (
+          await proxyLogin(call, i, {
+            'x-forwarded-for': `192.0.2.${i + 1}`,
+            'x-real-ip': `198.51.100.${i + 1}`,
+            forwarded: `for=203.0.113.${i + 1}`,
+          })
+        ).status,
+        401
+      );
     const limited = await proxyLogin(call, 20, { 'x-forwarded-for': '192.0.2.250' });
-    assert.equal(limited.status, 429); assert.equal(limited.data.error.code, 'rate_limited');
+    assert.equal(limited.status, 429);
+    assert.equal(limited.data.error.code, 'rate_limited');
   });
 }
 
-test('trusted proxy clients have independent login buckets and cannot bypass per-email limits', async t => {
+test('trusted proxy clients have independent login buckets and cannot bypass per-email limits', async (t) => {
   const { call } = await apiFixture(t, { trusted_proxies: ['127.0.0.1'] });
   for (const client of ['192.0.2.1', '192.0.2.2']) {
-    for (let i = 0; i < 20; i++) assert.equal((await proxyLogin(call, `${client}-${i}`, { 'x-forwarded-for': client })).status, 401);
+    for (let i = 0; i < 20; i++)
+      assert.equal((await proxyLogin(call, `${client}-${i}`, { 'x-forwarded-for': client })).status, 401);
     const limited = await proxyLogin(call, `${client}-21`, { 'x-forwarded-for': client });
-    assert.equal(limited.status, 429); assert.equal(limited.data.error.code, 'rate_limited');
+    assert.equal(limited.status, 429);
+    assert.equal(limited.data.error.code, 'rate_limited');
   }
-  for (let i = 0; i < 10; i++) assert.equal((await proxyLogin(call, 'same-email', { 'x-forwarded-for': `198.51.100.${i + 1}` })).status, 401);
+  for (let i = 0; i < 10; i++)
+    assert.equal((await proxyLogin(call, 'same-email', { 'x-forwarded-for': `198.51.100.${i + 1}` })).status, 401);
   assert.equal((await proxyLogin(call, 'same-email', { 'x-forwarded-for': '198.51.100.100' })).status, 429);
 });
 
-test('trusted proxy right-to-left boundary ignores a forged left prefix and skips only allowlisted hops', async t => {
+test('trusted proxy right-to-left boundary ignores a forged left prefix and skips only allowlisted hops', async (t) => {
   const { call } = await apiFixture(t, { trusted_proxies: ['127.0.0.1', '127.0.0.2'] });
   for (let i = 0; i < 20; i++) {
     const chain = i === 0 ? 'evil, 10.0.0.9' : `evil-${i}, 10.0.0.9, 127.0.0.2, ::ffff:127.0.0.1`;
@@ -339,76 +709,220 @@ test('trusted proxy right-to-left boundary ignores a forged left prefix and skip
   assert.equal((await proxyLogin(call, 'other', { 'x-forwarded-for': '10.0.0.10, 127.0.0.2' })).status, 401);
 });
 
-test('trusted proxy malformed, missing or oversized XFF falls back to socket; other headers are ignored', async t => {
+test('trusted proxy malformed, missing or oversized XFF falls back to socket; other headers are ignored', async (t) => {
   const { call } = await apiFixture(t, { trusted_proxies: ['127.0.0.1'] });
   for (let i = 0; i < 20; i++) assert.equal((await proxyLogin(call, i)).status, 401);
   const suffix = ', 10.0.0.10';
-  for (const xff of ['', 'evil', '10.0.0.9, evil', '[::1]', '192.0.2.1:443', 'fe80::1%eth0', '127.0.0.1', '127.0.0.01', Array(33).fill('10.0.0.10').join(','), 'x'.repeat(2049 - suffix.length) + suffix]) {
+  for (const xff of [
+    '',
+    'evil',
+    '10.0.0.9, evil',
+    '[::1]',
+    '192.0.2.1:443',
+    'fe80::1%eth0',
+    '127.0.0.1',
+    '127.0.0.01',
+    Array(33).fill('10.0.0.10').join(','),
+    'x'.repeat(2049 - suffix.length) + suffix,
+  ]) {
     const r = await proxyLogin(call, 'bad-' + xff.length, { 'x-forwarded-for': xff });
-    assert.equal(r.status, 429); assert.equal(r.data.error.code, 'rate_limited');
+    assert.equal(r.status, 429);
+    assert.equal(r.data.error.code, 'rate_limited');
   }
-  assert.equal((await proxyLogin(call, 'ignored', { 'x-real-ip': '10.0.0.10', forwarded: 'for=10.0.0.10' })).status, 429);
-  assert.equal((await proxyLogin(call, 'boundary-bytes', { 'x-forwarded-for': 'x'.repeat(2048 - suffix.length) + suffix })).status, 401);
-  assert.equal((await proxyLogin(call, 'boundary-hops', { 'x-forwarded-for': Array(32).fill('10.0.0.11').join(',') })).status, 401);
+  assert.equal(
+    (await proxyLogin(call, 'ignored', { 'x-real-ip': '10.0.0.10', forwarded: 'for=10.0.0.10' })).status,
+    429
+  );
+  assert.equal(
+    (await proxyLogin(call, 'boundary-bytes', { 'x-forwarded-for': 'x'.repeat(2048 - suffix.length) + suffix })).status,
+    401
+  );
+  assert.equal(
+    (await proxyLogin(call, 'boundary-hops', { 'x-forwarded-for': Array(32).fill('10.0.0.11').join(',') })).status,
+    401
+  );
 });
 
-test('trusted proxy normalizes IPv4-mapped socket and client addresses plus equivalent IPv6 literals', async t => {
+test('trusted proxy normalizes IPv4-mapped socket and client addresses plus equivalent IPv6 literals', async (t) => {
   const { call } = await apiFixture(t, { listen: '[::]:0', trusted_proxies: ['0:0:0:0:0:FFFF:7F00:1'] });
-  for (let i = 0; i < 20; i++) assert.equal((await proxyLogin(call, `v4-${i}`, { 'x-forwarded-for': i % 2 ? '::ffff:192.0.2.9' : '192.0.2.9' })).status, 401);
+  for (let i = 0; i < 20; i++)
+    assert.equal(
+      (await proxyLogin(call, `v4-${i}`, { 'x-forwarded-for': i % 2 ? '::ffff:192.0.2.9' : '192.0.2.9' })).status,
+      401
+    );
   assert.equal((await proxyLogin(call, 'v4-21', { 'x-forwarded-for': '0:0:0:0:0:ffff:c000:209' })).status, 429);
-  for (let i = 0; i < 20; i++) assert.equal((await proxyLogin(call, `v6-${i}`, { 'x-forwarded-for': i % 2 ? '2001:0DB8:0:0:0:0:0:9' : '2001:db8::9' })).status, 401);
+  for (let i = 0; i < 20; i++)
+    assert.equal(
+      (await proxyLogin(call, `v6-${i}`, { 'x-forwarded-for': i % 2 ? '2001:0DB8:0:0:0:0:0:9' : '2001:db8::9' }))
+        .status,
+      401
+    );
   assert.equal((await proxyLogin(call, 'v6-21', { 'x-forwarded-for': '2001:DB8::9' })).status, 429);
   assert.equal((await proxyLogin(call, 'different', { 'x-forwarded-for': '2001:db8::10' })).status, 401);
 });
 
-test('trusted proxy global request rate uses the same normalized client boundary', async t => {
+test('trusted proxy global request rate uses the same normalized client boundary', async (t) => {
   const { call } = await apiFixture(t, { trusted_proxies: ['127.0.0.1'] });
-  for (let i = 0; i < 300; i++) assert.equal((await call('/not-found', undefined, undefined, { headers: { 'x-forwarded-for': '192.0.2.9' } })).status, 404);
-  assert.equal((await call('/not-found', undefined, undefined, { headers: { 'x-forwarded-for': '::ffff:192.0.2.9' } })).status, 429);
-  assert.equal((await call('/not-found', undefined, undefined, { headers: { 'x-forwarded-for': '192.0.2.10' } })).status, 404);
+  for (let i = 0; i < 300; i++)
+    assert.equal(
+      (await call('/not-found', undefined, undefined, { headers: { 'x-forwarded-for': '192.0.2.9' } })).status,
+      404
+    );
+  assert.equal(
+    (await call('/not-found', undefined, undefined, { headers: { 'x-forwarded-for': '::ffff:192.0.2.9' } })).status,
+    429
+  );
+  assert.equal(
+    (await call('/not-found', undefined, undefined, { headers: { 'x-forwarded-for': '192.0.2.10' } })).status,
+    404
+  );
 });
 
-test('trusted_proxies rejects invalid startup configuration before touching the database', async t => {
-  const dir = await mkdtemp(join(tmpdir(), 'platform-invalid-proxy-')); t.after(() => rm(dir, { recursive: true, force: true }));
+test('trusted_proxies rejects invalid startup configuration before touching the database', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'platform-invalid-proxy-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
   const database = join(dir, 'must-not-exist.db');
-  for (const trusted_proxies of [null, true, '127.0.0.1', [1], [''], ['localhost'], ['127.1'], ['127.0.0.1/32'], ['::/0'], ['[::1]'], ['127.0.0.1:80'], ['fe80::1%eth0'], [' 127.0.0.1 '], Array(17).fill('127.0.0.1')]) {
-    await assert.rejects(createPlatform({ listen: '127.0.0.1:0', database, public_origin: 'http://platform.test', secure_cookies: false, registration: true, trusted_proxies }, { async rpc() {} }), /trusted_proxies/);
+  for (const trusted_proxies of [
+    null,
+    true,
+    '127.0.0.1',
+    [1],
+    [''],
+    ['localhost'],
+    ['127.1'],
+    ['127.0.0.1/32'],
+    ['::/0'],
+    ['[::1]'],
+    ['127.0.0.1:80'],
+    ['fe80::1%eth0'],
+    [' 127.0.0.1 '],
+    Array(17).fill('127.0.0.1'),
+  ]) {
+    await assert.rejects(
+      createPlatform(
+        {
+          listen: '127.0.0.1:0',
+          database,
+          public_origin: 'http://platform.test',
+          secure_cookies: false,
+          registration: true,
+          trusted_proxies,
+        },
+        { async rpc() {} }
+      ),
+      /trusted_proxies/
+    );
   }
   await assert.rejects(stat(database), { code: 'ENOENT' });
   const { call } = await apiFixture(t, { trusted_proxies: Array.from({ length: 16 }, (_, i) => `192.0.2.${i + 1}`) });
   assert.equal((await call('/api/me')).status, 401);
 });
 
-test('trusted_proxies CLI flag is repeatable, canonicalized and validated before creating state', async t => {
-  const dir = await mkdtemp(join(tmpdir(), 'platform-proxy-config-')); t.after(() => rm(dir, { recursive: true, force: true }));
-  const cli = fileURLToPath(new URL('../../../scripts/configure-platform.mjs', import.meta.url)), exec = promisify(execFile);
-  const state = join(dir, 'configured');
-  await exec(process.execPath, [cli, '--state', state, '--origin', 'https://agent.example.test', '--fixture-url', 'http://127.0.0.1:9000', '--trusted-proxy', '::ffff:127.0.0.1', '--trusted-proxy', '2001:0DB8::1']);
-  const config = JSON.parse(await readFile(join(state, 'loop.json'), 'utf8'));
-  assert.deepEqual(config.platform.trusted_proxies, ['127.0.0.1', '2001:db8::1']); assert.equal(config.platform.secure_cookies, true);
-  const invalid = join(dir, 'invalid');
-  await assert.rejects(exec(process.execPath, [cli, '--state', invalid, '--trusted-proxy', '127.0.0.1/32']), error => error.code === 1 && /trusted_proxies/.test(error.stderr));
-  await assert.rejects(stat(invalid), { code: 'ENOENT' });
-});
+const configurePlatform = fileURLToPath(new URL('../../../scripts/configure-platform.mjs', import.meta.url));
+const needsConfigurePlatform = !existsSync(configurePlatform) && 'needs the repository scripts/configure-platform.mjs';
 
-test('config generator writes Compose init options and only overwrites with --force', async t => {
-  const dir = await mkdtemp(join(tmpdir(), 'platform-compose-config-')); t.after(() => rm(dir, { recursive: true, force: true }));
-  const cli = fileURLToPath(new URL('../../../scripts/configure-platform.mjs', import.meta.url)), exec = promisify(execFile);
-  const state = join(dir, 'configured'), read = async name => JSON.parse(await readFile(join(state, name), 'utf8'));
-  const base = [cli, '--state', state, '--fixture-url', 'http://127.0.0.1:9000', '--host-root', '/srv/easygo/data/workshop'];
-  await exec(process.execPath, [...base, '--registration', 'false', '--task-memory-mib', '512', '--task-cpus', '0.5', '--task-pids', '64', '--max-output-tokens', '8192']);
-  let loop = await read('loop.json'), sandbox = (await read('workshop.json')).workshop.sandbox;
-  assert.equal(loop.platform.registration, false); assert.equal((await read('gateway.json')).meter.max_output_tokens, 8192);
-  assert.deepEqual([sandbox.host_root, sandbox.memory_bytes, sandbox.nano_cpus, sandbox.pids_limit], ['/srv/easygo/data/workshop', 512 * 1048576, 500_000_000, 64]);
-  await assert.rejects(exec(process.execPath, [...base, '--registration', 'true']), error => error.code === 1 && /EEXIST/.test(error.stderr));
-  assert.equal((await read('loop.json')).platform.registration, false);
-  await exec(process.execPath, [...base, '--registration', 'true', '--force']);
-  loop = await read('loop.json'); sandbox = (await read('workshop.json')).workshop.sandbox;
-  assert.equal(loop.platform.registration, true);
-  assert.deepEqual([sandbox.memory_bytes, sandbox.nano_cpus, sandbox.pids_limit], [2048 * 1048576, 1_000_000_000, 256]);
-  for (const [flag, value, message] of [['--registration', 'yes', /--registration/], ['--host-root', 'relative/workshop', /--host-root/], ['--host-root', '/srv/../workshop', /--host-root/], ['--task-pids', '8', /--task-pids/], ['--task-memory-mib', '100.5', /integers/], ['--max-output-tokens', '200000', /--max-output-tokens/], ['--task-cpus', 'lots', /--task-cpus/]]) {
+test(
+  'trusted_proxies CLI flag is repeatable, canonicalized and validated before creating state',
+  { skip: needsConfigurePlatform },
+  async (t) => {
+    const dir = await mkdtemp(join(tmpdir(), 'platform-proxy-config-'));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    const cli = configurePlatform,
+      exec = promisify(execFile);
+    const state = join(dir, 'configured');
+    await exec(process.execPath, [
+      cli,
+      '--state',
+      state,
+      '--origin',
+      'https://agent.example.test',
+      '--fixture-url',
+      'http://127.0.0.1:9000',
+      '--trusted-proxy',
+      '::ffff:127.0.0.1',
+      '--trusted-proxy',
+      '2001:0DB8::1',
+    ]);
+    const config = JSON.parse(await readFile(join(state, 'loop.json'), 'utf8'));
+    assert.deepEqual(config.platform.trusted_proxies, ['127.0.0.1', '2001:db8::1']);
+    assert.equal(config.platform.secure_cookies, true);
     const invalid = join(dir, 'invalid');
-    await assert.rejects(exec(process.execPath, [cli, '--state', invalid, flag, value]), error => error.code === 1 && message.test(error.stderr));
+    await assert.rejects(
+      exec(process.execPath, [cli, '--state', invalid, '--trusted-proxy', '127.0.0.1/32']),
+      (error) => error.code === 1 && /trusted_proxies/.test(error.stderr)
+    );
     await assert.rejects(stat(invalid), { code: 'ENOENT' });
   }
-});
+);
+
+test(
+  'config generator writes Compose init options and only overwrites with --force',
+  { skip: needsConfigurePlatform },
+  async (t) => {
+    const dir = await mkdtemp(join(tmpdir(), 'platform-compose-config-'));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    const cli = configurePlatform,
+      exec = promisify(execFile);
+    const state = join(dir, 'configured'),
+      read = async (name) => JSON.parse(await readFile(join(state, name), 'utf8'));
+    const base = [
+      cli,
+      '--state',
+      state,
+      '--fixture-url',
+      'http://127.0.0.1:9000',
+      '--host-root',
+      '/srv/easygo/data/workshop',
+    ];
+    await exec(process.execPath, [
+      ...base,
+      '--registration',
+      'false',
+      '--task-memory-mib',
+      '512',
+      '--task-cpus',
+      '0.5',
+      '--task-pids',
+      '64',
+      '--max-output-tokens',
+      '8192',
+    ]);
+    let loop = await read('loop.json'),
+      sandbox = (await read('workshop.json')).workshop.sandbox;
+    assert.equal(loop.platform.registration, false);
+    assert.equal((await read('gateway.json')).meter.max_output_tokens, 8192);
+    assert.deepEqual(
+      [sandbox.host_root, sandbox.memory_bytes, sandbox.nano_cpus, sandbox.pids_limit],
+      ['/srv/easygo/data/workshop', 512 * 1048576, 500_000_000, 64]
+    );
+    await assert.rejects(
+      exec(process.execPath, [...base, '--registration', 'true']),
+      (error) => error.code === 1 && /EEXIST/.test(error.stderr)
+    );
+    assert.equal((await read('loop.json')).platform.registration, false);
+    await exec(process.execPath, [...base, '--registration', 'true', '--force']);
+    loop = await read('loop.json');
+    sandbox = (await read('workshop.json')).workshop.sandbox;
+    assert.equal(loop.platform.registration, true);
+    assert.deepEqual(
+      [sandbox.memory_bytes, sandbox.nano_cpus, sandbox.pids_limit],
+      [2048 * 1048576, 1_000_000_000, 256]
+    );
+    for (const [flag, value, message] of [
+      ['--registration', 'yes', /--registration/],
+      ['--host-root', 'relative/workshop', /--host-root/],
+      ['--host-root', '/srv/../workshop', /--host-root/],
+      ['--task-pids', '8', /--task-pids/],
+      ['--task-memory-mib', '100.5', /integers/],
+      ['--max-output-tokens', '200000', /--max-output-tokens/],
+      ['--task-cpus', 'lots', /--task-cpus/],
+    ]) {
+      const invalid = join(dir, 'invalid');
+      await assert.rejects(
+        exec(process.execPath, [cli, '--state', invalid, flag, value]),
+        (error) => error.code === 1 && message.test(error.stderr)
+      );
+      await assert.rejects(stat(invalid), { code: 'ENOENT' });
+    }
+  }
+);

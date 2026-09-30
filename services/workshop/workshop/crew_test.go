@@ -197,7 +197,7 @@ func TestCrewInboxResumeAndOutcomes(t *testing.T) {
 	}
 }
 func TestCrewOutcomeVariants(t *testing.T) {
-	for kind, want := range map[string]string{"report": "none", "ask": "asked", "blocked": "blocked", "submit": "submitted"} {
+	for kind, want := range map[string]Outcome{"report": "none", "ask": "asked", "blocked": "blocked", "submit": "submitted"} {
 		t.Run(kind, func(t *testing.T) {
 			s, task, in, release, _ := crewFixture(t)
 			p := CrewPost{ClientID: "outcome", Kind: kind, Text: "result"}
@@ -447,11 +447,11 @@ func TestFinishCrewOutcomeRecomputesFalseGreen(t *testing.T) {
 
 	cases := []struct {
 		name           string
-		seededState    string
+		seededState    AcceptanceState
 		seededGreen    bool
 		submitTests    string
 		finishStatus   Status
-		wantState      string
+		wantState      AcceptanceState
 		wantFalseGreen bool
 	}{
 		{

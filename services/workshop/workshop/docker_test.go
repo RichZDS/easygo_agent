@@ -511,7 +511,7 @@ func TestCodexInnerPolicyChangesOnlyAfterDockerInitialization(t *testing.T) {
 	for _, policy := range []string{"read-only", "workspace-write"} {
 		t.Run(policy, func(t *testing.T) {
 			r, f, in := dockerFixture(t)
-			in.Workflow.Policy = policy
+			in.Workflow.Policy = Policy(policy)
 			hostArgs, err := engineArgs(in)
 			if err != nil {
 				t.Fatal(err)

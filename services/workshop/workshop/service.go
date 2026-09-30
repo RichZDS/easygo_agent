@@ -84,7 +84,7 @@ func New(cfg Config, runner Runner) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cfg.Sandbox.Mode == "docker" {
+	if cfg.Sandbox.Mode == SandboxDocker {
 		// Fail before creating directories, opening storage or contacting Docker.
 		if err := validateRelaySocketPath(root); err != nil {
 			return nil, err
@@ -96,19 +96,19 @@ func New(cfg Config, runner Runner) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cfg.Sandbox.Mode != "" && cfg.Sandbox.Mode != "host" && cfg.Sandbox.Mode != "docker" {
+	if cfg.Sandbox.Mode != "" && cfg.Sandbox.Mode != SandboxHost && cfg.Sandbox.Mode != SandboxDocker {
 		return nil, fmt.Errorf("%w: unknown sandbox mode", ErrInvalid)
 	}
-	if cfg.Sandbox.Mode == "docker" {
+	if cfg.Sandbox.Mode == SandboxDocker {
 		if err := noSymlinks(root); err != nil {
 			return nil, err
 		}
 		if runner != nil {
-			return nil, errors.New("Docker mode cannot accept a replacement runner")
+			return nil, fmt.Errorf("%w: Docker mode cannot accept a replacement runner", ErrInvalid)
 		}
 		for _, e := range cfg.Engines {
 			if len(e.EnvAllowlist) != 0 {
-				return nil, errors.New("Docker mode forbids environment allowlists")
+				return nil, fmt.Errorf("%w: Docker mode forbids environment allowlists", ErrInvalid)
 			}
 		}
 	}
@@ -131,13 +131,13 @@ func New(cfg Config, runner Runner) (*Service, error) {
 		if p.GatewayModel != "" && cfg.ModelGateway == nil {
 			return nil, fmt.Errorf("%w: model gateway required", ErrInvalid)
 		}
-		if cfg.Sandbox.Mode == "docker" && p.GatewayModel == "" {
-			return nil, errors.New("Docker mode requires gateway runtime profiles")
+		if cfg.Sandbox.Mode == SandboxDocker && p.GatewayModel == "" {
+			return nil, fmt.Errorf("%w: Docker mode requires gateway runtime profiles", ErrInvalid)
 		}
 		s.runtimes[id] = p
 	}
 	for _, w := range cfg.Workflows {
-		if w.Acceptance != nil && cfg.Sandbox.Mode != "docker" {
+		if w.Acceptance != nil && cfg.Sandbox.Mode != SandboxDocker {
 			return nil, fmt.Errorf("%w: acceptance requires Docker mode", ErrInvalid)
 		}
 		w.Acceptance = cloneAcceptance(w.Acceptance)
@@ -164,8 +164,8 @@ func New(cfg Config, runner Runner) (*Service, error) {
 		}
 		w.Artifacts = append([]string(nil), w.Artifacts...)
 		w.AllowedRuntimes = append([]string(nil), w.AllowedRuntimes...)
-		if cfg.Sandbox.Mode == "docker" && w.RuntimeSpec == nil {
-			return nil, errors.New("Docker mode requires workflow runtime profiles")
+		if cfg.Sandbox.Mode == SandboxDocker && w.RuntimeSpec == nil {
+			return nil, fmt.Errorf("%w: Docker mode requires workflow runtime profiles", ErrInvalid)
 		}
 		s.workflows[w.Name] = w
 	}
@@ -178,7 +178,7 @@ func New(cfg Config, runner Runner) (*Service, error) {
 		return nil, err
 	}
 	if runner == nil {
-		if cfg.Sandbox.Mode == "docker" {
+		if cfg.Sandbox.Mode == SandboxDocker {
 			cfg.Root = root
 			s.runner, err = NewDockerRunner(cfg)
 		} else {
@@ -237,7 +237,7 @@ func validateWorkflow(w Workflow) error {
 	if err := validateAcceptance(w.Acceptance); err != nil {
 		return err
 	}
-	if w.Name == "" || w.Version == "" || w.Instructions == "" || w.Model == "" || !knownEngine(w.Engine) || (w.Policy != "read-only" && w.Policy != "workspace-write") || w.TimeoutSeconds < 1 || w.TimeoutSeconds > 86400 {
+	if w.Name == "" || w.Version == "" || w.Instructions == "" || w.Model == "" || !knownEngine(w.Engine) || (w.Policy != PolicyReadOnly && w.Policy != PolicyWorkspaceWrite) || w.TimeoutSeconds < 1 || w.TimeoutSeconds > 86400 {
 		return fmt.Errorf("%w: workflow needs name/version/instructions/model, known engine, explicit policy and timeout 1..86400", ErrInvalid)
 	}
 	seen := map[string]bool{}
@@ -335,7 +335,7 @@ func (s *Service) Submit(req SubmitRequest) (*Task, error) {
 				return err
 			}
 		}
-		return appendEvent(tx, task, Event{Kind: "state", Text: string(Queued)})
+		return appendEvent(tx, task, Event{Kind: EventState, Text: string(Queued)})
 	})
 	if err != nil {
 		<-s.slots
@@ -385,13 +385,30 @@ func appendEvent(tx *bolt.Tx, task *Task, event Event) error {
 	return b.Put(key[:], v)
 }
 
+// Get, List and Events hold s.mu so a closed or failed store reports ErrClosed
+// or the store error instead of a bolt error from a closed database.
 func (s *Service) Get(namespace, id string) (*Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.available(); err != nil {
+		return nil, err
+	}
+	return s.get(namespace, id)
+}
+
+// get reads one owned task; the caller holds s.mu and has checked available().
+func (s *Service) get(namespace, id string) (*Task, error) {
 	var task *Task
 	err := s.db.View(func(tx *bolt.Tx) error { var err error; task, err = readTask(tx, namespace, id); return err })
 	return task, err
 }
 
 func (s *Service) List(namespace string) ([]Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.available(); err != nil {
+		return nil, err
+	}
 	list := []Task{}
 	err := s.db.View(func(tx *bolt.Tx) error {
 		return tx.Bucket(tasksBucket).ForEach(func(_, v []byte) error {
@@ -410,6 +427,11 @@ func (s *Service) List(namespace string) ([]Task, error) {
 
 // Events returns at most 1000 events after the exclusive sequence cursor.
 func (s *Service) Events(namespace, id string, after uint64) ([]Event, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.available(); err != nil {
+		return nil, err
+	}
 	events := []Event{}
 	err := s.db.View(func(tx *bolt.Tx) error {
 		if _, err := readTask(tx, namespace, id); err != nil {
@@ -459,7 +481,7 @@ func (s *Service) Cancel(namespace, id string) (*Task, error) {
 		if err := putTask(tx, task); err != nil {
 			return err
 		}
-		return appendEvent(tx, task, Event{Kind: "state", Text: string(task.Status)})
+		return appendEvent(tx, task, Event{Kind: EventState, Text: string(task.Status)})
 	})
 	if err == nil {
 		if cancel := s.active[id]; cancel != nil {
@@ -468,6 +490,9 @@ func (s *Service) Cancel(namespace, id string) (*Task, error) {
 	}
 	return task, err
 }
+
+// maxTaskRuns caps attempts per task; Resume refuses with ErrRunLimit beyond it.
+const maxTaskRuns = 256
 
 func (s *Service) Resume(namespace, id, input string) (*Task, error) {
 	if !validInput(namespace, input) {
@@ -478,11 +503,11 @@ func (s *Service) Resume(namespace, id, input string) (*Task, error) {
 	if err := s.available(); err != nil {
 		return nil, err
 	}
-	task, err := s.Get(namespace, id)
+	task, err := s.get(namespace, id)
 	if err != nil {
 		return nil, err
 	}
-	if len(task.Runs) >= 256 {
+	if len(task.Runs) >= maxTaskRuns {
 		return nil, ErrRunLimit
 	}
 	if !terminal(task.Status) || task.SessionID == "" {
@@ -513,14 +538,14 @@ func (s *Service) Resume(namespace, id, input string) (*Task, error) {
 		if err := s.available(); err != nil {
 			return nil, err
 		}
-		task, err = s.Get(namespace, id)
+		task, err = s.get(namespace, id)
 		if err != nil {
 			if errors.Is(err, ErrNotFound) {
 				return nil, ErrConflict
 			}
 			return nil, err
 		}
-		if len(task.Runs) >= 256 {
+		if len(task.Runs) >= maxTaskRuns {
 			return nil, ErrRunLimit
 		}
 		if !terminal(task.Status) || task.ID != scanID || task.Workspace != workspace || task.SessionID != sessionID || len(task.Runs) != runCount {
@@ -541,7 +566,7 @@ func (s *Service) Resume(namespace, id, input string) (*Task, error) {
 		if err := putTask(tx, task); err != nil {
 			return err
 		}
-		return appendEvent(tx, task, Event{Kind: "state", Text: string(Queued)})
+		return appendEvent(tx, task, Event{Kind: EventState, Text: string(Queued)})
 	})
 	if err != nil {
 		<-s.slots
@@ -616,7 +641,7 @@ func (s *Service) execute(id string) {
 		if err := putTask(tx, &task); err != nil {
 			return err
 		}
-		return appendEvent(tx, &task, Event{Kind: "state", Text: string(Running)})
+		return appendEvent(tx, &task, Event{Kind: EventState, Text: string(Running)})
 	})
 	if err != nil {
 		s.err = err
@@ -691,7 +716,7 @@ func (s *Service) execute(id string) {
 		if err := putTask(tx, current); err != nil {
 			return err
 		}
-		return appendEvent(tx, current, Event{Kind: "state", Text: string(status)})
+		return appendEvent(tx, current, Event{Kind: EventState, Text: string(status)})
 	})
 	if err != nil {
 		s.err = err
@@ -704,19 +729,19 @@ func finish(task *Task, status Status, reason string) {
 	run := task.latest()
 	previousStatus := run.Status
 	run.Status, run.FinishedAt, run.Error = status, &now, reason
-	run.Outcome = "none"
+	run.Outcome = OutcomeNone
 	if run.Acceptance == nil {
 		run.Acceptance = skippedAcceptance()
 	}
 	if status == Interrupted && task.Workflow.Acceptance != nil && (previousStatus == Running || previousStatus == Cancelling) {
-		run.Acceptance.State = "interrupted"
+		run.Acceptance.State = AcceptanceInterrupted
 	}
-	if run.Acceptance.State == "running" {
+	if run.Acceptance.State == AcceptanceRunning {
 		switch status {
 		case Cancelled, TimedOut:
-			run.Acceptance.State = "cancelled"
+			run.Acceptance.State = AcceptanceCancelled
 		case Interrupted:
-			run.Acceptance.State = "interrupted"
+			run.Acceptance.State = AcceptanceInterrupted
 		}
 	}
 }
@@ -753,12 +778,12 @@ func markInterrupted(tx *bolt.Tx, reason string) error {
 		if err := putTask(tx, task); err != nil {
 			return err
 		}
-		if a := task.latest().Acceptance; a != nil && a.State == "interrupted" {
-			if err := appendEvent(tx, task, Event{Kind: "acceptance", Acceptance: &AcceptanceEvent{State: "interrupted", FalseGreen: a.FalseGreen}}); err != nil {
+		if a := task.latest().Acceptance; a != nil && a.State == AcceptanceInterrupted {
+			if err := appendEvent(tx, task, Event{Kind: EventAcceptance, Acceptance: &AcceptanceEvent{State: AcceptanceInterrupted, FalseGreen: a.FalseGreen}}); err != nil {
 				return err
 			}
 		}
-		if err := appendEvent(tx, task, Event{Kind: "state", Text: string(Interrupted)}); err != nil {
+		if err := appendEvent(tx, task, Event{Kind: EventState, Text: string(Interrupted)}); err != nil {
 			return err
 		}
 	}

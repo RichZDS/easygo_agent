@@ -131,6 +131,7 @@ func main() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	// 127.0.0.1:18080 is workshop runtimeProxyAddr (served by task-shim).
 	post, _ := http.NewRequestWithContext(ctx, "POST", "http://127.0.0.1:18080/v1/responses", strings.NewReader(`{"model":"child-spoof","input":"offline fixture"}`))
 	post.Header.Set("Authorization", "Bearer "+os.Getenv("EASYGO_RUNTIME_API_KEY"))
 	resp, err := http.DefaultClient.Do(post)

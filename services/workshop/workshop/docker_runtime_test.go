@@ -26,7 +26,7 @@ func TestDockerAndHostShellTools(t *testing.T) {
 				t.Run(name, func(t *testing.T) {
 					r, f, in := dockerFixture(t)
 					in.Workflow.Engine = engine
-					in.Workflow.Policy = policy
+					in.Workflow.Policy = Policy(policy)
 					in.Workflow.RuntimeSpec.Engine = engine
 					if engine == "claude" {
 						in.Workflow.RuntimeSpec.Protocol = "anthropic"

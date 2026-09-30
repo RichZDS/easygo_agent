@@ -37,20 +37,20 @@ type TaskSummary struct {
 }
 
 type RunSummary struct {
-	Outcome            string     `json:"outcome,omitempty"`
-	AcceptanceState    string     `json:"acceptance_state"`
-	FalseGreen         bool       `json:"false_green"`
-	EvidenceCount      int        `json:"evidence_count"`
-	ID                 string     `json:"id"`
-	Status             Status     `json:"status"`
-	Error              string     `json:"error,omitempty"`
-	ErrorTruncated     bool       `json:"error_truncated"`
-	Text               string     `json:"text,omitempty"`
-	TextBytes          int        `json:"text_bytes"`
-	TextTruncated      bool       `json:"text_truncated"`
-	ArtifactCount      int        `json:"artifact_count"`
-	Artifacts          []Artifact `json:"artifacts"`
-	ArtifactsTruncated bool       `json:"artifacts_truncated"`
+	Outcome            Outcome         `json:"outcome,omitempty"`
+	AcceptanceState    AcceptanceState `json:"acceptance_state"`
+	FalseGreen         bool            `json:"false_green"`
+	EvidenceCount      int             `json:"evidence_count"`
+	ID                 string          `json:"id"`
+	Status             Status          `json:"status"`
+	Error              string          `json:"error,omitempty"`
+	ErrorTruncated     bool            `json:"error_truncated"`
+	Text               string          `json:"text,omitempty"`
+	TextBytes          int             `json:"text_bytes"`
+	TextTruncated      bool            `json:"text_truncated"`
+	ArtifactCount      int             `json:"artifact_count"`
+	Artifacts          []Artifact      `json:"artifacts"`
+	ArtifactsTruncated bool            `json:"artifacts_truncated"`
 }
 
 // TaskMetadata has no result text, errors, or artifact arrays, so a list page
@@ -67,14 +67,14 @@ type TaskMetadata struct {
 }
 
 type RunMetadata struct {
-	Outcome         string `json:"outcome,omitempty"`
-	AcceptanceState string `json:"acceptance_state"`
-	FalseGreen      bool   `json:"false_green"`
-	EvidenceCount   int    `json:"evidence_count"`
-	ID              string `json:"id"`
-	Status          Status `json:"status"`
-	TextBytes       int    `json:"text_bytes"`
-	ArtifactCount   int    `json:"artifact_count"`
+	Outcome         Outcome         `json:"outcome,omitempty"`
+	AcceptanceState AcceptanceState `json:"acceptance_state"`
+	FalseGreen      bool            `json:"false_green"`
+	EvidenceCount   int             `json:"evidence_count"`
+	ID              string          `json:"id"`
+	Status          Status          `json:"status"`
+	TextBytes       int             `json:"text_bytes"`
+	ArtifactCount   int             `json:"artifact_count"`
 }
 
 type TaskPage struct {
@@ -113,7 +113,7 @@ func summarize(task *Task) TaskSummary {
 		return out
 	}
 	run := *task.latest()
-	r := RunSummary{Outcome: run.Outcome, AcceptanceState: "skipped", ID: run.ID, Status: run.Status, Error: prefix(run.Error, summaryErrorBytes), Text: prefix(run.Text, summaryTextBytes), TextBytes: len(run.Text), ArtifactCount: len(run.Artifacts), Artifacts: []Artifact{}}
+	r := RunSummary{Outcome: run.Outcome, AcceptanceState: AcceptanceSkipped, ID: run.ID, Status: run.Status, Error: prefix(run.Error, summaryErrorBytes), Text: prefix(run.Text, summaryTextBytes), TextBytes: len(run.Text), ArtifactCount: len(run.Artifacts), Artifacts: []Artifact{}}
 	r.AcceptanceState, r.FalseGreen, r.EvidenceCount = acceptanceSummary(run)
 	r.ErrorTruncated = len(r.Error) < len(run.Error)
 	r.TextTruncated = len(r.Text) < len(run.Text)
@@ -224,7 +224,7 @@ func (s *Service) Artifact(namespace, id, runID, path string) (*ArtifactDownload
 	if s.available() != nil {
 		return nil, ErrClosed
 	}
-	task, err := s.Get(namespace, id)
+	task, err := s.get(namespace, id)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return nil, ErrNotFound

@@ -120,7 +120,7 @@ func configureRuntimeEndpoint(in Invocation, args []string, env map[string]strin
 		env["OPENCLAW_STATE_DIR"] = dir
 		env["OPENCLAW_CONFIG_PATH"] = filepath.Join(dir, "openclaw.json")
 		tools := []string{"read"}
-		if in.Workflow.Policy == "workspace-write" {
+		if in.Workflow.Policy == PolicyWorkspaceWrite {
 			tools = append(tools, "write", "edit")
 		}
 		config := map[string]any{

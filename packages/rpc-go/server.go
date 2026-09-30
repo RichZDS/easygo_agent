@@ -234,33 +234,18 @@ func handler(p permissions, methods map[string]Method, limit int64, observe func
 			respond(nil, nil, Failure(-32600, "request_too_large"))
 			return
 		}
-		if !json.Valid(raw) {
-			respond(nil, nil, Failure(-32700, "parse_error"))
-			return
-		}
-		var req request
-		if Decode(raw, &req) != nil {
-			respond(nil, nil, Failure(-32600, "invalid_request"))
-			return
-		}
-		var id string
-		if json.Unmarshal(req.ID, &id) != nil || id == "" || len(id) > 128 {
-			respond(nil, nil, Failure(-32600, "invalid_request"))
-			return
-		}
+		id, req, namespace, envErr := parseEnvelope(raw)
 		audit.RequestID = id
-		if req.JSONRPC != "2.0" || req.Method == "" || len(req.Params) == 0 || bytes.TrimSpace(req.Params)[0] != '{' {
-			respond(id, nil, Failure(-32600, "invalid_request"))
+		if envErr != nil {
+			var echo any // errors before a valid id answer with a null id
+			if id != "" {
+				echo = id
+			}
+			respond(echo, nil, envErr)
 			return
 		}
 		audit.Method = req.Method
-		var params map[string]json.RawMessage
-		_ = json.Unmarshal(req.Params, &params)
-		var namespace string
-		namespaceErr := json.Unmarshal(params["namespace"], &namespace)
-		if namespaceErr == nil && ValidNamespace(namespace) {
-			audit.Namespace = namespace
-		}
+		audit.Namespace = namespace
 		method, ok := methods[req.Method]
 		if !ok {
 			respond(id, nil, Failure(-32601, "method_not_found"))
@@ -270,7 +255,7 @@ func handler(p permissions, methods map[string]Method, limit int64, observe func
 			respond(id, nil, Failure(-32003, "forbidden"))
 			return
 		}
-		if namespaceErr != nil || !ValidNamespace(namespace) {
+		if namespace == "" {
 			respond(id, nil, InvalidParams())
 			return
 		}
@@ -280,26 +265,63 @@ func handler(p permissions, methods map[string]Method, limit int64, observe func
 		}
 		stream := &Stream{w: w, id: id}
 		result, rpcErr := method(r.Context(), req.Params, stream)
-		if rpcErr != nil {
-			audit.ErrorCode = rpcErr.Data.Code
-		}
-		if stream.err != nil && audit.ErrorCode == "" {
-			audit.ErrorCode = "stream_write_error"
-		}
-		if stream.terminal {
-			return
-		}
-		if stream.began {
-			if rpcErr == nil {
-				rpcErr = Failure(-32603, "missing_terminal")
-			}
-			audit.ErrorCode = rpcErr.Data.Code
-			stream.terminal = true
-			_ = stream.send("error", Envelope{JSONRPC: "2.0", ID: id, Error: rpcErr})
+		if code, streamed := finishStream(stream, rpcErr); streamed {
+			audit.ErrorCode = code
 			return
 		}
 		respond(id, result, rpcErr)
 	})
+}
+
+// parseEnvelope applies the envelope rules to a size-checked request body. id
+// is set once the body carries a valid string id, so later errors can echo
+// it. namespace is the params namespace if it is valid and "" otherwise; the
+// caller reports that only after method lookup and authorization.
+func parseEnvelope(raw []byte) (id string, req request, namespace string, e *Error) {
+	if !json.Valid(raw) {
+		return "", req, "", Failure(-32700, "parse_error")
+	}
+	if Decode(raw, &req) != nil {
+		return "", req, "", Failure(-32600, "invalid_request")
+	}
+	if json.Unmarshal(req.ID, &id) != nil || id == "" || len(id) > 128 {
+		return "", req, "", Failure(-32600, "invalid_request")
+	}
+	if req.JSONRPC != "2.0" || req.Method == "" || len(req.Params) == 0 || bytes.TrimSpace(req.Params)[0] != '{' {
+		return id, req, "", Failure(-32600, "invalid_request")
+	}
+	var params map[string]json.RawMessage
+	_ = json.Unmarshal(req.Params, &params)
+	if json.Unmarshal(params["namespace"], &namespace) != nil || !ValidNamespace(namespace) {
+		namespace = ""
+	}
+	return id, req, namespace, nil
+}
+
+// finishStream settles a method call that wrote stream events. It returns the
+// audit error code and streamed=false when nothing was streamed, leaving the
+// JSON response to the caller. If events began without a terminal result it
+// sends the terminal error event, missing_terminal when the method returned
+// no error.
+func finishStream(s *Stream, rpcErr *Error) (code string, streamed bool) {
+	if rpcErr != nil {
+		code = rpcErr.Data.Code
+	}
+	if s.err != nil && code == "" {
+		code = "stream_write_error"
+	}
+	if s.terminal {
+		return code, true
+	}
+	if !s.began {
+		return code, false
+	}
+	if rpcErr == nil {
+		rpcErr = Failure(-32603, "missing_terminal")
+	}
+	s.terminal = true
+	_ = s.send("error", Envelope{JSONRPC: "2.0", ID: s.id, Error: rpcErr})
+	return rpcErr.Data.Code, true
 }
 
 // NewServer always uses mTLS and enforces the same pinned identity in TLS and HTTP.

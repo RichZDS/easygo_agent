@@ -48,7 +48,9 @@ func run(args []string) int {
 		r.Out.URL.Scheme = "http"
 		r.Out.URL.Host = "relay"
 		r.Out.Host = "relay"
-	}, Transport: transport, ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) { http.Error(w, "model relay unavailable", 502) }}
+	}, Transport: transport, ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+		http.Error(w, "model relay unavailable", http.StatusBadGateway)
+	}}
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, 16<<20) // workshop maxRelayBodyBytes
 		proxy.ServeHTTP(w, r)
@@ -58,7 +60,13 @@ func run(args []string) int {
 		return 1
 	}
 	defer server.Close()
-	go server.Serve(listener)
+	go func() {
+		// Close (deferred above) ends Serve with ErrServerClosed; anything else
+		// means the child lost its model/crew proxy mid-run.
+		if err := server.Serve(listener); !errors.Is(err, http.ErrServerClosed) {
+			_, _ = io.WriteString(os.Stderr, "model proxy stopped\n")
+		}
+	}()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	cmd := exec.CommandContext(ctx, "/usr/local/bin/"+args[0], args[1:]...)
@@ -79,7 +87,7 @@ func run(args []string) int {
 		if errors.As(err, &exit) {
 			return exit.ExitCode()
 		}
-		io.WriteString(os.Stderr, "native runtime failed to start\n")
+		_, _ = io.WriteString(os.Stderr, "native runtime failed to start\n")
 		return 1
 	}
 	return 0

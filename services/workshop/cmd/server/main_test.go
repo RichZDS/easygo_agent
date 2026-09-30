@@ -124,15 +124,16 @@ func TestCommandProcess(t *testing.T) {
 		if record["kind"] != "rpc" || record["principal_id"] != "test" || record["namespace"] != "test" || record["duration"].(float64) <= 0 || record["status"] != float64(200) {
 			t.Fatalf("invalid audit: %+v", record)
 		}
-		if id == "test-id" {
+		switch id {
+		case "test-id":
 			if record["method"] != "workshop.list" || record["error_code"] != nil {
 				t.Fatal("incorrect success audit")
 			}
-		} else if id == "workshop-failure" {
+		case "workshop-failure":
 			if record["method"] != "workshop.get" || record["error_code"] != "not_found" {
 				t.Fatal("incorrect failure audit")
 			}
-		} else {
+		default:
 			t.Fatalf("unexpected RPC ID %s", id)
 		}
 	}

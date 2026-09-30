@@ -74,7 +74,7 @@ func TestCrewUnavailableAndTokenSafeErrors(t *testing.T) {
 		}
 	}
 	token := uuid.NewString()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, token, 409) }))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, token, http.StatusConflict) }))
 	defer server.Close()
 	var out, diag bytes.Buffer
 	code := run([]string{"report", "hello"}, func(k string) string {

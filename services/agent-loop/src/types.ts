@@ -50,13 +50,6 @@ export interface Response {
   usage: Usage;
   cost: Cost;
 }
-export interface Event {
-  type: string;
-  index?: number;
-  delta?: string;
-  id?: string;
-  name?: string;
-}
 export interface TLSConfig {
   cert_file: string;
   key_file: string;

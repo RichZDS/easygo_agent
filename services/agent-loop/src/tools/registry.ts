@@ -1,7 +1,7 @@
 import type { Block, Run, Tool } from '../types.js';
 import { fields, RpcError } from '../validation.js';
 
-export type Role = 'assistant' | 'foreman';
+type Role = 'assistant' | 'foreman';
 export interface ToolEntry {
   definition: Tool;
   roles: readonly Role[];

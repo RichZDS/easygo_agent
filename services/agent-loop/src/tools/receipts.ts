@@ -10,7 +10,7 @@ export const statuses = [
   'timed_out',
   'interrupted',
 ];
-const acceptanceStates = ['skipped', 'running', 'passed', 'failed', 'error', 'cancelled', 'interrupted'];
+export const acceptanceStates = ['skipped', 'running', 'passed', 'failed', 'error', 'cancelled', 'interrupted'];
 export function check(valid: boolean): asserts valid {
   if (!valid) throw new Error('Invalid workshop receipt');
 }
@@ -20,6 +20,13 @@ export function enumValue(value: unknown, values: string[]): void {
 export function numberValue(value: unknown, min = 0, max = Number.MAX_SAFE_INTEGER): number {
   check(Number.isSafeInteger(value) && Number(value) >= min && Number(value) <= max);
   return Number(value);
+}
+// run_ids: at most 256 distinct task-run IDs.
+export function runIds(value: unknown): string[] {
+  check(Array.isArray(value) && value.length <= 256);
+  const ids = value.map((id) => string(id));
+  check(new Set(ids).size === ids.length);
+  return ids;
 }
 function booleanValue(value: unknown): void {
   check(typeof value === 'boolean');

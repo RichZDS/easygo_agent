@@ -6,7 +6,7 @@ import type { Message, Response, Run } from './types.js';
 import { RpcError } from './validation.js';
 
 type Row = Record<string, string | number | null>;
-export const LEASE_MS = 30_000;
+const LEASE_MS = 30_000;
 export class Store {
   private db: DatabaseSync;
   private owner = randomUUID();

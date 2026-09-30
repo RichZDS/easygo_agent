@@ -31,7 +31,7 @@ export interface KnowledgeConfig {
   profile_limit?: number;
   consolidate_interval_ms?: number;
 }
-export interface KnowledgeDependencies {
+interface KnowledgeDependencies {
   generate(namespace: string, messages: Message[]): Promise<Response>;
 }
 const fail = (reason: string): never => {

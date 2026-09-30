@@ -6,8 +6,8 @@ import { createToolRegistry, type ToolRegistry } from './tools/index.js';
 import { systemPrompt } from './tools/roles.js';
 import { object, RpcError, string } from './validation.js';
 
-export const RUN_TIMEOUT_MS = 10 * 60_000;
-export function modelResponse(value: unknown): Response {
+const RUN_TIMEOUT_MS = 10 * 60_000;
+function modelResponse(value: unknown): Response {
   const o = object(value);
   const message = object(o.message);
   if (message.role !== 'assistant' || !Array.isArray(message.content) || message.content.length > 128)

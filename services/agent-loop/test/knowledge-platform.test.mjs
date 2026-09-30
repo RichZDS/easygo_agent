@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createServer } from 'node:net';
 import { spawn } from 'node:child_process';
 import { Knowledge } from '../dist/knowledge/index.js';
+import { callMethod } from '../dist/methods.js';
 
 // This also runs after foreman integrates platform + Store outbox. In an isolated
 // worker checkout, an explicit compiled snapshot can be supplied for the proof.
@@ -14,7 +15,7 @@ const dist = process.env.EASYGO_KNOWLEDGE_PLATFORM_DIST ?? fileURLToPath(new URL
 // The Go half runs the remote TUI adapter test from the repository root.
 const repo = resolve(fileURLToPath(new URL('../../../', import.meta.url)));
 const go =
-  process.env.EASYGO_GO ??
+  process.env.EASYGO_GO_BIN ??
   (process.env.PATH ?? '')
     .split(delimiter)
     .filter(Boolean)
@@ -25,7 +26,7 @@ test(
   {
     skip:
       !existsSync(join(dist, 'platform/server.js')) ||
-      (!go && 'needs Go: set EASYGO_GO or put go on PATH') ||
+      (!go && 'needs Go: set EASYGO_GO_BIN or put go on PATH') ||
       (!existsSync(join(repo, 'internal/remotetui')) && 'needs the repository internal/remotetui'),
     timeout: 60000,
   },
@@ -63,7 +64,8 @@ test(
       },
       {
         rpc: async (method, p) => {
-          if (method.startsWith('agent.memory.') || method.startsWith('agent.skills.')) return k.dispatch(method, p);
+          if (method.startsWith('agent.memory.') || method.startsWith('agent.skills.'))
+            return callMethod({ knowledge: k }, method, p);
           switch (method) {
             case 'agent.session.create':
               return store.createSession(p.namespace);

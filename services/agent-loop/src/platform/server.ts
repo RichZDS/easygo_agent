@@ -3,6 +3,7 @@ import { createHash, randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { fields, object, string, RpcError } from '../validation.js';
 import { API_BODY_ERRORS, closeOnce, listen, parseListen, readJsonBody } from '../http.js';
+import { PUBLIC_METHODS } from '../methods.js';
 import type { Row } from '../sqlite.js';
 import { PlatformStore, Wallet, count } from './store.js';
 import { createClientAddress } from './client-address.mjs';
@@ -16,36 +17,14 @@ export interface PlatformConfig {
   bootstrap_admin?: { email: string; password_env: string };
   trusted_proxies?: string[];
 }
-const PUBLIC_METHODS = new Set([
-  'agent.session.create',
-  'agent.session.list',
-  'agent.session.history',
-  'agent.run.start',
-  'agent.run.get',
-  'agent.run.cancel',
-  'agent.run.events',
-  'agent.workshop.catalog',
-  'workshop.submit',
-  'workshop.get',
-  'workshop.list',
-  'workshop.cancel',
-  'workshop.resume',
-  'workshop.result',
-  'workshop.events',
-  'workshop.artifact',
-  'workshop.message',
-  'workshop.evidence',
-  'agent.memory.list',
-  'agent.memory.upsert',
-  'agent.memory.delete',
-  'agent.memory.consolidate',
-  'agent.memory.import',
-  'agent.skills.list',
-  'agent.skills.get',
-  'agent.skills.upsert',
-  'agent.skills.delete',
-  'agent.skills.import',
-]);
+// Web console modules: index.html loads app.js, which imports the rest.
+const CONSOLE_SCRIPTS = [
+  'app.js',
+  'ui.js',
+  'api.js',
+  'pager.js',
+  ...['overview', 'chat', 'workshop', 'knowledge', 'wallet', 'admin'].map((view) => `views/${view}.js`),
+];
 const SESSION_MS = 7 * 24 * 60 * 60 * 1000;
 const digest = (s: string) => createHash('sha256').update(s).digest('hex');
 function email(value: unknown): string {
@@ -187,8 +166,8 @@ export async function createPlatform(
     closing = false;
   const assets = new Map([
     ['/', ['index.html', 'text/html; charset=utf-8']],
-    ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
     ['/style.css', ['style.css', 'text/css; charset=utf-8']],
+    ...CONSOLE_SCRIPTS.map((file): [string, string[]] => [`/${file}`, [file, 'text/javascript; charset=utf-8']]),
   ]);
   function json(res: ServerResponse, value: unknown, status = 200) {
     res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });

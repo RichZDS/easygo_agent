@@ -7,7 +7,10 @@ import { once } from 'node:events';
 import { setTimeout } from 'node:timers/promises';
 import { startServer } from '../dist/server.js';
 import { RpcClient, tlsOptions, Authorizer } from '../dist/rpc.js';
-import { METHODS } from '../dist/types.js';
+import { METHODS } from '../dist/methods.js';
+
+// The test client may call the core agent.* methods only, as before the method registry existed.
+const AGENT_METHODS = METHODS.filter((m) => m.startsWith('agent.') && !/^agent\.(memory|skills)\./.test(m));
 
 export function certificates() {
   const dir = mkdtempSync(join(tmpdir(), 'agent-loop-test-'));
@@ -185,7 +188,12 @@ export async function harness(pki, options = {}) {
     tls: pki.tls('loop'),
     database: join(dir, 'agent.sqlite'),
     authorization: [
-      { id: 'client', cert_file: pki.cert('client'), methods: [...METHODS, 'health'], namespaces: ['demo', 'other'] },
+      {
+        id: 'client',
+        cert_file: pki.cert('client'),
+        methods: [...AGENT_METHODS, 'health'],
+        namespaces: ['demo', 'other'],
+      },
       { id: 'limited', cert_file: pki.cert('limited'), methods: ['agent.session.list'], namespaces: ['demo'] },
       { id: 'loop', cert_file: pki.cert('loop'), methods: ['health'], namespaces: [] },
     ],

@@ -11,9 +11,15 @@
 export function parseJSON(text) {
   let cursor = 0;
   /** @returns {never} */
-  function invalid() { throw new SyntaxError('Invalid JSON'); }
+  function invalid() {
+    throw new SyntaxError('Invalid JSON');
+  }
   function whitespace() {
-    while (cursor < text.length && (text[cursor] === ' ' || text[cursor] === '\t' || text[cursor] === '\r' || text[cursor] === '\n')) cursor++;
+    while (
+      cursor < text.length &&
+      (text[cursor] === ' ' || text[cursor] === '\t' || text[cursor] === '\r' || text[cursor] === '\n')
+    )
+      cursor++;
   }
   /** @returns {string} */
   function string() {
@@ -43,24 +49,39 @@ export function parseJSON(text) {
       const isObject = character === '{';
       const end = isObject ? '}' : ']';
       const keys = new Set();
-      cursor++; whitespace();
-      if (text[cursor] === end) { cursor++; return; }
+      cursor++;
+      whitespace();
+      if (text[cursor] === end) {
+        cursor++;
+        return;
+      }
       while (true) {
         if (isObject) {
           const key = string();
           if (keys.has(key)) invalid();
-          keys.add(key); whitespace();
+          keys.add(key);
+          whitespace();
           if (text[cursor++] !== ':') invalid();
         }
-        value(depth + 1); whitespace();
-        if (text[cursor] === end) { cursor++; return; }
+        value(depth + 1);
+        whitespace();
+        if (text[cursor] === end) {
+          cursor++;
+          return;
+        }
         if (text[cursor++] !== ',') invalid();
         whitespace();
       }
     }
-    if (character === '"') { string(); return; }
+    if (character === '"') {
+      string();
+      return;
+    }
     for (const literal of ['true', 'false', 'null']) {
-      if (text.startsWith(literal, cursor)) { cursor += literal.length; return; }
+      if (text.startsWith(literal, cursor)) {
+        cursor += literal.length;
+        return;
+      }
     }
     number.lastIndex = cursor;
     if (!number.exec(text)) invalid();
@@ -68,8 +89,11 @@ export function parseJSON(text) {
   }
   try {
     if (typeof text !== 'string') invalid();
-    value(0); whitespace();
+    value(0);
+    whitespace();
     if (cursor !== text.length) invalid();
     return JSON.parse(text);
-  } catch { return invalid(); }
+  } catch {
+    return invalid();
+  }
 }

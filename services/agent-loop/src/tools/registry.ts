@@ -19,7 +19,7 @@ export class ToolRegistry {
     }
   }
   definitions(role: Role): Tool[] {
-    return [...this.entries.values()].filter(e => e.roles.includes(role)).map(e => e.definition);
+    return [...this.entries.values()].filter((e) => e.roles.includes(role)).map((e) => e.definition);
   }
   private entry(role: Role, name?: string): ToolEntry | undefined {
     const entry = this.entries.get(name ?? '');
@@ -27,7 +27,8 @@ export class ToolRegistry {
   }
   async execute(role: Role, call: Block, run: Run, signal: AbortSignal): Promise<unknown> {
     signal.throwIfAborted();
-    if (Buffer.byteLength(JSON.stringify(call.arguments) ?? '') > 65536) throw new RpcError(-32602, 'tool_arguments_too_large');
+    if (Buffer.byteLength(JSON.stringify(call.arguments) ?? '') > 65536)
+      throw new RpcError(-32602, 'tool_arguments_too_large');
     const entry = this.entry(role, call.name);
     if (!entry) throw new RpcError(-32602, 'unknown_tool');
     const schema = entry.definition.parameters as { properties: Record<string, unknown> };

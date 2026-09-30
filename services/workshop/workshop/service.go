@@ -220,37 +220,7 @@ func New(cfg Config, runner Runner) (*Service, error) {
 				return err
 			}
 		}
-		var recovered []*Task
-		if err := tx.Bucket(tasksBucket).ForEach(func(_, value []byte) error {
-			var task Task
-			if err := json.Unmarshal(value, &task); err != nil {
-				return err
-			}
-			if !terminal(task.Status) {
-				finish(&task, Interrupted, "service restarted; explicit resume required")
-				if err := finishCrewOutcome(tx, &task); err != nil {
-					return err
-				}
-				recovered = append(recovered, &task)
-			}
-			return nil
-		}); err != nil {
-			return err
-		}
-		for _, task := range recovered {
-			if err := putTask(tx, task); err != nil {
-				return err
-			}
-			if a := task.Runs[len(task.Runs)-1].Acceptance; a != nil && a.State == "interrupted" {
-				if err := appendEvent(tx, task, Event{Kind: "acceptance", Acceptance: &AcceptanceEvent{State: "interrupted", FalseGreen: a.FalseGreen}}); err != nil {
-					return err
-				}
-			}
-			if err := appendEvent(tx, task, Event{Kind: "state", Text: string(Interrupted)}); err != nil {
-				return err
-			}
-		}
-		return nil
+		return markInterrupted(tx, "service restarted; explicit resume required")
 	})
 	if err != nil {
 		_ = s.db.Close()
@@ -405,7 +375,7 @@ func appendEvent(tx *bolt.Tx, task *Task, event Event) error {
 	if err != nil {
 		return err
 	}
-	event.Sequence, event.Time, event.RunID = seq, time.Now().UTC(), task.Runs[len(task.Runs)-1].ID
+	event.Sequence, event.Time, event.RunID = seq, time.Now().UTC(), task.latest().ID
 	v, err := json.Marshal(event)
 	if err != nil {
 		return err
@@ -478,13 +448,12 @@ func (s *Service) Cancel(namespace, id string) (*Task, error) {
 			return err
 		}
 		if task.Status == Queued {
-			finish(task, Cancelled, "cancelled before start")
-			if err := finishCrewOutcome(tx, task); err != nil {
+			if err := finishRun(tx, task, Cancelled, "cancelled before start"); err != nil {
 				return err
 			}
 		} else {
 			task.Status = Cancelling
-			task.Runs[len(task.Runs)-1].Status = Cancelling
+			task.latest().Status = Cancelling
 			task.UpdatedAt = time.Now().UTC()
 		}
 		if err := putTask(tx, task); err != nil {
@@ -641,7 +610,7 @@ func (s *Service) execute(id string) {
 	s.active[id] = cancel
 	now := time.Now().UTC()
 	task.Status, task.UpdatedAt = Running, now
-	run := &task.Runs[len(task.Runs)-1]
+	run := task.latest()
 	run.Status, run.StartedAt = Running, &now
 	err = s.db.Update(func(tx *bolt.Tx) error {
 		if err := putTask(tx, &task); err != nil {
@@ -668,7 +637,7 @@ func (s *Service) execute(id string) {
 			}
 			if event.SessionID != "" {
 				current.SessionID = event.SessionID
-				current.Runs[len(current.Runs)-1].SessionID = event.SessionID
+				current.latest().SessionID = event.SessionID
 				if err := putTask(tx, current); err != nil {
 					return err
 				}
@@ -708,11 +677,10 @@ func (s *Service) execute(id string) {
 		case runErr != nil:
 			status, reason = Failed, runErr.Error()
 		}
-		finish(current, status, reason)
-		if err := finishCrewOutcome(tx, current); err != nil {
+		if err := finishRun(tx, current, status, reason); err != nil {
 			return err
 		}
-		r := &current.Runs[len(current.Runs)-1]
+		r := current.latest()
 		r.Text, r.Usage = result.Text, result.Usage
 		if status == Succeeded {
 			r.Artifacts = artifacts
@@ -733,7 +701,7 @@ func (s *Service) execute(id string) {
 func finish(task *Task, status Status, reason string) {
 	now := time.Now().UTC()
 	task.Status, task.UpdatedAt = status, now
-	run := &task.Runs[len(task.Runs)-1]
+	run := task.latest()
 	previousStatus := run.Status
 	run.Status, run.FinishedAt, run.Error = status, &now, reason
 	run.Outcome = "none"
@@ -751,6 +719,50 @@ func finish(task *Task, status Status, reason string) {
 			run.Acceptance.State = "interrupted"
 		}
 	}
+}
+
+// finishRun is the only way a run becomes terminal inside a transaction: finish
+// may rewrite the acceptance state, so the crew outcome and false-green flag
+// are recomputed from the same events right after it.
+func finishRun(tx *bolt.Tx, task *Task, status Status, reason string) error {
+	finish(task, status, reason)
+	return finishCrewOutcome(tx, task)
+}
+
+// markInterrupted moves every non-terminal task to Interrupted with reason and
+// records its acceptance/state events. Restart (New) and stop (Close) share it;
+// tasks are rewritten after the scan because bbolt forbids mutation in ForEach.
+func markInterrupted(tx *bolt.Tx, reason string) error {
+	var tasks []*Task
+	if err := tx.Bucket(tasksBucket).ForEach(func(_, v []byte) error {
+		var task Task
+		if err := json.Unmarshal(v, &task); err != nil {
+			return err
+		}
+		if !terminal(task.Status) {
+			if err := finishRun(tx, &task, Interrupted, reason); err != nil {
+				return err
+			}
+			tasks = append(tasks, &task)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, task := range tasks {
+		if err := putTask(tx, task); err != nil {
+			return err
+		}
+		if a := task.latest().Acceptance; a != nil && a.State == "interrupted" {
+			if err := appendEvent(tx, task, Event{Kind: "acceptance", Acceptance: &AcceptanceEvent{State: "interrupted", FalseGreen: a.FalseGreen}}); err != nil {
+				return err
+			}
+		}
+		if err := appendEvent(tx, task, Event{Kind: "state", Text: string(Interrupted)}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // collectArtifacts opens each path exactly as Artifact downloads do (no symlink
@@ -797,37 +809,7 @@ func (s *Service) Close() error {
 		s.mu.Unlock()
 		s.wg.Wait()
 		s.closeErr = s.db.Update(func(tx *bolt.Tx) error {
-			var tasks []*Task
-			if err := tx.Bucket(tasksBucket).ForEach(func(_, v []byte) error {
-				var task Task
-				if err := json.Unmarshal(v, &task); err != nil {
-					return err
-				}
-				if !terminal(task.Status) {
-					finish(&task, Interrupted, "service stopped; explicit resume required")
-					if err := finishCrewOutcome(tx, &task); err != nil {
-						return err
-					}
-					tasks = append(tasks, &task)
-				}
-				return nil
-			}); err != nil {
-				return err
-			}
-			for _, task := range tasks {
-				if err := putTask(tx, task); err != nil {
-					return err
-				}
-				if a := task.Runs[len(task.Runs)-1].Acceptance; a != nil && a.State == "interrupted" {
-					if err := appendEvent(tx, task, Event{Kind: "acceptance", Acceptance: &AcceptanceEvent{State: "interrupted", FalseGreen: a.FalseGreen}}); err != nil {
-						return err
-					}
-				}
-				if err := appendEvent(tx, task, Event{Kind: "state", Text: string(Interrupted)}); err != nil {
-					return err
-				}
-			}
-			return nil
+			return markInterrupted(tx, "service stopped; explicit resume required")
 		})
 		s.closeErr = errors.Join(s.closeErr, s.err, s.db.Close())
 	})

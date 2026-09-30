@@ -112,7 +112,7 @@ func summarize(task *Task) TaskSummary {
 	if len(task.Runs) == 0 {
 		return out
 	}
-	run := task.Runs[len(task.Runs)-1]
+	run := *task.latest()
 	r := RunSummary{Outcome: run.Outcome, AcceptanceState: "skipped", ID: run.ID, Status: run.Status, Error: prefix(run.Error, summaryErrorBytes), Text: prefix(run.Text, summaryTextBytes), TextBytes: len(run.Text), ArtifactCount: len(run.Artifacts), Artifacts: []Artifact{}}
 	r.AcceptanceState, r.FalseGreen, r.EvidenceCount = acceptanceSummary(run)
 	r.ErrorTruncated = len(r.Error) < len(run.Error)
@@ -168,7 +168,7 @@ func (s *Service) ListPage(namespace string, offset, limit int) (*TaskPage, erro
 	for _, task := range tasks[offset:end] {
 		item := TaskMetadata{Runtime: task.Workflow.Runtime, Engine: task.Workflow.Engine, Model: task.Workflow.Model, ID: task.ID, Namespace: task.Namespace, Status: task.Status, RunCount: len(task.Runs), Runs: []RunMetadata{}}
 		if len(task.Runs) > 0 {
-			run := task.Runs[len(task.Runs)-1]
+			run := *task.latest()
 			state, green, count := acceptanceSummary(run)
 			item.Runs = append(item.Runs, RunMetadata{Outcome: run.Outcome, AcceptanceState: state, FalseGreen: green, EvidenceCount: count, ID: run.ID, Status: run.Status, TextBytes: len(run.Text), ArtifactCount: len(run.Artifacts)})
 		}
@@ -187,17 +187,7 @@ func (s *Service) Result(namespace, id, runID string, offset, limit int) (*Resul
 	if err != nil {
 		return nil, err
 	}
-	var run *Run
-	if runID == "" && len(task.Runs) > 0 {
-		run = &task.Runs[len(task.Runs)-1]
-	} else {
-		for i := range task.Runs {
-			if task.Runs[i].ID == runID {
-				run = &task.Runs[i]
-				break
-			}
-		}
-	}
+	run := task.run(runID)
 	if run == nil {
 		return nil, ErrNotFound
 	}
@@ -244,17 +234,7 @@ func (s *Service) Artifact(namespace, id, runID, path string) (*ArtifactDownload
 	if !downloadTerminal(task.Status) {
 		return nil, ErrConflict
 	}
-	var run *Run
-	if runID == "" && len(task.Runs) > 0 {
-		run = &task.Runs[len(task.Runs)-1]
-	} else {
-		for i := range task.Runs {
-			if task.Runs[i].ID == runID {
-				run = &task.Runs[i]
-				break
-			}
-		}
-	}
+	run := task.run(runID)
 	if run == nil {
 		return nil, ErrNotFound
 	}

@@ -51,7 +51,7 @@ func (s *Service) acceptanceUpdate(namespace, id string, update func(*bolt.Tx, *
 		if err != nil {
 			return err
 		}
-		run := &task.Runs[len(task.Runs)-1]
+		run := task.latest()
 		if run.Acceptance == nil {
 			run.Acceptance = skippedAcceptance()
 		}
@@ -73,28 +73,7 @@ func acceptanceFalseGreen(tx *bolt.Tx, task *Task, state string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	runID := task.Runs[len(task.Runs)-1].ID
-	outcome, tests := "none", ""
-	for _, event := range events {
-		m := event.Message
-		if event.RunID != runID || m == nil || m.Direction != "from_worker" {
-			continue
-		}
-		switch m.Kind {
-		case "submit":
-			outcome = "submitted"
-			tests = ""
-			if m.Claims != nil {
-				tests = m.Claims.Tests
-			}
-		case "ask":
-			outcome = "asked"
-			tests = ""
-		case "blocked":
-			outcome = "blocked"
-			tests = ""
-		}
-	}
+	outcome, tests := crewOutcome(events, task.latest().ID)
 	return falseGreen(outcome, tests, state), nil
 }
 func (s *Service) acceptanceState(tx *bolt.Tx, task *Task, a *Acceptance, state string) error {

@@ -54,7 +54,7 @@ lint:
 	@if command -v $(GOLANGCI_LINT) >/dev/null 2>&1; then \
 		rc=0; for m in $(GO_MODULES); do echo "==> $$m: golangci-lint run"; (cd $$m && $(GOLANGCI_LINT) run ./...) || rc=1; done; exit $$rc; \
 	else \
-		echo "skip golangci-lint: not on PATH (go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest)"; \
+		echo "skip golangci-lint: not on PATH (go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0, the version CI uses)"; \
 	fi
 
 tidy:

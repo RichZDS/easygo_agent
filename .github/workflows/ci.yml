@@ -28,3 +28,5 @@ jobs:
       - run: npm ci --prefix services/agent-loop
       - run: make build vet test fmt
       - run: make test-e2e
+      # golangci-lint is not installed here yet; see make lint.
+      - run: node scripts/check-cli-versions.mjs

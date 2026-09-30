@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"easygo-agent/rpc/rpctest"
+	"easygo-agent/services/ai-gateway/meter"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -169,5 +170,26 @@ func TestCommandProcess(t *testing.T) {
 func TestMissingConfig(t *testing.T) {
 	if e := run(nil); e == nil {
 		t.Fatal("missing config accepted")
+	}
+}
+
+func TestMeterLogOnlyOnChange(t *testing.T) {
+	var lines []map[string]any
+	record := meterLog(func(v any) {
+		raw, _ := json.Marshal(v)
+		var line map[string]any
+		json.Unmarshal(raw, &line)
+		lines = append(lines, line)
+	})
+	for _, r := range []meter.FlushReport{{}, {Pending: 2}, {Pending: 2}, {Pending: 2, Error: "wallet transport unavailable"}, {Pending: 2, Error: "wallet transport unavailable"}, {}, {Expired: 3}, {}} {
+		record(r)
+	}
+	if len(lines) != 4 || lines[0]["pending"] != float64(2) || lines[1]["error"] != "wallet transport unavailable" || lines[2]["pending"] != float64(0) || lines[3]["expired"] != float64(3) {
+		t.Fatalf("logged %v", lines)
+	}
+	for _, line := range lines {
+		if _, ok := line["time"]; line["kind"] != "meter" || !ok || len(line) > 5 {
+			t.Fatalf("meter line %v", line)
+		}
 	}
 }

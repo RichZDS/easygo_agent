@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 )
 
 func main() {
@@ -47,6 +48,7 @@ func run(args []string) error {
 		}{"model", o})
 	}
 	if config.Meter != nil {
+		config.Meter.Observer = meterLog(log)
 		manager, e := meter.New(*config.Meter, config.TLS)
 		if e != nil {
 			return e
@@ -62,4 +64,22 @@ func run(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return rpc.Serve(ctx, httpServer)
+}
+
+// meterLog records meter flush reports, which arrive every second, only when
+// the backlog or the error changes or claims expired. Reports carry counts and
+// error text, never request IDs.
+func meterLog(log func(any)) func(meter.FlushReport) {
+	var last meter.FlushReport
+	return func(r meter.FlushReport) {
+		if r.Expired == 0 && r.Pending == last.Pending && r.Error == last.Error {
+			return
+		}
+		last = r
+		log(struct {
+			Kind string    `json:"kind"`
+			Time time.Time `json:"time"`
+			meter.FlushReport
+		}{"meter", time.Now().UTC(), r})
+	}
 }

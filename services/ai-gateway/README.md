@@ -20,4 +20,11 @@ Compose 挂载：
 
 传入容器的供应商变量是 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`CUSTOM_API_KEY`。真正读哪一个，看配置里 `models.*.api_key_env`。这个目录没有数据卷。
 
+启用计费时，配置里的 `meter` 块有两个可选字段，控制本地计费库的清理：
+
+- `retention_seconds`：已结算的请求保留多久，默认 604800（7 天）。保留期内同一个 `request_id` 仍按重复请求拒绝；回执还没被钱包确认的请求不会被清。
+- `authorizing_timeout_seconds`：钱包授权没走完的请求过多久清掉，默认 3600（1 小时）。
+
+两个字段缺省或为 0 时用默认值，负数启动报错。回执积压数、刷新错误有变化或有记录被清掉时，stderr 会多一行 `{"kind":"meter",...}`，只含计数、错误文案和时间。
+
 共享的启动、证书和备份说明在 [`../README.md`](../README.md)。本机没有 Docker，这个镜像没有构建。

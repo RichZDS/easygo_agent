@@ -91,6 +91,7 @@ type DockerRunner struct {
 }
 
 var ownerPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$`)
+var imageIDPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 
 func cleanAbsolute(path string) bool {
 	return filepath.IsAbs(path) && filepath.Clean(path) == path && path != "/" && !strings.ContainsAny(path, ",\n\r\x00")
@@ -518,7 +519,7 @@ func (r *DockerRunner) Initialize(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-	if !regexp.MustCompile(`^sha256:[a-f0-9]{64}$`).MatchString(image) {
+	if !imageIDPattern.MatchString(image) {
 		return errors.New("invalid runtime image ID")
 	}
 	r.cfg.Image = image

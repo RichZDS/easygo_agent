@@ -633,3 +633,54 @@ func TestMalformedProviderResponses(t *testing.T) {
 		requireCode(t, e, "invalid_response")
 	}
 }
+
+func TestCompleteResultAndStreamFlag(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprint(stream), func(t *testing.T) {
+			provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var o object
+				json.NewDecoder(r.Body).Decode(&o)
+				if o["stream"] != stream {
+					t.Errorf("stream=%v", o["stream"])
+				}
+				if stream {
+					sendEvents(w, streamFixture("responses"))
+				} else {
+					fmt.Fprint(w, responseFixture("responses"))
+				}
+			}))
+			defer provider.Close()
+			var observed atomic.Int32
+			g := newTestGateway(t, "responses", provider.URL, func(Observation) { observed.Add(1) })
+			seen := 0
+			var emit func(ai.Event) error
+			if stream {
+				emit = func(ev ai.Event) error { seen++; return nil }
+			}
+			out, e := g.Complete(context.Background(), canonicalRequest(), emit)
+			if e != nil {
+				t.Fatal(e)
+			}
+			if out.Model != "test" || len(out.Message.Content) != 2 || out.Usage.OutputTokens != 4 || !out.Cost.Known || observed.Load() != 1 {
+				t.Fatalf("out=%+v observed=%d", out, observed.Load())
+			}
+			if stream && seen == 0 {
+				t.Fatal("no delta")
+			}
+		})
+	}
+}
+func TestCompleteDoesNotReturnPartialFailure(t *testing.T) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"status":"incomplete","output":[{"type":"message","content":[{"type":"output_text","text":"private partial"}]}]}`)
+	}))
+	defer s.Close()
+	g := newTestGateway(t, "responses", s.URL, nil)
+	out, e := g.Complete(context.Background(), canonicalRequest(), nil)
+	if e == nil {
+		t.Fatal("incomplete response accepted")
+	}
+	if raw, _ := json.Marshal(out); strings.Contains(string(raw), "private partial") || strings.Contains(e.Error(), "private partial") {
+		t.Fatalf("partial output exposed: %s %v", raw, e)
+	}
+}

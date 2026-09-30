@@ -163,9 +163,15 @@ func TestRPCStreamTerminalAndCancellation(t *testing.T) {
 	}
 }
 func TestConfigRejectsBearerAndUnknown(t *testing.T) {
-	for _, raw := range []string{`{"bearer_token_env":"TOKEN"}`, `{"extra":1}`, `{"listen":":1","listen":":2"}`} {
+	for _, raw := range []string{`{"bearer_token_env":"TOKEN"}`, `{"extra":1}`, `{"listen":":1","listen":":2"}`, `{"models":{"x":{"api_key":"secret"}}}`, `{"bearer_token":"secret"}`, `{} {}`} {
 		if _, e := LoadConfig(strings.NewReader(raw)); e == nil {
 			t.Fatalf("accepted %s", raw)
 		}
+	}
+}
+func TestLoadConfigNamesUnknownField(t *testing.T) {
+	_, e := LoadConfig(strings.NewReader(`{"models":{},"extra_field":1}`))
+	if e == nil || !strings.Contains(e.Error(), `unknown field "extra_field"`) {
+		t.Fatalf("unknown field not named: %v", e)
 	}
 }

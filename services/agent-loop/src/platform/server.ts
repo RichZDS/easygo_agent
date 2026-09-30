@@ -17,6 +17,14 @@ export interface PlatformConfig {
   bootstrap_admin?: { email: string; password_env: string };
   trusted_proxies?: string[];
 }
+// Web console modules: index.html loads app.js, which imports the rest.
+const CONSOLE_SCRIPTS = [
+  'app.js',
+  'ui.js',
+  'api.js',
+  'pager.js',
+  ...['overview', 'chat', 'workshop', 'knowledge', 'wallet', 'admin'].map((view) => `views/${view}.js`),
+];
 const SESSION_MS = 7 * 24 * 60 * 60 * 1000;
 const digest = (s: string) => createHash('sha256').update(s).digest('hex');
 function email(value: unknown): string {
@@ -158,8 +166,8 @@ export async function createPlatform(
     closing = false;
   const assets = new Map([
     ['/', ['index.html', 'text/html; charset=utf-8']],
-    ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
     ['/style.css', ['style.css', 'text/css; charset=utf-8']],
+    ...CONSOLE_SCRIPTS.map((file): [string, string[]] => [`/${file}`, [file, 'text/javascript; charset=utf-8']]),
   ]);
   function json(res: ServerResponse, value: unknown, status = 200) {
     res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });

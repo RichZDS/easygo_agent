@@ -15,6 +15,8 @@ Requires Go 1.25 and Linux for the native subprocess runner. Build and edit the
 example's workflow model, executable path and environment allowlist for your
 installed CLI. No provider credentials or bearer values belong in the JSON file.
 
+> 已移除：下面的 `cmd/workshop` 独立进程、`-listen` 和 `WORKSHOP_BEARER_TOKEN` / `bearer_token_env` 接线已随 2026-09-30 的清理移除，现行工坊只提供 mTLS RPC（`cmd/server`），配置里再写 `bearer_token_env` 会被拒绝。
+
 ```bash
 go build -o /tmp/workshop ./cmd/workshop
 # Set WORKSHOP_BEARER_TOKEN through your operator secret environment.
@@ -35,6 +37,8 @@ can select only a configured workflow and supply input. They cannot select an
 executable, command options, timeout, policy or workspace path.
 
 ## HTTP contract
+
+> 已移除：本节的 `/v1/tasks`、`/v1/workflows` 路由和 bearer 鉴权已随 2026-09-30 的清理移除，现行工坊只提供 `workshop.*` mTLS RPC，见 [RPC 契约](../contracts/rpc-v1.md)。
 
 Task routes start at `/v1/tasks`; `GET /v1/workflows` discovers the configured
 catalog under the same bearer authentication. It returns a name-sorted array with

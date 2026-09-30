@@ -338,8 +338,16 @@ func (m *Manager) sweep() (int, error) {
 			if json.Unmarshal(v, &r) != nil {
 				return errors.New("invalid meter record")
 			}
-			limit := map[string]time.Duration{"recorded": m.retention, "authorizing": m.authorizingTimeout}[r.State]
-			if limit == 0 || r.Updated.IsZero() || now.Sub(r.Updated) < limit || r.State == "recorded" && tx.Bucket(pending).Get(k) != nil {
+			var limit time.Duration
+			switch r.State {
+			case "recorded":
+				limit = m.retention
+			case "authorizing":
+				limit = m.authorizingTimeout
+			default:
+				continue
+			}
+			if r.Updated.IsZero() || now.Sub(r.Updated) < limit || r.State == "recorded" && tx.Bucket(pending).Get(k) != nil {
 				continue
 			}
 			remove = append(remove, append([]byte(nil), k...))

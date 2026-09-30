@@ -254,7 +254,9 @@ func TestURLAndRedirectSafety(t *testing.T) {
 	}
 	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("followed login redirect") }))
 	defer destination.Close()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, destination.URL, 307) }))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, destination.URL, http.StatusTemporaryRedirect)
+	}))
 	defer server.Close()
 	c, _ := NewClient(server.URL)
 	if err := c.Login(context.Background(), "dummy", "dummy"); err == nil {

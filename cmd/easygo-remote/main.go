@@ -70,7 +70,12 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	defer c.Logout(ctx)
+	// Logging out is cleanup: report a failure without changing the exit status.
+	defer func() {
+		if err := c.Logout(ctx); err != nil {
+			fmt.Fprintln(os.Stderr, "logout:", err)
+		}
+	}()
 	print := func(v any) error { return json.NewEncoder(os.Stdout).Encode(v) }
 	if *list {
 		s, err := c.Sessions(ctx)

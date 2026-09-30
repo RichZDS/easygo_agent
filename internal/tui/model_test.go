@@ -64,7 +64,7 @@ func (q *fakeQueue) publish(id string, event clientapi.Event) (clientapi.RunReco
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	i := slices.IndexFunc(q.runs, func(run clientapi.RunRecord) bool { return run.ID == id })
-	if i < 0 || !(q.runs[i].Status == clientapi.RunQueued || q.runs[i].Status == clientapi.RunRunning) {
+	if i < 0 || (q.runs[i].Status != clientapi.RunQueued && q.runs[i].Status != clientapi.RunRunning) {
 		return clientapi.RunRecord{}, errors.New("run is not active")
 	}
 	event.RunID = id

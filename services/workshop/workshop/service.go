@@ -272,12 +272,18 @@ func validateWorkflow(w Workflow) error {
 	}
 	seen := map[string]bool{}
 	for _, path := range w.Artifacts {
-		if !filepath.IsLocal(path) || path == "." || filepath.Clean(path) != path || strings.Contains(path, "\\") || seen[path] {
+		if !validArtifactPath(path) || seen[path] {
 			return fmt.Errorf("%w: artifact must be a unique clean relative file path", ErrInvalid)
 		}
 		seen[path] = true
 	}
 	return nil
+}
+
+// validArtifactPath accepts a clean, workspace-relative file path. It is the
+// single predicate for workflow configuration, downloads and the descriptor walk.
+func validArtifactPath(path string) bool {
+	return filepath.IsLocal(path) && path != "." && filepath.Clean(path) == path && !strings.ContainsAny(path, "\\\x00")
 }
 
 func validInput(namespace, input string) bool {
@@ -747,17 +753,14 @@ func finish(task *Task, status Status, reason string) {
 	}
 }
 
+// collectArtifacts opens each path exactly as Artifact downloads do (no symlink
+// anywhere on the path), so a recorded artifact is always downloadable.
 func collectArtifacts(workspace string, paths []string) ([]Artifact, error) {
-	root, err := os.OpenRoot(workspace)
-	if err != nil {
-		return nil, err
-	}
-	defer root.Close()
 	artifacts := make([]Artifact, 0, len(paths))
 	for _, path := range paths {
-		f, err := openArtifact(root, path) // Root resolves symlinks without permitting escape.
+		f, err := openArtifactDownload(workspace, path)
 		if err != nil {
-			return nil, fmt.Errorf("artifact %q is missing or escapes workspace", path)
+			return nil, fmt.Errorf("artifact %q is missing, a symlink or escapes workspace", path)
 		}
 		info, err := f.Stat()
 		if err != nil || !info.Mode().IsRegular() {

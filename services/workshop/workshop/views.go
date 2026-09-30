@@ -8,7 +8,6 @@ import (
 	"io"
 	"path/filepath"
 	"sort"
-	"strings"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -227,7 +226,7 @@ type ArtifactDownload struct {
 // resume/start cannot mutate the workspace while a download is being assembled.
 // All filesystem/storage failures are translated into constant domain errors.
 func (s *Service) Artifact(namespace, id, runID, path string) (*ArtifactDownload, error) {
-	if namespace == "" || id == "" || !filepath.IsLocal(path) || path == "." || filepath.Clean(path) != path || strings.ContainsAny(path, "\\\x00") {
+	if namespace == "" || id == "" || !validArtifactPath(path) {
 		return nil, ErrInvalid
 	}
 	s.mu.Lock()

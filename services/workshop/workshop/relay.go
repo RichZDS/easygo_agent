@@ -60,7 +60,7 @@ func startModelRelayOn(ctx context.Context, cfg *ModelGateway, namespace string,
 		case slots <- struct{}{}:
 			defer func() { <-slots }()
 		default:
-			http.Error(w, "model relay capacity exceeded", 429)
+			http.Error(w, "model relay capacity exceeded", http.StatusTooManyRequests)
 			return
 		}
 		credential := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -68,7 +68,7 @@ func startModelRelayOn(ctx context.Context, cfg *ModelGateway, namespace string,
 			credential = r.Header.Get("X-Api-Key")
 		}
 		if subtle.ConstantTimeCompare([]byte(credential), []byte(token)) != 1 {
-			http.Error(w, "unauthorized", 401)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/crew/") {
@@ -79,7 +79,7 @@ func startModelRelayOn(ctx context.Context, cfg *ModelGateway, namespace string,
 			serveCrew(w, r, crew[0])
 			return
 		}
-		if r.Method != "POST" || r.URL.Path != path || (r.URL.RawQuery != "" && !(profile.Protocol == "anthropic" && r.URL.RawQuery == "beta=true")) {
+		if r.Method != "POST" || r.URL.Path != path || (r.URL.RawQuery != "" && (profile.Protocol != "anthropic" || r.URL.RawQuery != "beta=true")) {
 			http.Error(w, "unsupported model operation", 404)
 			return
 		}
@@ -99,9 +99,9 @@ func startModelRelayOn(ctx context.Context, cfg *ModelGateway, namespace string,
 		if e = client.Call(callCtx, "gateway.native", map[string]any{"namespace": namespace, "model": profile.GatewayModel, "protocol": profile.Protocol, "body": object}, &reply); e != nil {
 			var rejected *rpc.Error
 			if errors.As(e, &rejected) {
-				http.Error(w, "model gateway rejected request", 502)
+				http.Error(w, "model gateway rejected request", http.StatusBadGateway)
 			} else {
-				http.Error(w, "model gateway unavailable", 502)
+				http.Error(w, "model gateway unavailable", http.StatusBadGateway)
 			}
 			return
 		}
@@ -111,19 +111,24 @@ func startModelRelayOn(ctx context.Context, cfg *ModelGateway, namespace string,
 			Body        string `json:"body"`
 		}
 		if rpc.Decode(reply, &result) != nil {
-			http.Error(w, "model gateway rejected request", 502)
+			http.Error(w, "model gateway rejected request", http.StatusBadGateway)
 			return
 		}
 		decoded, decodeErr := base64.StdEncoding.DecodeString(result.Body)
 		if (result.ContentType != "application/json" && result.ContentType != "text/event-stream") || decodeErr != nil || len(decoded) > 8<<20 {
-			http.Error(w, "invalid model response", 502)
+			http.Error(w, "invalid model response", http.StatusBadGateway)
 			return
 		}
 		w.Header().Set("Content-Type", result.ContentType)
 		w.Header().Set("Cache-Control", "no-store")
-		w.Write(decoded)
+		_, _ = w.Write(decoded) // headers are sent; a vanished child has nothing left to tell
 	})
 	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 15 * time.Second, WriteTimeout: 150 * time.Second}
-	go server.Serve(listener)
+	go func() {
+		// stop's Close ends Serve with ErrServerClosed. Any other error leaves the
+		// child without a relay, so its model calls and the run fail on their own;
+		// stderr carries the controller's JSON log and must not get raw text.
+		_ = server.Serve(listener)
+	}()
 	return "http://" + listener.Addr().String() + "/v1", token, func() { server.Close(); client.Close() }, nil
 }

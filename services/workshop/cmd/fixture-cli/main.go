@@ -1,4 +1,8 @@
 // fixture-cli is an adversarial offline integration fixture, never a production runtime.
+//
+// Marker and proof files (ready, progress.json, isolation-proof.json, fill-*.json)
+// are read back by the Docker integration harness, which fails the run when one
+// is missing; their write errors are therefore ignored here on purpose.
 package main
 
 import (
@@ -53,7 +57,7 @@ func main() {
 		if err := child.Start(); err != nil {
 			os.Exit(3)
 		}
-		os.WriteFile("ready", []byte("child-running"), 0600)
+		_ = os.WriteFile("ready", []byte("child-running"), 0600)
 		time.Sleep(time.Hour)
 		return
 	}
@@ -61,7 +65,7 @@ func main() {
 		if req.DurationSeconds < 1 || req.DurationSeconds > 300 {
 			os.Exit(2)
 		}
-		os.WriteFile("ready", []byte("long-running"), 0600)
+		_ = os.WriteFile("ready", []byte("long-running"), 0600)
 		fmt.Println(`{"type":"thread.started","thread_id":"11111111-1111-4111-8111-111111111111"}`)
 		started := time.Now()
 		rounds := 0
@@ -72,7 +76,7 @@ func main() {
 				rounds++
 			}
 			data, _ := json.Marshal(map[string]any{"elapsed_ms": time.Since(started).Milliseconds(), "rounds": rounds})
-			os.WriteFile("progress.json", data, 0600)
+			_ = os.WriteFile("progress.json", data, 0600)
 			time.Sleep(time.Second)
 		}
 	}
@@ -115,17 +119,18 @@ func main() {
 		}
 	}
 	home := filepath.Join(os.Getenv("HOME"), "fixture-persisted")
-	if req.Mode == "readonly" {
+	switch req.Mode {
+	case "readonly":
 		checks["workspace_write_denied"] = os.WriteFile("forbidden-artifact.txt", []byte("no"), 0600) != nil
 		var workspaceFS syscall.Statfs_t
 		checks["workspace_readonly"] = syscall.Statfs("/workspace", &workspaceFS) == nil && workspaceFS.Flags&1 != 0
 		checks["home_writable"] = os.WriteFile(home, []byte("own-home"), 0600) == nil
-	} else if req.Mode == "resume" {
+	case "resume":
 		b, e := os.ReadFile(home)
 		checks["home_persisted"] = e == nil && string(b) == "own-home"
 		b, e = os.ReadFile("artifact.txt")
 		checks["artifact_persisted"] = e == nil && string(b) == "own-artifact"
-	} else {
+	default:
 		checks["home_written"] = os.WriteFile(home, []byte("own-home"), 0600) == nil
 		checks["artifact_written"] = os.WriteFile("artifact.txt", []byte("own-artifact"), 0600) == nil
 	}
@@ -137,7 +142,7 @@ func main() {
 	resp, err := http.DefaultClient.Do(post)
 	checks["model_relay"] = err == nil && resp.StatusCode == 200
 	if resp != nil {
-		io.Copy(io.Discard, resp.Body)
+		_, _ = io.Copy(io.Discard, resp.Body) // drain for Close; the status is already recorded
 		resp.Body.Close()
 	}
 	proof, _ := json.Marshal(map[string]any{"checks": checks, "limits": limits})
@@ -145,7 +150,7 @@ func main() {
 	if req.Mode == "readonly" {
 		proofPath = filepath.Join(os.Getenv("HOME"), "isolation-proof.json")
 	}
-	os.WriteFile(proofPath, proof, 0600)
+	_ = os.WriteFile(proofPath, proof, 0600)
 	for name, ok := range checks {
 		if !ok {
 			fmt.Fprintln(os.Stderr, "failed isolation check:", name)
@@ -168,14 +173,14 @@ func fill(req request) int {
 	if err := os.MkdirAll("fill", 0700); err != nil {
 		return 2
 	}
-	os.WriteFile("artifact.txt", []byte("must-not-publish-on-quota-failure"), 0600)
+	_ = os.WriteFile("artifact.txt", []byte("must-not-publish-on-quota-failure"), 0600)
 	started := time.Now()
 	var limit syscall.Rlimit
 	if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &limit); err != nil {
 		return 2
 	}
 	meta, _ := json.Marshal(map[string]any{"started_unix_nano": started.UnixNano(), "fsize_soft": limit.Cur, "fsize_hard": limit.Max})
-	os.WriteFile("fill-meta.json", meta, 0600)
+	_ = os.WriteFile("fill-meta.json", meta, 0600)
 	data := make([]byte, req.Chunk)
 	var writtenTotal int64
 	marked := false
@@ -183,7 +188,7 @@ func fill(req request) int {
 		if !marked && (writtenTotal >= int64(limit.Cur) || req.Bytes == 1 && writtenTotal >= 1000) {
 			marked = true
 			b, _ := json.Marshal(map[string]int64{"unix_nano": time.Now().UnixNano()})
-			os.WriteFile("fill-crossed.json", b, 0600)
+			_ = os.WriteFile("fill-crossed.json", b, 0600)
 		}
 	}
 	for i := 0; i < req.Files; i++ {

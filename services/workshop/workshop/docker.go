@@ -230,7 +230,7 @@ func NewDockerRunner(cfg Config) (*DockerRunner, error) {
 	}
 	binary, err = exec.LookPath(binary)
 	if err != nil {
-		return nil, errors.New("Docker executable unavailable")
+		return nil, errors.New("docker executable unavailable")
 	}
 	binary, err = filepath.Abs(binary)
 	if err != nil {
@@ -260,7 +260,7 @@ func (r *DockerRunner) output(ctx context.Context, args ...string) (string, erro
 		return "", errors.New("Docker operation failed: " + args[0])
 	}
 	if b.overflow {
-		return "", errors.New("Docker response exceeds limit")
+		return "", errors.New("docker response exceeds limit")
 	}
 	return strings.TrimSpace(b.buf.String()), nil
 }
@@ -588,15 +588,15 @@ func (r *DockerRunner) Run(ctx context.Context, in Invocation, emit func(Event) 
 	ready := r.initialized
 	r.mu.Unlock()
 	if !ready {
-		return result, errors.New("Docker runner requires successful initialization")
+		return result, errors.New("docker runner requires successful initialization")
 	}
 	if broken != nil {
-		return result, errors.New("Docker cleanup previously failed; operator recovery required")
+		return result, errors.New("docker cleanup previously failed; operator recovery required")
 	}
 	r.sweepPendingCleanup()
 	p := in.Workflow.RuntimeSpec
 	if p == nil || p.GatewayModel == "" || p.validate() != nil || p.Engine != in.Workflow.Engine || p.model() != in.Workflow.Model {
-		return result, errors.New("Docker requires a matching gateway runtime profile")
+		return result, errors.New("docker requires a matching gateway runtime profile")
 	}
 	args, err := engineArgs(in, codexContainerSandbox)
 	if err != nil {

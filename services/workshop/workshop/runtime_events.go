@@ -44,7 +44,7 @@ func (p *streamParser) parsePi(event nativeEvent) {
 		}
 	case "agent_settled":
 		if !p.piReady {
-			p.fail(errors.New("Pi settled without a successful final assistant message"))
+			p.fail(errors.New("pi settled without a successful final assistant message"))
 			return
 		}
 		if p.success {

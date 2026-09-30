@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm, readFile, stat } from 'node:fs/promises';
+import { mkdtemp, rm, readdir, readFile, stat } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -521,11 +521,16 @@ test('admin grants/usage/tariff API, strict JSON/body bounds, static CSP and rat
   assert.equal(html.status, 200);
   assert.match(html.text, /lang="zh-CN"/);
   assert.match(html.headers.get('content-security-policy'), /frame-ancestors 'none'/);
-  assert.equal((await call('/app.js')).status, 200);
   assert.equal((await call('/style.css')).status, 200);
   assert.equal((await call('/src/platform/server.ts')).status, 404);
-  const script = await readFile(new URL('../web/app.js', import.meta.url), 'utf8');
-  assert.doesNotMatch(script, /innerHTML|outerHTML|insertAdjacentHTML/);
+  // Every console module is served, and none of them writes HTML.
+  const web = new URL('../web/', import.meta.url);
+  const scripts = (await readdir(web, { recursive: true })).filter((file) => file.endsWith('.js'));
+  assert.ok(scripts.includes('app.js') && scripts.length > 1);
+  for (const file of scripts) {
+    assert.equal((await call(`/${file}`)).status, 200, file);
+    assert.doesNotMatch(await readFile(new URL(file, web), 'utf8'), /innerHTML|outerHTML|insertAdjacentHTML/, file);
+  }
   let last;
   for (let i = 0; i < 12; i++)
     last = await call('/api/login', { email: 'missing@example.test', password: 'incorrect-fixture' });

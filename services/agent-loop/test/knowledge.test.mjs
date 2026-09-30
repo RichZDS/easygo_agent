@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Knowledge, KINDS } from '../dist/knowledge/index.js';
+import { callMethod } from '../dist/methods.js';
 import { previewLegacy } from '../dist/knowledge/legacy.js';
 const messages = (s = 'I prefer concise answers') => [
   { role: 'user', content: [{ type: 'text', text: s }] },
@@ -34,7 +35,8 @@ function setup(t, generate = async () => response([entry()]), cfg = {}) {
   });
   return { k, root, database };
 }
-const rpc = (k, method, namespace = 'alice', p = {}) => k.dispatch('agent.' + method, { namespace, ...p });
+const rpc = (k, method, namespace = 'alice', p = {}) =>
+  callMethod({ knowledge: k }, 'agent.' + method, { namespace, ...p });
 function clearBackoff(database) {
   const db = new DatabaseSync(database);
   db.exec('UPDATE jobs SET next_at=0');

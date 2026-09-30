@@ -9,7 +9,8 @@ import { Loop } from './loop.js';
 import { Knowledge } from './knowledge/index.js';
 import { createPlatform } from './platform/server.js';
 import { closeOnce, listen, parseListen, readJsonBody, RPC_BODY_ERRORS } from './http.js';
-import { METHODS, type Config } from './types.js';
+import { callMethod } from './methods.js';
+import type { Config } from './types.js';
 import { fields, integer, namespace, object, rpcFailure, RpcError, string } from './validation.js';
 
 export function parseConfig(value: unknown): Config {
@@ -90,69 +91,7 @@ export async function startServer(input: Config) {
     ready = false;
   let platform: Awaited<ReturnType<typeof createPlatform>> | undefined;
   let knowledge: Knowledge | undefined;
-  function dispatch(method: string, value: unknown): unknown | Promise<unknown> {
-    if (method === 'platform.wallet.reserve' || method === 'platform.wallet.settle') {
-      if (!platform) throw new RpcError(-32601, 'platform_disabled');
-      return method.endsWith('.reserve') ? platform.wallet.reserve(value) : platform.wallet.settle(value);
-    }
-    if (method.startsWith('agent.memory.') || method.startsWith('agent.skills.')) {
-      if (!knowledge) throw new RpcError(-32601, 'knowledge_disabled');
-      return knowledge.dispatch(method, value);
-    }
-    if (method.startsWith('workshop.')) return loop.workshopCall(method, object(value));
-    const allowed: Record<string, string[]> = {
-      'agent.session.create': [],
-      'agent.session.list': ['offset', 'limit'],
-      'agent.session.history': ['session_id', 'after', 'before', 'limit'],
-      'agent.workshop.catalog': [],
-      'agent.run.start': ['session_id', 'input', 'idempotency_key', 'workshop_runtime'],
-      'agent.run.get': ['run_id'],
-      'agent.run.cancel': ['run_id'],
-      'agent.run.events': ['run_id', 'after', 'limit'],
-    };
-    if (!METHODS.includes(method)) throw new RpcError(-32601, 'method_not_found');
-    const p = fields(value, ['namespace', ...allowed[method]!]);
-    const ns = namespace(p.namespace);
-    switch (method) {
-      case 'agent.workshop.catalog':
-        return loop.workshopCatalog(ns);
-      case 'agent.session.create':
-        return store.createSession(ns);
-      case 'agent.session.list':
-        return store.listSessions(ns, integer(p.offset, 0, 2147483647), integer(p.limit, 20, 100));
-      case 'agent.session.history':
-        return store.history(
-          ns,
-          string(p.session_id),
-          integer(p.after, 0, Number.MAX_SAFE_INTEGER),
-          integer(p.limit, 100, 1000),
-          p.before === undefined ? undefined : integer(p.before, 0, Number.MAX_SAFE_INTEGER, 1)
-        );
-      case 'agent.run.start': {
-        loop.assertAvailable();
-        const run = store.start(
-          ns,
-          string(p.session_id),
-          string(p.input, 32768),
-          string(p.idempotency_key, 256),
-          p.workshop_runtime === undefined ? '' : string(p.workshop_runtime)
-        );
-        loop.kick();
-        return run;
-      }
-      case 'agent.run.get':
-        return store.get(ns, string(p.run_id));
-      case 'agent.run.cancel':
-        return loop.cancel(ns, string(p.run_id));
-      case 'agent.run.events':
-        return store.events(
-          ns,
-          string(p.run_id),
-          integer(p.after, 0, Number.MAX_SAFE_INTEGER),
-          integer(p.limit, 100, 1000)
-        );
-    }
-  }
+  const dispatch = (method: string, value: unknown) => callMethod({ store, loop, knowledge, platform }, method, value);
   async function handle(req: IncomingMessage, res: ServerResponse) {
     let id: string | null = null;
     let identity: string | undefined;

@@ -112,23 +112,10 @@ export class Loop {
       )
     );
   }
-  async workshopCall(method: string, params: Record<string, unknown>): Promise<unknown> {
+  // Sends a workshop RPC on the loop's own connection. Which methods may be forwarded is
+  // decided by the method registry (methods.ts), not here.
+  async forwardWorkshop(method: string, params: Record<string, unknown>): Promise<unknown> {
     this.assertAvailable();
-    if (
-      ![
-        'workshop.submit',
-        'workshop.get',
-        'workshop.list',
-        'workshop.cancel',
-        'workshop.resume',
-        'workshop.result',
-        'workshop.events',
-        'workshop.artifact',
-        'workshop.message',
-        'workshop.evidence',
-      ].includes(method)
-    )
-      throw new RpcError(-32601, 'method_not_found');
     return this.workshop.call(method, params, this.background.signal);
   }
   kick() {

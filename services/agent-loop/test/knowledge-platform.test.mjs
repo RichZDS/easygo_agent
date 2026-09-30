@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createServer } from 'node:net';
 import { spawn } from 'node:child_process';
 import { Knowledge } from '../dist/knowledge/index.js';
+import { callMethod } from '../dist/methods.js';
 
 // This also runs after foreman integrates platform + Store outbox. In an isolated
 // worker checkout, an explicit compiled snapshot can be supplied for the proof.
@@ -63,7 +64,8 @@ test(
       },
       {
         rpc: async (method, p) => {
-          if (method.startsWith('agent.memory.') || method.startsWith('agent.skills.')) return k.dispatch(method, p);
+          if (method.startsWith('agent.memory.') || method.startsWith('agent.skills.'))
+            return callMethod({ knowledge: k }, method, p);
           switch (method) {
             case 'agent.session.create':
               return store.createSession(p.namespace);
